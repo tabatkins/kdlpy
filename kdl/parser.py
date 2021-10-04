@@ -25,10 +25,12 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
 def parseNode(s: Stream, start: int) -> Result:
     i = start
     # tag?
-    tag, i = parseTag(s, i, throw=True)
+    tag, i = parseTag(s, i)
 
     # name
-    name, i = parseIdent(s, i, throw=True)
+    name, i = parseIdent(s, i)
+    if name is None:
+        raise ParseError(s, i, "Expected a node name, got junk.")
 
     # props and values
     entities = []
@@ -47,62 +49,52 @@ def parseNode(s: Stream, start: int) -> Result:
         break
 
     _, i = parseNodespace(s, i)
-    _, i = parseNodeTerminator(s, i, throw=True)
+    _, i = parseNodeTerminator(s, i)
 
     return Result(types.Node(name=name, tag=tag, entities=entities), i)
 
 
-def parseTag(s: Stream, start: int, throw: bool = False) -> Result:
+def parseTag(s: Stream, start: int) -> Result:
     if s[start] != "(":
         return Result.fail(start)
-    tag, end = parseIdent(s, start + 1, throw=throw)
+    tag, end = parseIdent(s, start + 1)
     if tag is None:
         return Result.fail(start)
     if s[end] != ")":
-        if throw:
-            raise ParseError(s, end, f"Junk between tag ident and closing paren.")
-        return Result.fail(start)
+        raise ParseError(s, end, f"Junk between tag ident and closing paren.")
     return Result(tag, end + 1)
 
 
-def parseIdent(s: Stream, start: int, throw: bool = False) -> Result:
+def parseIdent(s: Stream, start: int) -> Result:
     # Look for string-type idents as well
-    return parseBareIdent(s, start, throw=throw)
+    return parseBareIdent(s, start)
 
 
-def parseBareIdent(s: Stream, start: int, throw: bool = False) -> Result:
-    res, i = parseIdentStart(s, start, throw=throw)
+def parseBareIdent(s: Stream, start: int) -> Result:
+    res, i = parseIdentStart(s, start)
     if not res:
         return Result.fail(start)
     while isIdentChar(s[i]):
         i += 1
     ident = s[start:i]
     if isKeyword(ident):
-        if throw:
-            raise ParseError(
-                s,
-                start,
-                f"Expected a keyword, but got a reserved identifier '{ident}'.",
-            )
-        return Result.fail(start)
+        raise ParseError(
+            s,
+            start,
+            f"Expected a keyword, but got a reserved identifier '{ident}'.",
+        )
     return Result(ident, i)
 
 
-def parseIdentStart(s: Stream, start: int, throw: bool = False) -> Result:
+def parseIdentStart(s: Stream, start: int) -> Result:
     if s[start] in "0123456789" or (s[start] in "+-" and s[start + 1] in "0123456789"):
-        if throw:
-            raise ParseError(s, start, f"Idents must not be confusable with numbers.")
         return Result.fail(start)
     if not isIdentChar(s[start]):
-        if throw:
-            raise ParseError(
-                s, start, f"Idents must start with an identifier character."
-            )
         return Result.fail(start)
     return Result(s[start], start + 1)
 
 
-def parseNodeTerminator(s: Stream, start: int, throw: bool = False) -> Result:
+def parseNodeTerminator(s: Stream, start: int) -> Result:
     res = parseNewline(s, start)
     if res.valid:
         return res
@@ -110,9 +102,7 @@ def parseNodeTerminator(s: Stream, start: int, throw: bool = False) -> Result:
         return Result(";", start + 1)
     if start >= len(s):
         return Result(True, start)
-    if throw:
-        raise ParseError(s, start, f"Junk after node, before terminator.")
-    return Result.fail(start)
+    raise ParseError(s, start, f"Junk after node, before terminator.")
 
 
 def parseProperty(s: Stream, start: int) -> Result:
@@ -133,29 +123,27 @@ def parseValue(s: Stream, start: int) -> Result:
     return Result.fail(start)
 
 
-def parseNumber(s: Stream, start: int, throw: bool = False) -> Result:
+def parseNumber(s: Stream, start: int) -> Result:
     if not isNumberStart(s, start):
         return Result.fail(start)
-    res = parseBinaryNumber(s, start, throw=throw)
+    res = parseBinaryNumber(s, start)
     if res.valid:
         return res
-    res = parseOctalNumber(s, start, throw=throw)
+    res = parseOctalNumber(s, start)
     if res.valid:
         return res
-    res = parseHexNumber(s, start, throw=throw)
+    res = parseHexNumber(s, start)
     if res.valid:
         return res
-    res = parseDecimalNumber(s, start, throw=throw)
+    res = parseDecimalNumber(s, start)
     if res.valid:
         return res
-    if throw:
-        raise ParseError(
-            s, start, f"Expected a number, but got junk after the initial digit."
-        )
-    return Result.fail(start)
+    raise ParseError(
+        s, start, f"Expected a number, but got junk after the initial digit."
+    )
 
 
-def parseBinaryNumber(s: Stream, start: int, throw: bool = False):
+def parseBinaryNumber(s: Stream, start: int):
     i = start
 
     # optional sign
@@ -171,9 +159,7 @@ def parseBinaryNumber(s: Stream, start: int, throw: bool = False):
 
     # initial digit
     if not isBinaryDigit(s[i]):
-        if throw:
-            raise ParseError(s, i, f"Expected binary digit after 0b, got junk.")
-        return Result.fail(start)
+        raise ParseError(s, i, f"Expected binary digit after 0b, got junk.")
 
     # following digits/underscores
     end = i + 1
@@ -183,7 +169,7 @@ def parseBinaryNumber(s: Stream, start: int, throw: bool = False):
     return Result(types.Binary(value), end)
 
 
-def parseOctalNumber(s: Stream, start: int, throw: bool = False):
+def parseOctalNumber(s: Stream, start: int):
     i = start
 
     # optional sign
@@ -199,9 +185,7 @@ def parseOctalNumber(s: Stream, start: int, throw: bool = False):
 
     # initial digit
     if not isOctalDigit(s[i]):
-        if throw:
-            raise ParseError(s, i, f"Expected octal digit after 0o, got junk.")
-        return Result.fail(start)
+        raise ParseError(s, i, f"Expected octal digit after 0o, got junk.")
 
     # following digits/underscores
     end = i + 1
@@ -211,7 +195,7 @@ def parseOctalNumber(s: Stream, start: int, throw: bool = False):
     return Result(types.Octal(value), end)
 
 
-def parseHexNumber(s: Stream, start: int, throw: bool = False):
+def parseHexNumber(s: Stream, start: int):
     i = start
 
     # optional sign
@@ -227,9 +211,7 @@ def parseHexNumber(s: Stream, start: int, throw: bool = False):
 
     # initial digit
     if not isHexDigit(s[i]):
-        if throw:
-            raise ParseError(s, i, f"Expected hex digit after 0x, got junk.")
-        return Result.fail(start)
+        raise ParseError(s, i, f"Expected hex digit after 0x, got junk.")
 
     # following digits/underscores
     end = i + 1
@@ -239,7 +221,7 @@ def parseHexNumber(s: Stream, start: int, throw: bool = False):
     return Result(types.Hex(value), end)
 
 
-def parseDecimalNumber(s: Stream, start: int, throw) -> Result:
+def parseDecimalNumber(s: Stream, start: int) -> Result:
     return Result.fail(start)
 
 
@@ -255,7 +237,7 @@ def isNumberStart(s: Stream, start: int) -> bool:
     return False
 
 
-def parseNewline(s: Stream, start: int, throw: bool = False) -> Result:
+def parseNewline(s: Stream, start: int) -> Result:
     if s[start] == "\x0d" and s[start + 1] == "\x0a":
         return Result("\n", start + 2)
     if isNewlineChar(s[start]):
@@ -263,10 +245,8 @@ def parseNewline(s: Stream, start: int, throw: bool = False) -> Result:
     return Result.fail(start)
 
 
-def parseLinespace(s: Stream, start: int, throw: bool = False) -> Result:
+def parseLinespace(s: Stream, start: int) -> Result:
     if not isLinespaceChar(s[start]):
-        if throw:
-            raise ParseError(s, start, "Expected WS or linebreak.")
         return Result.fail(start)
     end = start + 1
     while isLinespaceChar(s[end]):
@@ -274,14 +254,12 @@ def parseLinespace(s: Stream, start: int, throw: bool = False) -> Result:
     return Result(s[start:end], end)
 
 
-def parseNodespace(s: Stream, start: int, throw: bool = False) -> Result:
-    return parseWhitespace(s, start, throw=throw)
+def parseNodespace(s: Stream, start: int) -> Result:
+    return parseWhitespace(s, start)
 
 
-def parseWhitespace(s: Stream, start: int, throw: bool = False) -> Result:
+def parseWhitespace(s: Stream, start: int) -> Result:
     if not isWSChar(s[start]):
-        if throw:
-            raise ParseError(s, start, "Expected WS.")
         return Result.fail(start)
     end = start + 1
     while isWSChar(s[end]):
