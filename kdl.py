@@ -10,13 +10,13 @@ def main():
     cli.add_argument(
         "infile",
         nargs="?",
-        type=argparse.FileType("r", encoding="uft-8"),
+        type=argparse.FileType("r", encoding="utf-8"),
         default=sys.stdin,
     )
     cli.add_argument(
         "outfile",
         nargs="?",
-        type=argparse.FileType("w", encoding="uft-8"),
+        type=argparse.FileType("w", encoding="utf-8"),
         default=sys.stdout,
     )
     options = cli.parse_args()
