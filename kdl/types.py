@@ -1,41 +1,44 @@
 from __future__ import annotations
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, NamedTuple, Union
+from dataclasses import dataclass
+import dataclasses
 
 
+@dataclass
 class Document:
-    def __init__(self, nodes: Optional[list[Node]] = None):
-        if nodes is None:
-            nodes = []
-        self.nodes = nodes
+    children: list[Node] = dataclasses.field(default_factory=list)
 
     def print(self):
         s = ""
-        for node in self.nodes:
+        for node in self.children:
             s += node.print()
         return s
 
 
+@dataclass
 class Node:
-    def __init__(
-        self, name: str, tag: str = None, args=None, props=None, children=None
-    ):
-        self.name = name
-        self.tag = tag
-        self.args = args if args is not None else []
-        self.props = props if props is not None else OrderedDict()
-        self.children = children if children is not None else []
+    name: str
+    tag: Optional[str] = None
+    entities: list[Entity] = dataclasses.field(default_factory=list)
+    children: list[Node] = dataclasses.field(default_factory=list)
 
     def print(self, indent=0):
         s = "    " * indent
         if self.tag:
-            s += f"({self.tag}){self.name}"
-        else:
-            s += self.name
-        for arg in self.args:
-            s += f" {arg.print()}"
-        for key, val in self.props.items():
-            s += f" {key}={val.print()}"
+            s += f"({self.tag})"
+        s += self.name
+        for key, tag, value in self.entities:
+            s += " "
+            if key is None:
+                if tag is not None:
+                    s += f"({tag})"
+                s += f"{value.print()}"
+            else:
+                s += key + "="
+                if tag is not None:
+                    s += f"({tag})"
+                s += f"{value.print()}"
         if self.children:
             s += " {\n"
             for child in self.children:
@@ -46,12 +49,40 @@ class Node:
         return s
 
 
-class Number:
-    def __init__(self, value, tag=None):
-        self.value = value
-        self.tag = tag
+class Entity(NamedTuple):
+    key: Optional[str]
+    tag: Optional[str]
+    value: Union[Binary, Octal, Decimal, Hex]
+
+
+@dataclass
+class Binary:
+    value: int
 
     def print(self):
-        s = f"({self.tag})" if self.tag else ""
-        s += str(self.value)
+        return str(self.value)
+
+
+@dataclass
+class Octal:
+    value: int
+
+    def print(self):
+        return str(self.value)
+
+
+@dataclass
+class Decimal:
+    value: Union[int, float]
+
+    def print(self):
+        return str(self.value)
+
+
+@dataclass
+class Hex:
+    value: int
+
+    def print(self):
+        return str(self.value)
         return s

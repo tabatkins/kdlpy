@@ -18,7 +18,7 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
         if i >= len(s):
             return doc
         node, i = parseNode(s, i)
-        doc.nodes.append(node)
+        doc.children.append(node)
         _, i = parseLinespace(s, i)
 
 
@@ -30,10 +30,26 @@ def parseNode(s: Stream, start: int) -> Result:
     # name
     name, i = parseIdent(s, i, throw=True)
 
+    # props and values
+    entities = []
+    while True:
+        space, i = parseNodespace(s, i)
+        if space is None:
+            break
+        prop, i = parseProperty(s, i)
+        if prop:
+            entities.append(prop)
+            continue
+        val, i = parseValue(s, i)
+        if val:
+            entities.append(val)
+            continue
+        break
+
     _, i = parseNodespace(s, i)
     _, i = parseNodeTerminator(s, i, throw=True)
 
-    return Result(types.Node(name=name, tag=tag), i)
+    return Result(types.Node(name=name, tag=tag, entities=entities), i)
 
 
 def parseTag(s: Stream, start: int, throw: bool = False) -> Result:
@@ -50,6 +66,11 @@ def parseTag(s: Stream, start: int, throw: bool = False) -> Result:
 
 
 def parseIdent(s: Stream, start: int, throw: bool = False) -> Result:
+    # Look for string-type idents as well
+    return parseBareIdent(s, start, throw=throw)
+
+
+def parseBareIdent(s: Stream, start: int, throw: bool = False) -> Result:
     res, i = parseIdentStart(s, start, throw=throw)
     if not res:
         return Result.fail(start)
@@ -92,6 +113,146 @@ def parseNodeTerminator(s: Stream, start: int, throw: bool = False) -> Result:
     if throw:
         raise ParseError(s, start, f"Junk after node, before terminator.")
     return Result.fail(start)
+
+
+def parseProperty(s: Stream, start: int) -> Result:
+    return Result.fail(start)
+
+
+def parseValue(s: Stream, start: int) -> Result:
+    tag, i = parseTag(s, start)
+
+    num, i = parseNumber(s, i)
+    if num is not None:
+        return Result(types.Entity(None, tag, num), i)
+
+    # Failed to find a value
+    # But if I found a tag, something's up
+    if tag:
+        raise ParseError(s, start, "Found a tag, but no value following it.")
+    return Result.fail(start)
+
+
+def parseNumber(s: Stream, start: int, throw: bool = False) -> Result:
+    if not isNumberStart(s, start):
+        return Result.fail(start)
+    res = parseBinaryNumber(s, start, throw=throw)
+    if res.valid:
+        return res
+    res = parseOctalNumber(s, start, throw=throw)
+    if res.valid:
+        return res
+    res = parseHexNumber(s, start, throw=throw)
+    if res.valid:
+        return res
+    res = parseDecimalNumber(s, start, throw=throw)
+    if res.valid:
+        return res
+    if throw:
+        raise ParseError(
+            s, start, f"Expected a number, but got junk after the initial digit."
+        )
+    return Result.fail(start)
+
+
+def parseBinaryNumber(s: Stream, start: int, throw: bool = False):
+    i = start
+
+    # optional sign
+    sign = "+"
+    if s[i] in "+-":
+        sign = s[i]
+        i += 1
+
+    # prefix
+    if not (s[i] == "0" and s[i + 1] == "b"):
+        return Result.fail(start)
+    i += 2
+
+    # initial digit
+    if not isBinaryDigit(s[i]):
+        if throw:
+            raise ParseError(s, i, f"Expected binary digit after 0b, got junk.")
+        return Result.fail(start)
+
+    # following digits/underscores
+    end = i + 1
+    while isBinaryDigit(s[end]) or s[end] == "_":
+        end += 1
+    value = int(s[i:end].replace("_", ""), 2)
+    return Result(types.Binary(value), end)
+
+
+def parseOctalNumber(s: Stream, start: int, throw: bool = False):
+    i = start
+
+    # optional sign
+    sign = "+"
+    if s[i] in "+-":
+        sign = s[i]
+        i += 1
+
+    # prefix
+    if not (s[i] == "0" and s[i + 1] == "o"):
+        return Result.fail(start)
+    i += 2
+
+    # initial digit
+    if not isOctalDigit(s[i]):
+        if throw:
+            raise ParseError(s, i, f"Expected octal digit after 0o, got junk.")
+        return Result.fail(start)
+
+    # following digits/underscores
+    end = i + 1
+    while isOctalDigit(s[end]) or s[end] == "_":
+        end += 1
+    value = int(s[i:end].replace("_", ""), 8)
+    return Result(types.Octal(value), end)
+
+
+def parseHexNumber(s: Stream, start: int, throw: bool = False):
+    i = start
+
+    # optional sign
+    sign = "+"
+    if s[i] in "+-":
+        sign = s[i]
+        i += 1
+
+    # prefix
+    if not (s[i] == "0" and s[i + 1] == "x"):
+        return Result.fail(start)
+    i += 2
+
+    # initial digit
+    if not isHexDigit(s[i]):
+        if throw:
+            raise ParseError(s, i, f"Expected hex digit after 0x, got junk.")
+        return Result.fail(start)
+
+    # following digits/underscores
+    end = i + 1
+    while isHexDigit(s[end]) or s[end] == "_":
+        end += 1
+    value = int(s[i:end].replace("_", ""), 16)
+    return Result(types.Hex(value), end)
+
+
+def parseDecimalNumber(s: Stream, start: int, throw) -> Result:
+    return Result.fail(start)
+
+
+def isNumberStart(s: Stream, start: int) -> bool:
+    # all numbers start with an optional sign
+    # followed by a digit:
+    # either the first digit of the number,
+    # or the 0 of the prefix)
+    if isDigit(s[start]):
+        return True
+    if isSign(s[start]) and isDigit(s[start + 1]):
+        return True
+    return False
 
 
 def parseNewline(s: Stream, start: int, throw: bool = False) -> Result:
@@ -147,6 +308,26 @@ def isKeyword(ident: str) -> bool:
     return ident in ("null", "true", "false")
 
 
+def isSign(ch: str) -> bool:
+    return ch != "" and ch in "+-"
+
+
+def isDigit(ch: str) -> bool:
+    return ch != "" and ch in "0123456789"
+
+
+def isBinaryDigit(ch: str) -> bool:
+    return ch != "" and ch in "01"
+
+
+def isOctalDigit(ch: str) -> bool:
+    return ch != "" and ch in "01234567"
+
+
+def isHexDigit(ch: str) -> bool:
+    return ch != "" and ch in "0123456789abcdefABCDEF"
+
+
 def isWSChar(ch: str) -> bool:
     if not ch:
         return False
@@ -180,12 +361,10 @@ class Stream:
         return self._len
 
     def __getitem__(self, key):
-        if isinstance(key, int):
-            if key < 0 or key >= len(self):
-                return ""
-            else:
-                return self._chars[key]
-        return self._chars[key]
+        try:
+            return self._chars[key]
+        except IndexError:
+            return ""
 
 
 class Result(NamedTuple):
