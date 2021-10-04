@@ -29,8 +29,8 @@ def parseNode(s, start):
     # name
     name, i = parseIdent(s, i, throw=True)
 
-    _, i = parseLinespace(s, i)
-    _, i = parseNodeTerminator(s, i)
+    _, i = parseNodespace(s, i)
+    _, i = parseNodeTerminator(s, i, throw=True)
 
     return Result(types.Node(name=name, tag=tag), i)
 
@@ -68,7 +68,7 @@ def parseIdentStart(s, i, throw=False):
         return Result.fail(i)
     return Result(s[i], i+1)
 
-def parseNodeTerminator(s, start):
+def parseNodeTerminator(s, start, throw=False):
     res = parseNewline(s, start)
     if res.valid:
         return res
@@ -76,6 +76,8 @@ def parseNodeTerminator(s, start):
         return Result(";", start+1)
     if start >= len(s):
         return Result(True, start)
+    if throw:
+        raise ParseError(s,start,f"Junk after node, before terminator.")
     return Result.fail(start)
 
 def parseNewline(s, start):
@@ -85,13 +87,29 @@ def parseNewline(s, start):
         return Result("\n", start+1)
     return Result.fail(start)
 
-def parseLinespace(s, start):
+def parseLinespace(s, start, throw=False):
     if not isLinespaceChar(s[start]):
+        if throw:
+            raise ParseError(s,start,"Expected WS or linebreak.")
         return Result.fail(start)
     end = start + 1
     while isLinespaceChar(s[end]):
         end += 1
     return Result(s[start:end], end)
+
+def parseNodespace(s, start, throw=False):
+    return parseWhitespace(s,start,throw=throw)
+
+def parseWhitespace(s, start, throw=False):
+    if not isWSChar(s[start]):
+        if throw:
+            raise ParseError(s,start,"Expected WS.")
+        return Result.fail(start)
+    end = start+1
+    while isWSChar(s[end]):
+        end += 1
+    return Result(s[start:end], end)
+
 
 
 def isIdentChar(ch):
@@ -156,7 +174,7 @@ class Result(NamedTuple):
 
     @property
     def valid(self):
-        return bool(self.value)
+        return self.value is not None
 
     @staticmethod
     def fail(index):
