@@ -1,4 +1,18 @@
+from __future__ import annotations
 from collections import OrderedDict
+from typing import Optional
+
+class Document:
+    def __init__(self, nodes: Optional[list[Node]] = None):
+        if nodes is None:
+            nodes = []
+        self.nodes = nodes
+
+    def print(self):
+        s = ""
+        for node in self.nodes:
+            s += node.print()
+        return s
 
 
 class Node:

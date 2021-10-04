@@ -22,10 +22,9 @@ def main():
     options = cli.parse_args()
 
     with options.infile as fh:
-        nodes = parser.parse(fh.read())
+        doc = parser.parse(fh.read())
     with options.outfile as fh:
-        for node in nodes:
-            fh.write(node.print())
+        fh.write(doc.print())
 
 
 if __name__ == "__main__":

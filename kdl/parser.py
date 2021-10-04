@@ -1,3 +1,4 @@
+from __future__ import annotations
 import collections
 import typing
 from typing import NamedTuple, Any, Optional
@@ -10,14 +11,14 @@ def parse(input):
     return parseDocument(Stream(input), 0)
 
 
-def parseDocument(s: Stream, start: int = 0):
-    nodes = []
+def parseDocument(s: Stream, start: int = 0) -> types.Document:
+    doc = types.Document()
     _, i = parseLinespace(s, start)
     while True:
         if i >= len(s):
-            return nodes
+            return doc
         node, i = parseNode(s, i)
-        nodes.append(node)
+        doc.nodes.append(node)
         _, i = parseLinespace(s, i)
 
 
