@@ -29,6 +29,9 @@ def parseNode(s, start):
     if not name:
         raise errors.ParseError(s, i, "Couldn't find a valid node name.")
 
+    _, i = parseLinespace(s, i)
+    _, i = parseNodeTerminator(s, i)
+
     return Result(types.Node(name=name, tag=tag), i)
 
 
@@ -51,6 +54,22 @@ def parseIdent(s, start):
         end += 1
     return Result(s[start:end], end)
 
+def parseNodeTerminator(s, start):
+    res = parseNewline(s, start)
+    if res.valid:
+        return res
+    if s[start] == ";":
+        return Result(";", start+1)
+    if start >= len(s):
+        return Result(True, start)
+    return Result.fail(start)
+
+def parseNewline(s, start):
+    if s[start] == 0x0d and s[start+1] == 0x0a:
+        return Result("\n", start+2)
+    if isNewlineChar(s[start]):
+        return Result("\n", start+1)
+    return Result.fail(start)
 
 def parseLinespace(s, start):
     if not isLinespaceChar(s[start]):
