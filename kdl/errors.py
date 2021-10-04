@@ -13,7 +13,7 @@ class ParseError(Exception):
 
 def lineCol(s, index):
     """Determines the line and column from an index."""
-    line = 0
+    line = 1
     col = 0
     for i in range(index):
         if s[i] == "\n":
