@@ -147,10 +147,9 @@ def parseBinaryNumber(s: Stream, start: int):
     i = start
 
     # optional sign
-    sign = "+"
-    if s[i] in "+-":
-        sign = s[i]
-        i += 1
+    sign, i = parseSign(s, i)
+    if sign is None:
+        sign = 1
 
     # prefix
     if not (s[i] == "0" and s[i + 1] == "b"):
@@ -165,7 +164,7 @@ def parseBinaryNumber(s: Stream, start: int):
     end = i + 1
     while isBinaryDigit(s[end]) or s[end] == "_":
         end += 1
-    value = int(s[i:end].replace("_", ""), 2)
+    value = int(s[i:end].replace("_", ""), 2) * sign
     return Result(types.Binary(value), end)
 
 
@@ -173,10 +172,9 @@ def parseOctalNumber(s: Stream, start: int):
     i = start
 
     # optional sign
-    sign = "+"
-    if s[i] in "+-":
-        sign = s[i]
-        i += 1
+    sign, i = parseSign(s, i)
+    if sign is None:
+        sign = 1
 
     # prefix
     if not (s[i] == "0" and s[i + 1] == "o"):
@@ -191,7 +189,7 @@ def parseOctalNumber(s: Stream, start: int):
     end = i + 1
     while isOctalDigit(s[end]) or s[end] == "_":
         end += 1
-    value = int(s[i:end].replace("_", ""), 8)
+    value = int(s[i:end].replace("_", ""), 8) * sign
     return Result(types.Octal(value), end)
 
 
@@ -199,10 +197,9 @@ def parseHexNumber(s: Stream, start: int):
     i = start
 
     # optional sign
-    sign = "+"
-    if s[i] in "+-":
-        sign = s[i]
-        i += 1
+    sign, i = parseSign(s, i)
+    if sign is None:
+        sign = 1
 
     # prefix
     if not (s[i] == "0" and s[i + 1] == "x"):
@@ -217,7 +214,7 @@ def parseHexNumber(s: Stream, start: int):
     end = i + 1
     while isHexDigit(s[end]) or s[end] == "_":
         end += 1
-    value = int(s[i:end].replace("_", ""), 16)
+    value = int(s[i:end].replace("_", ""), 16) * sign
     return Result(types.Hex(value), end)
 
 
@@ -235,6 +232,13 @@ def isNumberStart(s: Stream, start: int) -> bool:
     if isSign(s[start]) and isDigit(s[start + 1]):
         return True
     return False
+
+def parseSign(s: Stream, start: int) -> Result:
+    if s[start] == "+":
+        return Result(1, start+1)
+    if s[start] == "-":
+        return Result(-1, start+1)
+    return Result.fail(start)
 
 
 def parseNewline(s: Stream, start: int) -> Result:
