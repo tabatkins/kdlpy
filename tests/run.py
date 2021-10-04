@@ -15,7 +15,7 @@ def main():
     inputs, goldens = findTestFiles()
     good = []
     bad = []
-    for filename in inputs:
+    for filename in sorted(inputs):
         inputPath = os.path.join(TEST_DIR, filename)
         print(f"Testing {os.path.basename(filename)}... ", end=None)
         try:
