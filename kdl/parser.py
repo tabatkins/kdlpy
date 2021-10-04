@@ -1,7 +1,9 @@
 import collections
+import typing
+from typing import NamedTuple, Any, Optional
 
 from . import types
-from . import errors
+from .errors import ParseError
 
 
 def parse(input):
@@ -22,12 +24,10 @@ def parseDocument(s, start):
 def parseNode(s, start):
     i = start
     # tag?
-    tag, i = parseTag(s, i)
+    tag, i = parseTag(s, i, throw=True)
 
     # name
-    name, i = parseIdent(s, i)
-    if not name:
-        raise errors.ParseError(s, i, "Couldn't find a valid node name.")
+    name, i = parseIdent(s, i, throw=True)
 
     _, i = parseLinespace(s, i)
     _, i = parseNodeTerminator(s, i)
@@ -35,24 +35,38 @@ def parseNode(s, start):
     return Result(types.Node(name=name, tag=tag), i)
 
 
-def parseTag(s, start):
+def parseTag(s, start, throw=False):
     if s[start] != "(":
         return Result.fail(start)
-    tag, end = parseIdent(s, start + 1)
+    tag, end = parseIdent(s, start + 1, throw=throw)
     if tag is None:
         return Result.fail(start)
     if s[end] != ")":
+        if throw:
+            raise ParseError(s,end,f"Junk between tag ident and closing paren.")
         return Result.fail(start)
     return Result(tag, end + 1)
 
 
-def parseIdent(s, start):
-    if not isIdentStart(s, start):
+def parseIdent(s, start, throw=False):
+    res, i = parseIdentStart(s, start, throw=throw)
+    if not res:
         return Result.fail(start)
-    end = start + 1
-    while isIdentChar(s[end]):
-        end += 1
-    return Result(s[start:end], end)
+    while isIdentChar(s[i]):
+        i += 1
+    return Result(s[start:i], i)
+
+
+def parseIdentStart(s, i, throw=False):
+    if s[i] in "0123456789" or (s[i] in "+-" and s[i+1] in "0123456789"):
+        if throw:
+            raise ParseError(s,i,f"Idents must not be confusable with numbers.")
+        return Result.fail(i)
+    if not isIdentChar(s[i]):
+        if throw:
+            raise ParseError(s,i,f"Idents must start with an identifier character.")
+        return Result.fail(i)
+    return Result(s[i], i+1)
 
 def parseNodeTerminator(s, start):
     res = parseNewline(s, start)
@@ -65,7 +79,7 @@ def parseNodeTerminator(s, start):
     return Result.fail(start)
 
 def parseNewline(s, start):
-    if s[start] == 0x0d and s[start+1] == 0x0a:
+    if s[start] == "\x0d" and s[start+1] == "\x0a":
         return Result("\n", start+2)
     if isNewlineChar(s[start]):
         return Result("\n", start+1)
@@ -78,13 +92,6 @@ def parseLinespace(s, start):
     while isLinespaceChar(s[end]):
         end += 1
     return Result(s[start:end], end)
-
-
-def isIdentStart(s, i):
-    if s[i] not in "+-0123456789" and isIdentChar(s[i]):
-        return True
-    if s[i] in "+-":
-        return s[i + 1] not in "0123456789" and isIdentChar(s[i + 1])
 
 
 def isIdentChar(ch):
@@ -143,8 +150,9 @@ class Stream:
         return self._chars[key]
 
 
-class Result(collections.namedtuple("Result", ["value", "index"])):
-    __slots__ = ()
+class Result(NamedTuple):
+    value: Any
+    index: int
 
     @property
     def valid(self):
@@ -153,3 +161,4 @@ class Result(collections.namedtuple("Result", ["value", "index"])):
     @staticmethod
     def fail(index):
         return Result(None, index)
+
