@@ -55,7 +55,16 @@ def parseIdent(s: Stream, start: int, throw: bool = False) -> Result:
         return Result.fail(start)
     while isIdentChar(s[i]):
         i += 1
-    return Result(s[start:i], i)
+    ident = s[start:i]
+    if isKeyword(ident):
+        if throw:
+            raise ParseError(
+                s,
+                start,
+                f"Expected a keyword, but got a reserved identifier '{ident}'.",
+            )
+        return Result.fail(start)
+    return Result(ident, i)
 
 
 def parseIdentStart(s: Stream, start: int, throw: bool = False) -> Result:
@@ -132,6 +141,10 @@ def isIdentChar(ch: str) -> bool:
     if cp > 0x10FFFF:
         return False
     return True
+
+
+def isKeyword(ident: str) -> bool:
+    return ident in ("null", "true", "false")
 
 
 def isWSChar(ch: str) -> bool:
