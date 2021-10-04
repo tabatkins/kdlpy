@@ -10,7 +10,7 @@ def parse(input):
     return parseDocument(Stream(input), 0)
 
 
-def parseDocument(s, start):
+def parseDocument(s: Stream, start: int = 0):
     nodes = []
     _, i = parseLinespace(s, start)
     while True:
@@ -21,7 +21,7 @@ def parseDocument(s, start):
         _, i = parseLinespace(s, i)
 
 
-def parseNode(s, start):
+def parseNode(s: Stream, start: int) -> Result:
     i = start
     # tag?
     tag, i = parseTag(s, i, throw=True)
@@ -35,7 +35,7 @@ def parseNode(s, start):
     return Result(types.Node(name=name, tag=tag), i)
 
 
-def parseTag(s, start, throw=False):
+def parseTag(s: Stream, start: int, throw: bool = False) -> Result:
     if s[start] != "(":
         return Result.fail(start)
     tag, end = parseIdent(s, start + 1, throw=throw)
@@ -43,12 +43,12 @@ def parseTag(s, start, throw=False):
         return Result.fail(start)
     if s[end] != ")":
         if throw:
-            raise ParseError(s,end,f"Junk between tag ident and closing paren.")
+            raise ParseError(s, end, f"Junk between tag ident and closing paren.")
         return Result.fail(start)
     return Result(tag, end + 1)
 
 
-def parseIdent(s, start, throw=False):
+def parseIdent(s: Stream, start: int, throw: bool = False) -> Result:
     res, i = parseIdentStart(s, start, throw=throw)
     if not res:
         return Result.fail(start)
@@ -57,62 +57,66 @@ def parseIdent(s, start, throw=False):
     return Result(s[start:i], i)
 
 
-def parseIdentStart(s, i, throw=False):
-    if s[i] in "0123456789" or (s[i] in "+-" and s[i+1] in "0123456789"):
+def parseIdentStart(s: Stream, start: int, throw: bool = False) -> Result:
+    if s[start] in "0123456789" or (s[start] in "+-" and s[start + 1] in "0123456789"):
         if throw:
-            raise ParseError(s,i,f"Idents must not be confusable with numbers.")
-        return Result.fail(i)
-    if not isIdentChar(s[i]):
+            raise ParseError(s, start, f"Idents must not be confusable with numbers.")
+        return Result.fail(start)
+    if not isIdentChar(s[start]):
         if throw:
-            raise ParseError(s,i,f"Idents must start with an identifier character.")
-        return Result.fail(i)
-    return Result(s[i], i+1)
+            raise ParseError(s, start, f"Idents must start with an identifier character.")
+        return Result.fail(start)
+    return Result(s[start], start + 1)
 
-def parseNodeTerminator(s, start, throw=False):
+
+def parseNodeTerminator(s: Stream, start: int, throw: bool = False) -> Result:
     res = parseNewline(s, start)
     if res.valid:
         return res
     if s[start] == ";":
-        return Result(";", start+1)
+        return Result(";", start + 1)
     if start >= len(s):
         return Result(True, start)
     if throw:
-        raise ParseError(s,start,f"Junk after node, before terminator.")
+        raise ParseError(s, start, f"Junk after node, before terminator.")
     return Result.fail(start)
 
-def parseNewline(s, start):
-    if s[start] == "\x0d" and s[start+1] == "\x0a":
-        return Result("\n", start+2)
+
+def parseNewline(s: Stream, start: int, throw: bool = False) -> Result:
+    if s[start] == "\x0d" and s[start + 1] == "\x0a":
+        return Result("\n", start + 2)
     if isNewlineChar(s[start]):
-        return Result("\n", start+1)
+        return Result("\n", start + 1)
     return Result.fail(start)
 
-def parseLinespace(s, start, throw=False):
+
+def parseLinespace(s: Stream, start: int, throw: bool = False) -> Result:
     if not isLinespaceChar(s[start]):
         if throw:
-            raise ParseError(s,start,"Expected WS or linebreak.")
+            raise ParseError(s, start, "Expected WS or linebreak.")
         return Result.fail(start)
     end = start + 1
     while isLinespaceChar(s[end]):
         end += 1
     return Result(s[start:end], end)
 
-def parseNodespace(s, start, throw=False):
-    return parseWhitespace(s,start,throw=throw)
 
-def parseWhitespace(s, start, throw=False):
+def parseNodespace(s: Stream, start: int, throw: bool = False) -> Result:
+    return parseWhitespace(s, start, throw=throw)
+
+
+def parseWhitespace(s: Stream, start: int, throw: bool = False) -> Result:
     if not isWSChar(s[start]):
         if throw:
-            raise ParseError(s,start,"Expected WS.")
+            raise ParseError(s, start, "Expected WS.")
         return Result.fail(start)
-    end = start+1
+    end = start + 1
     while isWSChar(s[end]):
         end += 1
     return Result(s[start:end], end)
 
 
-
-def isIdentChar(ch):
+def isIdentChar(ch: str) -> bool:
     if not ch:
         return False
     if ch in r'''\/(){}<>;[]=,"''':
@@ -127,7 +131,7 @@ def isIdentChar(ch):
     return True
 
 
-def isWSChar(ch):
+def isWSChar(ch: str) -> bool:
     if not ch:
         return False
     cp = ord(ch)
@@ -138,21 +142,21 @@ def isWSChar(ch):
     return False
 
 
-def isNewlineChar(ch):
+def isNewlineChar(ch: str) -> bool:
     if not ch:
         return False
     cp = ord(ch)
     return cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029)
 
 
-def isLinespaceChar(ch):
+def isLinespaceChar(ch: str) -> bool:
     if not ch:
         return False
     return isWSChar(ch) or isNewlineChar(ch)
 
 
 class Stream:
-    def __init__(self, chars):
+    def __init__(self, chars: str):
         self._chars = chars
         self._len = len(chars)
 
@@ -170,13 +174,12 @@ class Stream:
 
 class Result(NamedTuple):
     value: Any
-    index: int
+    end: int
 
     @property
-    def valid(self):
+    def valid(self) -> bool:
         return self.value is not None
 
     @staticmethod
-    def fail(index):
+    def fail(index: int) -> Result:
         return Result(None, index)
-

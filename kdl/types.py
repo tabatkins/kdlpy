@@ -2,7 +2,7 @@ from collections import OrderedDict
 
 
 class Node:
-    def __init__(self, name, tag=None, args=None, props=None, children=None):
+    def __init__(self, name: str, tag: str =None, args=None, props=None, children=None):
         self.name = name
         self.tag = tag
         self.args = args if args is not None else []
