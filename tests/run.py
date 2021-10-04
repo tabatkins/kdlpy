@@ -20,7 +20,7 @@ def main():
         print(f"Testing {os.path.basename(filename)}... ", end=None)
         try:
             with open(inputPath, "r", encoding="utf-8") as fh:
-                nodes = kdl.parse(fh.read())
+                output = kdl.parse(fh.read()).print()
         except kdl.errors.ParseError as e:
             if filename not in goldens:
                 # Success, parse failure was intended
@@ -41,7 +41,6 @@ def main():
             print("================")
             continue
         # Successful parse!
-        output = "\n".join(node.print() for node in nodes)
         if filename not in goldens:
             # ...but it shoudln't have
             bad.append(filename)
@@ -68,7 +67,7 @@ def main():
     if not bad:
         print(f"Success, {len(good)}/{len(inputs)} tests passed.")
     else:
-        print(f"Failure, {len(bad)}/{len(inputs)} tests failed.")
+        print(f"Failure, {len(good)}/{len(inputs)} tests passed.")
         # for badFilename in bad:
         #    print(f"  * {badFilename}")
 
