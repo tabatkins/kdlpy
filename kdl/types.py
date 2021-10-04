@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Optional
 
+
 class Document:
     def __init__(self, nodes: Optional[list[Node]] = None):
         if nodes is None:
@@ -16,7 +17,9 @@ class Document:
 
 
 class Node:
-    def __init__(self, name: str, tag: str =None, args=None, props=None, children=None):
+    def __init__(
+        self, name: str, tag: str = None, args=None, props=None, children=None
+    ):
         self.name = name
         self.tag = tag
         self.args = args if args is not None else []

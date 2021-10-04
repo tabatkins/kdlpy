@@ -1,6 +1,7 @@
 from __future__ import annotations
 import typing
 
+
 class ParseError(Exception):
     def __init__(self, s, i: int, msg: str):
         line, col = lineCol(s, i)

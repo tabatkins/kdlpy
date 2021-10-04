@@ -65,7 +65,9 @@ def parseIdentStart(s: Stream, start: int, throw: bool = False) -> Result:
         return Result.fail(start)
     if not isIdentChar(s[start]):
         if throw:
-            raise ParseError(s, start, f"Idents must start with an identifier character.")
+            raise ParseError(
+                s, start, f"Idents must start with an identifier character."
+            )
         return Result.fail(start)
     return Result(s[start], start + 1)
 
