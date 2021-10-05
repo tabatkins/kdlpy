@@ -33,22 +33,19 @@ class Node:
 
     def print(self, indent: int = 0) -> str:
         s = "    " * indent
-        if self.tag:
-            s += f"({self.tag})"
-        if isBareIdent(self.name):
-            s += self.name
-        else:
-            s += f'"{escapedFromRaw(self.name)}"'
+        if self.tag is not None:
+            s += f"({printIdent(self.tag)})"
+        s += printIdent(self.name)
         for key, tag, value in self.entities:
             s += " "
             if key is None:
                 if tag is not None:
-                    s += f"({tag})"
+                    s += f"({printIdent(tag)})"
                 s += f"{value.print()}"
             else:
-                s += key + "="
+                s += printIdent(key) + "="
                 if tag is not None:
-                    s += f"({tag})"
+                    s += f"({printIdent(tag)})"
                 s += f"{value.print()}"
         if self.children:
             s += " {\n"
@@ -134,6 +131,12 @@ class EscapedString:
 
 def escapedFromRaw(chars: str) -> str:
     return chars.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def printIdent(chars):
+    if isBareIdent(chars):
+        return chars
+    return f'"{escapedFromRaw(chars)}"'
 
 
 def isBareIdent(chars: str) -> bool:

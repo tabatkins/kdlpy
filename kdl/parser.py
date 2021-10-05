@@ -30,13 +30,9 @@ def parseNode(s: Stream, start: int) -> Result:
     tag, i = parseTag(s, i)
 
     # name
-    string, i = parseString(s, i)
-    if string is not None:
-        name = string.value
-    else:
-        name, i = parseIdent(s, i)
-        if name is None:
-            raise ParseError(s, i, "Expected a node name.")
+    name, i = parseIdent(s, i)
+    if name is None:
+        raise ParseError(s, i, "Expected a node name.")
 
     # props and values
     entities = []
@@ -72,7 +68,9 @@ def parseTag(s: Stream, start: int) -> Result:
 
 
 def parseIdent(s: Stream, start: int) -> Result:
-    # Look for string-type idents as well
+    string, i = parseString(s, start)
+    if string is not None:
+        return Result(string.value, i)
     return parseBareIdent(s, start)
 
 
@@ -112,8 +110,8 @@ def parseProperty(s: Stream, start: int) -> Result:
     if key is None:
         return Result.fail(start)
     if s[i] != "=":
-        # Should be a parse failure, but that would require
-        # more checking to tell apart idents from raw-strings.
+        # property name might be a string,
+        # so this isn't point-of-no-return yet
         return Result.fail(start)
     entity, i = parseValue(s, i + 1)
     if entity is None:
@@ -324,52 +322,56 @@ def parseString(s: Stream, start: int) -> Result:
 
 
 def parseEscapedString(s: Stream, start: int) -> Result:
-    if s[start] != "\"":
+    if s[start] != '"':
         return Result.fail(start)
     i = start + 1
 
     rawChars = ""
     while True:
-        if s[i] not in ("\\", "\"", ""):
+        if s[i] not in ("\\", '"', ""):
             rawChars += s[i]
             i += 1
             continue
-        if s[i] == "\"":
+        if s[i] == '"':
             break
         if s[i] == "":
-            raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+            raise ParseError(
+                s, start, "Hit EOF while looking for the end of the string"
+            )
         ch, i = parseEscape(s, i)
         if ch is None:
             raise ParseError(s, i, "Invalid escape sequence in string")
         rawChars += ch
 
-    return Result(types.EscapedString(rawChars), i+1)
+    return Result(types.EscapedString(rawChars), i + 1)
 
 
 def parseEscape(s: Stream, start: int) -> Result:
     if s[start] != "\\":
         return Result.fail(start)
-    ch = s[start+1]
+    ch = s[start + 1]
     if ch == "n":
-        return Result("\n", start+2)
+        return Result("\n", start + 2)
     if ch == "r":
-        return Result("\r", start+2)
+        return Result("\r", start + 2)
     if ch == "t":
-        return Result("\t", start+2)
+        return Result("\t", start + 2)
     if ch == "\\":
-        return Result("\\", start+2)
+        return Result("\\", start + 2)
     if ch == "/":
-        return Result("/", start+2)
+        return Result("/", start + 2)
     if ch == '"':
-        return Result('"', start+2)
+        return Result('"', start + 2)
     if ch == "b":
-        return Result("\b", start+2)
+        return Result("\b", start + 2)
     if ch == "f":
-        return Result("\f", start+2)
+        return Result("\f", start + 2)
     if ch == "u":
-        if s[start+2] != "{":
-            raise ParseError(s, start, "Unicode escapes must surround their codepoint in {}")
-        i = start+3
+        if s[start + 2] != "{":
+            raise ParseError(
+                s, start, "Unicode escapes must surround their codepoint in {}"
+            )
+        i = start + 3
         hexStart = i
         while isHexDigit(s[i]):
             i += 1
@@ -379,11 +381,15 @@ def parseEscape(s: Stream, start: int) -> Result:
         if hexCount < 1:
             raise ParseError(s, hexStart, "Unicode escape doesn't contain a codepoint")
         if hexCount > 6:
-            raise ParseError(s, hexStart, "Unicode escapes can contain at most six digits")
+            raise ParseError(
+                s, hexStart, "Unicode escapes can contain at most six digits"
+            )
         hexValue = int(s[hexStart:i], 16)
-        if hexValue > 0x10ffff:
-            raise ParseError(s, hexStart, "Maximum codepoint in a unicode escape is 0x10ffff")
-        return Result(chr(hexValue), i+1)
+        if hexValue > 0x10FFFF:
+            raise ParseError(
+                s, hexStart, "Maximum codepoint in a unicode escape is 0x10ffff"
+            )
+        return Result(chr(hexValue), i + 1)
     raise ParseError(s, start, "Invalid character escape")
 
 
@@ -395,7 +401,7 @@ def parseRawString(s: Stream, start: int) -> Result:
     # count hashes
     hashCount, i = parseInitialHashes(s, i)
 
-    if s[i] != "\"":
+    if s[i] != '"':
         return Result.fail(start)
     i = i + 1
 
