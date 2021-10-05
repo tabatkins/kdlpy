@@ -48,7 +48,7 @@ class Node:
                 s += f" {entity.print()}"
             else:
                 properties[entity.key] = entity
-        for key,entity in sorted(properties.items()):
+        for key, entity in sorted(properties.items()):
             s += f" {entity.print()}"
 
         if self.children:

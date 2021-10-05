@@ -20,6 +20,8 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
         if s.eof(i):
             return doc
         node, i = parseNode(s, i)
+        if node is None:
+            raise ParseError(s, i, "Expected a node")
         doc.children.append(node)
         _, i = parseLinespace(s, i)
 
@@ -32,7 +34,7 @@ def parseNode(s: Stream, start: int) -> Result:
     # name
     name, i = parseIdent(s, i)
     if name is None:
-        raise ParseError(s, i, "Expected a node name.")
+        return Result.fail(start)
 
     # props and values
     entities = []
@@ -51,9 +53,36 @@ def parseNode(s: Stream, start: int) -> Result:
         break
 
     _, i = parseNodespace(s, i)
+    children, i = parseNodeChildren(s, i)
+    if children is None:
+        children = []
+
+    _, i = parseNodespace(s, i)
     _, i = parseNodeTerminator(s, i)
 
-    return Result(types.Node(name=name, tag=tag, entities=entities), i)
+    return Result(
+        types.Node(name=name, tag=tag, entities=entities, children=children), i
+    )
+
+
+def parseNodeChildren(s: Stream, start: int) -> Result:
+    if s[start] != "{":
+        return Result.fail(start)
+    nodes = []
+    i = start + 1
+    while True:
+        _, i = parseLinespace(s, i)
+        node, i = parseNode(s, i)
+        if node is not None:
+            nodes.append(node)
+        else:
+            break
+    _, i = parseLinespace(s, i)
+    if s.eof(i):
+        raise ParseError(s, start, "Hit EOF while searching for end of child list")
+    if s[i] != "}":
+        raise ParseError(s, i, "Junk between end of child list and closing }")
+    return Result(nodes, i + 1)
 
 
 def parseTag(s: Stream, start: int) -> Result:
