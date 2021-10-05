@@ -1,11 +1,12 @@
 from __future__ import annotations
 import collections
 import typing
-from typing import NamedTuple, Any, Optional, Union
+from typing import Union
 
 from . import types
 from .errors import ParseError
 from .stream import Stream
+from .result import Result
 
 
 def parse(input):
@@ -29,11 +30,13 @@ def parseNode(s: Stream, start: int) -> Result:
     tag, i = parseTag(s, i)
 
     # name
-    name, i = parseIdent(s, i)
-    if name is None:
-        name, i = parseString(s, i)
+    string, i = parseString(s, i)
+    if string is not None:
+        name = string.value
+    else:
+        name, i = parseIdent(s, i)
         if name is None:
-            raise ParseError(s, i, "Expected a node name, got junk.")
+            raise ParseError(s, i, "Expected a node name.")
 
     # props and values
     entities = []
@@ -464,19 +467,3 @@ def isLinespaceChar(ch: str) -> bool:
     if not ch:
         return False
     return isWSChar(ch) or isNewlineChar(ch)
-
-
-
-
-
-class Result(NamedTuple):
-    value: Any
-    end: int
-
-    @property
-    def valid(self) -> bool:
-        return self.value is not None
-
-    @staticmethod
-    def fail(index: int) -> Result:
-        return Result(None, index)

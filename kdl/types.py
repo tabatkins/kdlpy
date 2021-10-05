@@ -6,6 +6,9 @@ from typing import Optional, Union
 from dataclasses import dataclass
 import dataclasses
 
+from .stream import Stream
+from .result import Result
+
 
 @dataclass
 class Document:
@@ -32,7 +35,10 @@ class Node:
         s = "    " * indent
         if self.tag:
             s += f"({self.tag})"
-        s += self.name
+        if isBareIdent(self.name):
+            s += self.name
+        else:
+            s += f'"{escapedFromRaw(self.name)}"'
         for key, tag, value in self.entities:
             s += " "
             if key is None:
@@ -114,11 +120,8 @@ class Keyword:
 class RawString:
     value: str
 
-    def print(self):
-        escaped = (
-            self.value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        )
-        return f'"{escaped}"'
+    def print(self) -> str:
+        return f'"{escapedFromRaw(self.value)}"'
 
 
 @dataclass
@@ -127,3 +130,76 @@ class EscapedString:
 
     def print(self) -> str:
         return f'"{self.value}"'
+
+
+def escapedFromRaw(chars: str) -> str:
+    return chars.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def isBareIdent(chars: str) -> bool:
+    s = Stream(chars)
+    _, i = parseBareIdent(s, 0)
+    return i != 0 and s.eof(i)
+
+
+def parseBareIdent(s: Stream, start: int) -> Result:
+    res, i = parseIdentStart(s, start)
+    if not res:
+        return Result.fail(start)
+    while isIdentChar(s[i]):
+        i += 1
+    ident = s[start:i]
+    if isKeyword(ident):
+        return Result.fail(start)
+    return Result(ident, i)
+
+
+def parseIdentStart(s: Stream, start: int) -> Result:
+    if s[start] in "0123456789" or (s[start] in "+-" and s[start + 1] in "0123456789"):
+        return Result.fail(start)
+    if not isIdentChar(s[start]):
+        return Result.fail(start)
+    return Result(s[start], start + 1)
+
+
+def isIdentChar(ch: str) -> bool:
+    if not ch:
+        return False
+    if ch in r'''\/(){}<>;[]=,"''':
+        return False
+    if isLinespaceChar(ch):
+        return False
+    cp = ord(ch)
+    if cp <= 0x20:
+        return False
+    if cp > 0x10FFFF:
+        return False
+    return True
+
+
+def isWSChar(ch: str) -> bool:
+    if not ch:
+        return False
+    cp = ord(ch)
+    if cp in (0x09, 0x20, 0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF):
+        return True
+    if 0x2000 <= cp <= 0x200A:
+        return True
+    return False
+
+
+def isNewlineChar(ch: str) -> bool:
+    if not ch:
+        return False
+    cp = ord(ch)
+    return cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029)
+
+
+def isLinespaceChar(ch: str) -> bool:
+    if not ch:
+        return False
+    return isWSChar(ch) or isNewlineChar(ch)
+
+
+def isKeyword(ident: str) -> bool:
+    return ident in ("null", "true", "false")
