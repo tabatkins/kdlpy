@@ -447,9 +447,9 @@ def parseFinalHashes(s: Stream, start: int, expectedCount: int) -> Result:
 
 def parseNewline(s: Stream, start: int) -> Result:
     if s[start] == "\x0d" and s[start + 1] == "\x0a":
-        return Result("\n", start + 2)
+        return Result(True, start + 2)
     if isNewlineChar(s[start]):
-        return Result("\n", start + 1)
+        return Result(True, start + 1)
     return Result.fail(start)
 
 
@@ -459,7 +459,7 @@ def parseLinespace(s: Stream, start: int) -> Result:
     end = start + 1
     while isLinespaceChar(s[end]):
         end += 1
-    return Result(s[start:end], end)
+    return Result(True, end)
 
 
 def parseNodespace(s: Stream, start: int) -> Result:
@@ -472,7 +472,7 @@ def parseWhitespace(s: Stream, start: int) -> Result:
     end = start + 1
     while isWSChar(s[end]):
         end += 1
-    return Result(s[start:end], end)
+    return Result(True, end)
 
 
 def isIdentChar(ch: str) -> bool:
