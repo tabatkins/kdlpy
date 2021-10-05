@@ -53,9 +53,10 @@ def parseNode(s: Stream, start: int) -> Result:
         break
 
     _, i = parseNodespace(s, i)
+
     children, i = parseNodeChildren(s, i)
     if children is None:
-        children = []
+        children = types.Children()
 
     _, i = parseNodespace(s, i)
     _, i = parseNodeTerminator(s, i)
@@ -82,7 +83,7 @@ def parseNodeChildren(s: Stream, start: int) -> Result:
         raise ParseError(s, start, "Hit EOF while searching for end of child list")
     if s[i] != "}":
         raise ParseError(s, i, "Junk between end of child list and closing }")
-    return Result(nodes, i + 1)
+    return Result(types.Children(nodes), i + 1)
 
 
 def parseTag(s: Stream, start: int) -> Result:
@@ -506,7 +507,7 @@ def parseEscline(s: Stream, start: int) -> Result:
     _, i = parseWhitespace(s, start + 1)
     if s[i] != "\n":
         return Result.fail(start)
-    return Result(True, i+1)
+    return Result(True, i + 1)
 
 
 def parseWhitespace(s: Stream, start: int) -> Result:

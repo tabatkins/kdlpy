@@ -2,17 +2,56 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from typing import Optional, Union
+from typing import Optional, Union, MutableSequence, overload, Iterable, TypeVar
 from dataclasses import dataclass
 import dataclasses
 
 from .stream import Stream
 from .result import Result
 
+NodeT = TypeVar("NodeT", bound="Node")
+
+
+@dataclass
+class Children(MutableSequence[NodeT]):
+    _nodes: list[Node] = dataclasses.field(default_factory=list)
+    escaped: bool = False
+
+    @overload
+    def __getitem__(self, index: int) -> NodeT:
+        ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Children[NodeT]:
+        ...
+
+    def __getitem__(self, index):
+        return self._nodes[index]
+
+    @overload
+    def __setitem__(self, index: int, item: NodeT) -> None:
+        ...
+
+    @overload
+    def __setitem__(self, index: slice, item: Iterable[NodeT]) -> None:
+        ...
+
+    def __setitem__(self, index, item):
+        self._nodes[index] = item
+
+    def __delitem__(self, index: Union[int, slice]) -> None:
+        del self._nodes[index]
+
+    def __len__(self) -> int:
+        return len(self._nodes)
+
+    def insert(self, index: int, item: NodeT) -> None:
+        self._nodes.insert(index, item)
+
 
 @dataclass
 class Document:
-    children: list[Node] = dataclasses.field(default_factory=list)
+    children: Children = dataclasses.field(default_factory=Children)
 
     def print(self) -> str:
         s = ""
@@ -29,7 +68,8 @@ class Node:
     name: str
     tag: Optional[str] = None
     entities: list[Entity] = dataclasses.field(default_factory=list)
-    children: list[Node] = dataclasses.field(default_factory=list)
+    children: Children = dataclasses.field(default_factory=Children)
+    escaped: bool = False
 
     def print(self, indent: int = 0) -> str:
         s = "    " * indent
@@ -66,6 +106,7 @@ class Entity:
     key: Optional[str]
     tag: Optional[str]
     value: Union[Binary, Octal, Decimal, Hex, Keyword, RawString, EscapedString]
+    escaped: bool = False
 
     def print(self):
         if self.key is None:
