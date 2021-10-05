@@ -43,19 +43,13 @@ class Node:
         # in alpha order, using only the last if a key
         # is duplicated.
         properties = {}
-        for key, tag, value in self.entities:
-            if key is None:
-                s += " "
-                if tag is not None:
-                    s += f"({printIdent(tag)})"
-                s += value.print()
+        for entity in self.entities:
+            if entity.key is None:
+                s += f" {entity.print()}"
             else:
-                properties[key] = (key, tag, value)
-        for key, tag, value in sorted(properties.values()):
-            s += f" {printIdent(key)}="
-            if tag is not None:
-                s += f"({printIdent(tag)})"
-            s += value.print()
+                properties[entity.key] = entity
+        for key,entity in sorted(properties.items()):
+            s += f" {entity.print()}"
 
         if self.children:
             s += " {\n"
@@ -73,8 +67,15 @@ class Entity:
     tag: Optional[str]
     value: Union[Binary, Octal, Decimal, Hex, Keyword, RawString, EscapedString]
 
-    def __iter__(self):
-        return iter((self.key, self.tag, self.value))
+    def print(self):
+        if self.key is None:
+            s = ""
+        else:
+            s = printIdent(self.key) + "="
+        if self.tag is not None:
+            s += f"({printIdent(self.tag)})"
+        s += self.value.print()
+        return s
 
 
 @dataclass
