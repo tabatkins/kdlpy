@@ -5,7 +5,7 @@ import typing
 class ParseError(Exception):
     def __init__(self, s, i: int, msg: str):
         line, col = lineCol(s, i)
-        self.msg = f"Parse error on line {line} col {col}:"
+        self.msg = f"{line}:{col} parse error:"
         if "\n" in msg:
             self.msg += "\n" + msg
         elif len(self.msg) + len(msg) + 1 > 78:
@@ -18,11 +18,11 @@ class ParseError(Exception):
 def lineCol(s, index: int) -> typing.Tuple[int, int]:
     """Determines the line and column from an index."""
     line = 1
-    col = 0
+    col = 1
     for i in range(index):
         if s[i] == "\n":
             line += 1
-            col = 0
+            col = 1
             continue
         col += 1
     return line, col
