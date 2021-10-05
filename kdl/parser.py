@@ -102,7 +102,16 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
 
 
 def parseProperty(s: Stream, start: int) -> Result:
-    return Result.fail(start)
+    key, i = parseIdent(s, start)
+    if key is None:
+        return Result.fail(start)
+    if s[i] != "=":
+        return Result.fail(start)
+    entity, i = parseValue(s, i+1)
+    if entity is None:
+        raise ParseError(s, i, "Expected value after prop=.")
+
+    return Result(types.Entity(key, entity.tag, entity.value), i)
 
 
 def parseValue(s: Stream, start: int) -> Result:
