@@ -79,7 +79,7 @@ class Decimal:
 
     def print(self):
         value = str(self.value)
-        if("e" in value):
+        if "e" in value:
             value = value.replace("e", "E")
             match = re.match(r"(\d+)(E.*)", value)
             if match:

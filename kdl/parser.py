@@ -107,7 +107,7 @@ def parseProperty(s: Stream, start: int) -> Result:
         return Result.fail(start)
     if s[i] != "=":
         return Result.fail(start)
-    entity, i = parseValue(s, i+1)
+    entity, i = parseValue(s, i + 1)
     if entity is None:
         raise ParseError(s, i, "Expected value after prop=.")
 
