@@ -5,6 +5,7 @@ from typing import NamedTuple, Any, Optional, Union
 
 from . import types
 from .errors import ParseError
+from .stream import Stream
 
 
 def parse(input):
@@ -15,7 +16,7 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
     doc = types.Document()
     _, i = parseLinespace(s, start)
     while True:
-        if i >= len(s):
+        if s.eof(i):
             return doc
         node, i = parseNode(s, i)
         doc.children.append(node)
@@ -30,7 +31,9 @@ def parseNode(s: Stream, start: int) -> Result:
     # name
     name, i = parseIdent(s, i)
     if name is None:
-        raise ParseError(s, i, "Expected a node name, got junk.")
+        name, i = parseString(s, i)
+        if name is None:
+            raise ParseError(s, i, "Expected a node name, got junk.")
 
     # props and values
     entities = []
@@ -96,7 +99,7 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
         return res
     if s[start] == ";":
         return Result(";", start + 1)
-    if start >= len(s):
+    if s.eof(start):
         return Result(True, start)
     raise ParseError(s, start, f"Junk after node, before terminator.")
 
@@ -463,19 +466,7 @@ def isLinespaceChar(ch: str) -> bool:
     return isWSChar(ch) or isNewlineChar(ch)
 
 
-class Stream:
-    def __init__(self, chars: str):
-        self._chars = chars
-        self._len = len(chars)
 
-    def __len__(self):
-        return self._len
-
-    def __getitem__(self, key):
-        try:
-            return self._chars[key]
-        except IndexError:
-            return ""
 
 
 class Result(NamedTuple):
