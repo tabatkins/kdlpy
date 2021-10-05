@@ -11,7 +11,7 @@ import dataclasses
 class Document:
     children: list[Node] = dataclasses.field(default_factory=list)
 
-    def print(self):
+    def print(self) -> str:
         s = ""
         for node in self.children:
             s += node.print()
@@ -28,7 +28,7 @@ class Node:
     entities: list[Entity] = dataclasses.field(default_factory=list)
     children: list[Node] = dataclasses.field(default_factory=list)
 
-    def print(self, indent=0):
+    def print(self, indent: int = 0) -> str:
         s = "    " * indent
         if self.tag:
             s += f"({self.tag})"
@@ -68,7 +68,7 @@ class Entity:
 class Binary:
     value: int
 
-    def print(self):
+    def print(self) -> str:
         return str(self.value)
 
 
@@ -76,7 +76,7 @@ class Binary:
 class Octal:
     value: int
 
-    def print(self):
+    def print(self) -> str:
         return str(self.value)
 
 
@@ -84,7 +84,7 @@ class Octal:
 class Decimal:
     value: Union[int, float]
 
-    def print(self):
+    def print(self) -> str:
         value = str(self.value)
         if "e" in value:
             value = value.replace("e", "E")
@@ -98,7 +98,7 @@ class Decimal:
 class Hex:
     value: int
 
-    def print(self):
+    def print(self) -> str:
         return str(self.value)
 
 
@@ -106,7 +106,7 @@ class Hex:
 class Keyword:
     value: str
 
-    def print(self):
+    def print(self) -> str:
         return self.value
 
 
@@ -125,5 +125,5 @@ class RawString:
 class EscapedString:
     value: str
 
-    def print(self):
+    def print(self) -> str:
         return f'"{self.value}"'
