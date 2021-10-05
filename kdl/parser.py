@@ -1,7 +1,7 @@
 from __future__ import annotations
 import collections
 import typing
-from typing import NamedTuple, Any, Optional
+from typing import NamedTuple, Any, Optional, Union
 
 from . import types
 from .errors import ParseError
@@ -219,7 +219,51 @@ def parseHexNumber(s: Stream, start: int):
 
 
 def parseDecimalNumber(s: Stream, start: int) -> Result:
-    return Result.fail(start)
+    i = start
+
+    # gonna parse the whole thing with Python,
+    # so intermediate results aren't important
+
+    # optional sign
+    _, i = parseSign(s, i)
+
+    # integer part
+    _, i = parseDigits(s, i)
+
+    if s[i] == ".":
+        result, i = parseDigits(s, i + 1)
+        if result is None:
+            raise ParseError(s, i, "Expected digit after decimal point.")
+
+    if s[i] in ("e", "E"):
+        _, i = parseSign(s, i + 1)
+        result, i = parseDigits(s, i)
+        if result is None:
+            raise ParseError(s, i, "Expected number after exponent.")
+
+    chars = s[start:i].replace("_", "")
+    value: Union[int, float]
+    try:
+        value = int(chars, 10)
+    except ValueError:
+        try:
+            value = float(chars)
+        except ValueError:
+            raise ParseError(
+                s, start, "Number-like string didn't actually parse as a number."
+            )
+    return Result(types.Decimal(value), i)
+
+
+def parseDigits(s: Stream, start: int) -> Result:
+    # First digit must be decimal digit
+    # Subsequent can be digit or underscore
+    if not isDigit(s[start]):
+        return Result.fail(start)
+    end = start + 1
+    while isDigit(s[end]) or s[end] == "_":
+        end += 1
+    return Result(True, end)
 
 
 def isNumberStart(s: Stream, start: int) -> bool:
@@ -233,11 +277,12 @@ def isNumberStart(s: Stream, start: int) -> bool:
         return True
     return False
 
+
 def parseSign(s: Stream, start: int) -> Result:
     if s[start] == "+":
-        return Result(1, start+1)
+        return Result(1, start + 1)
     if s[start] == "-":
-        return Result(-1, start+1)
+        return Result(-1, start + 1)
     return Result.fail(start)
 
 
