@@ -130,7 +130,16 @@ class EscapedString:
 
 
 def escapedFromRaw(chars: str) -> str:
-    return chars.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return (
+        chars.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        # don't escape a forward slash when printing
+        .replace("\b", "\\b")
+        .replace("\f", "\\f")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 
 def printIdent(chars):
