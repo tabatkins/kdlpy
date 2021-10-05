@@ -15,6 +15,9 @@ class Document:
         s = ""
         for node in self.children:
             s += node.print()
+        if s == "":
+            # always end a kdl doc with a newline
+            s = "\n"
         return s
 
 
