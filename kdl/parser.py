@@ -110,8 +110,8 @@ def parseProperty(s: Stream, start: int) -> Result:
     entity, i = parseValue(s, i + 1)
     if entity is None:
         raise ParseError(s, i, "Expected value after prop=.")
-
-    return Result(types.Entity(key, entity.tag, entity.value), i)
+    entity.key = key
+    return Result(entity, i)
 
 
 def parseValue(s: Stream, start: int) -> Result:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from typing import Optional, NamedTuple, Union
+from typing import Optional, Union
 from dataclasses import dataclass
 import dataclasses
 
@@ -51,10 +51,14 @@ class Node:
         return s
 
 
-class Entity(NamedTuple):
+@dataclass
+class Entity:
     key: Optional[str]
     tag: Optional[str]
     value: Union[Binary, Octal, Decimal, Hex]
+
+    def __iter__(self):
+        return iter((self.key, self.tag, self.value))
 
 
 @dataclass
