@@ -463,7 +463,21 @@ def parseLinespace(s: Stream, start: int) -> Result:
 
 
 def parseNodespace(s: Stream, start: int) -> Result:
-    return parseWhitespace(s, start)
+    i = start
+    while True:
+        _, i = parseWhitespace(s, i)
+        escline, i = parseEscline(s, i)
+        if escline is None:
+            return Result(True, i)
+
+
+def parseEscline(s: Stream, start: int) -> Result:
+    if s[start] != "\\":
+        return Result.fail(start)
+    _, i = parseWhitespace(s, start + 1)
+    if s[i] != "\n":
+        return Result.fail(start)
+    return Result(True, i)
 
 
 def parseWhitespace(s: Stream, start: int) -> Result:
