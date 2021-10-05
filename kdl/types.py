@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import re
 from collections import OrderedDict
 from typing import Optional, NamedTuple, Union
 from dataclasses import dataclass
@@ -76,7 +78,13 @@ class Decimal:
     value: Union[int, float]
 
     def print(self):
-        return str(self.value)
+        value = str(self.value)
+        if("e" in value):
+            value = value.replace("e", "E")
+            match = re.match(r"(\d+)(E.*)", value)
+            if match:
+                value = match.group(1) + ".0" + match.group(2)
+        return value
 
 
 @dataclass
