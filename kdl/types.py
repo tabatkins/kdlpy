@@ -33,20 +33,30 @@ class Node:
 
     def print(self, indent: int = 0) -> str:
         s = "    " * indent
+
         if self.tag is not None:
             s += f"({printIdent(self.tag)})"
+
         s += printIdent(self.name)
+
+        # Print all the values, then all the properties
+        # in alpha order, using only the last if a key
+        # is duplicated.
+        properties = {}
         for key, tag, value in self.entities:
-            s += " "
             if key is None:
+                s += " "
                 if tag is not None:
                     s += f"({printIdent(tag)})"
-                s += f"{value.print()}"
+                s += value.print()
             else:
-                s += printIdent(key) + "="
-                if tag is not None:
-                    s += f"({printIdent(tag)})"
-                s += f"{value.print()}"
+                properties[key] = (key, tag, value)
+        for key, tag, value in sorted(properties.values()):
+            s += f" {printIdent(key)}="
+            if tag is not None:
+                s += f"({printIdent(tag)})"
+            s += value.print()
+
         if self.children:
             s += " {\n"
             for child in self.children:
