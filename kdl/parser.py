@@ -106,7 +106,9 @@ def parseProperty(s: Stream, start: int) -> Result:
     if key is None:
         return Result.fail(start)
     if s[i] != "=":
-        raise ParseError(s, i, "Expected = after property name.")
+        # Should be a parse failure, but that would require
+        # more checking to tell apart idents from raw-strings.
+        return Result.fail(start)
     entity, i = parseValue(s, i + 1)
     if entity is None:
         raise ParseError(s, i, "Expected value after prop=.")
@@ -122,6 +124,10 @@ def parseValue(s: Stream, start: int) -> Result:
         return Result(types.Entity(None, tag, res), i)
 
     res, i = parseKeyword(s, i)
+    if res is not None:
+        return Result(types.Entity(None, tag, res), i)
+
+    res, i = parseString(s, i)
     if res is not None:
         return Result(types.Entity(None, tag, res), i)
 
@@ -301,6 +307,67 @@ def parseKeyword(s: Stream, start: int) -> Result:
     if s[start : start + 5] == "false" and not isIdentChar(s[start + 5]):
         return Result(types.Keyword(s[start : start + 5]), start + 5)
     return Result.fail(start)
+
+
+def parseString(s: Stream, start: int) -> Result:
+    if s[start] == '"':
+        return parseEscapedString(s, start)
+    if s[start] == "r" and s[start + 1] in ("#", '"'):
+        return parseRawString(s, start)
+    return Result.fail(start)
+
+
+def parseEscapedString(s: Stream, start: int) -> Result:
+    return Result.fail(start)
+
+
+def parseRawString(s: Stream, start: int) -> Result:
+    # r has already been checked
+    i = start + 1
+
+    # count hashes
+    hashCount, i = parseInitialHashes(s, i)
+    if hashCount is None:
+        raise ParseError(s, i, "Expected a quoted string after the raw-string prefix.")
+
+    stringStart = i
+    while True:
+        while s[i] not in ('"', ""):
+            i += 1
+        if s[i] == "":
+            raise ParseError(
+                s, stringStart, "Hit EOF while looking for the end of the raw string."
+            )
+        stringEnd = i
+        i += 1
+        result, i = parseFinalHashes(s, i, expectedCount=hashCount)
+        if result:
+            return Result(types.RawString(s[stringStart:stringEnd]), i)
+
+
+def parseInitialHashes(s: Stream, start: int) -> Result:
+    i = start
+    while s[i] == "#":
+        i += 1
+    if s[i] == '"':
+        return Result(i - start, i + 1)
+    return Result.fail(start)
+
+
+def parseFinalHashes(s: Stream, start: int, expectedCount: int) -> Result:
+    i = start
+    while s[i] == "#":
+        i += 1
+    count = i - start
+    if count < expectedCount:
+        return Result.fail(start)
+    if count > expectedCount:
+        raise ParseError(
+            s,
+            start,
+            f"Expected {expectedCount} hashes at end of raw string; got {count}.",
+        )
+    return Result(True, i)
 
 
 def parseNewline(s: Stream, start: int) -> Result:

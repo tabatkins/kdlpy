@@ -105,3 +105,22 @@ class Keyword:
 
     def print(self):
         return self.value
+
+
+@dataclass
+class RawString:
+    value: str
+
+    def print(self):
+        escaped = (
+            self.value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        )
+        return f'"{escaped}"'
+
+
+@dataclass
+class EscapedString:
+    value: str
+
+    def print(self):
+        return f'"{self.value}"'
