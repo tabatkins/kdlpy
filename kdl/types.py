@@ -85,4 +85,11 @@ class Hex:
 
     def print(self):
         return str(self.value)
-        return s
+
+
+@dataclass
+class Keyword:
+    value: str
+
+    def print(self):
+        return self.value

@@ -39,11 +39,11 @@ def parseNode(s: Stream, start: int) -> Result:
         if space is None:
             break
         prop, i = parseProperty(s, i)
-        if prop:
+        if prop is not None:
             entities.append(prop)
             continue
         val, i = parseValue(s, i)
-        if val:
+        if val is not None:
             entities.append(val)
             continue
         break
@@ -78,11 +78,7 @@ def parseBareIdent(s: Stream, start: int) -> Result:
         i += 1
     ident = s[start:i]
     if isKeyword(ident):
-        raise ParseError(
-            s,
-            start,
-            f"Expected a keyword, but got a reserved identifier '{ident}'.",
-        )
+        return Result.fail(start)
     return Result(ident, i)
 
 
@@ -112,9 +108,13 @@ def parseProperty(s: Stream, start: int) -> Result:
 def parseValue(s: Stream, start: int) -> Result:
     tag, i = parseTag(s, start)
 
-    num, i = parseNumber(s, i)
-    if num is not None:
-        return Result(types.Entity(None, tag, num), i)
+    res, i = parseNumber(s, i)
+    if res is not None:
+        return Result(types.Entity(None, tag, res), i)
+
+    res, i = parseKeyword(s, i)
+    if res is not None:
+        return Result(types.Entity(None, tag, res), i)
 
     # Failed to find a value
     # But if I found a tag, something's up
@@ -283,6 +283,14 @@ def parseSign(s: Stream, start: int) -> Result:
         return Result(1, start + 1)
     if s[start] == "-":
         return Result(-1, start + 1)
+    return Result.fail(start)
+
+
+def parseKeyword(s: Stream, start: int) -> Result:
+    if s[start : start + 4] in ("true", "null") and not isIdentChar(s[start + 4]):
+        return Result(types.Keyword(s[start : start + 4]), start + 4)
+    if s[start : start + 5] == "false" and not isIdentChar(s[start + 5]):
+        return Result(types.Keyword(s[start : start + 5]), start + 5)
     return Result.fail(start)
 
 
