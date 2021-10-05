@@ -129,7 +129,7 @@ class EscapedString:
     value: str
 
     def print(self) -> str:
-        return f'"{self.value}"'
+        return f'"{escapedFromRaw(self.value)}"'
 
 
 def escapedFromRaw(chars: str) -> str:

@@ -324,17 +324,80 @@ def parseString(s: Stream, start: int) -> Result:
 
 
 def parseEscapedString(s: Stream, start: int) -> Result:
-    return Result.fail(start)
+    if s[start] != "\"":
+        return Result.fail(start)
+    i = start + 1
+
+    rawChars = ""
+    while True:
+        if s[i] not in ("\\", "\"", ""):
+            rawChars += s[i]
+            i += 1
+            continue
+        if s[i] == "\"":
+            break
+        if s[i] == "":
+            raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+        ch, i = parseEscape(s, i)
+        if ch is None:
+            raise ParseError(s, i, "Invalid escape sequence in string")
+        rawChars += ch
+
+    return Result(types.EscapedString(rawChars), i+1)
+
+
+def parseEscape(s: Stream, start: int) -> Result:
+    if s[start] != "\\":
+        return Result.fail(start)
+    ch = s[start+1]
+    if ch == "n":
+        return Result("\n", start+2)
+    if ch == "r":
+        return Result("\r", start+2)
+    if ch == "t":
+        return Result("\t", start+2)
+    if ch == "\\":
+        return Result("\\", start+2)
+    if ch == "/":
+        return Result("/", start+2)
+    if ch == '"':
+        return Result('"', start+2)
+    if ch == "b":
+        return Result("\b", start+2)
+    if ch == "f":
+        return Result("\f", start+2)
+    if ch == "u":
+        if s[start+2] != "{":
+            raise ParseError(s, start, "Unicode escapes must surround their codepoint in {}")
+        i = start+3
+        hexStart = i
+        while isHexDigit(s[i]):
+            i += 1
+        hexCount = i - hexStart
+        if s[i] != "}":
+            raise ParseError(s, hexStart, "Expected } to finish a unicode escape")
+        if hexCount < 1:
+            raise ParseError(s, hexStart, "Unicode escape doesn't contain a codepoint")
+        if hexCount > 6:
+            raise ParseError(s, hexStart, "Unicode escapes can contain at most six digits")
+        hexValue = int(s[hexStart:i], 16)
+        if hexValue > 0x10ffff:
+            raise ParseError(s, hexStart, "Maximum codepoint in a unicode escape is 0x10ffff")
+        return Result(chr(hexValue), i+1)
+    raise ParseError(s, start, "Invalid character escape")
 
 
 def parseRawString(s: Stream, start: int) -> Result:
-    # r has already been checked
+    if s[start] != "r":
+        return Result.fail(start)
     i = start + 1
 
     # count hashes
     hashCount, i = parseInitialHashes(s, i)
-    if hashCount is None:
-        raise ParseError(s, i, "Expected a quoted string after the raw-string prefix.")
+
+    if s[i] != "\"":
+        return Result.fail(start)
+    i = i + 1
 
     stringStart = i
     while True:
@@ -342,7 +405,7 @@ def parseRawString(s: Stream, start: int) -> Result:
             i += 1
         if s[i] == "":
             raise ParseError(
-                s, stringStart, "Hit EOF while looking for the end of the raw string."
+                s, start, "Hit EOF while looking for the end of the raw string."
             )
         stringEnd = i
         i += 1
@@ -356,7 +419,7 @@ def parseInitialHashes(s: Stream, start: int) -> Result:
     while s[i] == "#":
         i += 1
     if s[i] == '"':
-        return Result(i - start, i + 1)
+        return Result(i - start, i)
     return Result.fail(start)
 
 
