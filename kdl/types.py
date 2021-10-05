@@ -61,7 +61,7 @@ class Node:
 class Entity:
     key: Optional[str]
     tag: Optional[str]
-    value: Union[Binary, Octal, Decimal, Hex]
+    value: Union[Binary, Octal, Decimal, Hex, Keyword, RawString, EscapedString]
 
     def __iter__(self):
         return iter((self.key, self.tag, self.value))
