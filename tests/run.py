@@ -22,8 +22,6 @@ def main():
     bad = []
     for filename in sorted(inputs):
         inputPath = os.path.join(TEST_DIR, filename)
-        if options.verbose:
-            print(f"Testing {os.path.basename(filename)}... ", end=None)
         try:
             with open(inputPath, "r", encoding="utf-8") as fh:
                 output = kdl.parse(fh.read()).print()
@@ -31,13 +29,11 @@ def main():
             if filename not in goldens:
                 # Success, parse failure was intended
                 good.append(filename)
-                if options.verbose:
-                    print("Success!")
             else:
                 # Whoops, incorrect parse failure.
                 bad.append(filename)
                 if options.verbose:
-                    print("Unexpected parse failure :(")
+                    print(f"Unexpected parse failure in {filename}")
                     print(e)
                     print("================")
             continue
@@ -45,7 +41,7 @@ def main():
             # Whoops, internal error
             bad.append(filename)
             if options.verbose:
-                print("Internal error :(")
+                print(f"BIG BAD: Internal error in {filename}")
                 print(e)
                 print("================")
             continue
@@ -54,7 +50,7 @@ def main():
             # ...but it shoudln't have
             bad.append(filename)
             if options.verbose:
-                print("Unexpected successful parse. Got:")
+                print(f"Unexpected successful parse in {filename}. Got:")
                 print(output)
                 print("================")
             continue
@@ -63,13 +59,10 @@ def main():
             golden = fh.read()
         if output == golden:
             good.append(filename)
-            if options.verbose:
-                print("Success!")
             continue
         bad.append(filename)
         if options.verbose:
-            print("Output didn't match golden.")
-            print("Got:")
+            print(f"Output didn't match golden in {filename}. Got:")
             print(output)
             print("Expected:")
             print(golden)
