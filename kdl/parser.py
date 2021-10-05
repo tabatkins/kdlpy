@@ -506,7 +506,7 @@ def parseEscline(s: Stream, start: int) -> Result:
     _, i = parseWhitespace(s, start + 1)
     if s[i] != "\n":
         return Result.fail(start)
-    return Result(True, i)
+    return Result(True, i+1)
 
 
 def parseWhitespace(s: Stream, start: int) -> Result:
