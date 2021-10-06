@@ -147,16 +147,21 @@ class Octal:
 
 @dataclass
 class Decimal:
-    value: Union[int, float]
+    mantissa: Union[int, float]
+    exponent: int = 0
+
+    @property
+    def value(self):
+        return self.mantissa * (10.0 ** self.exponent)
 
     def print(self) -> str:
-        value = str(self.value)
-        if "e" in value:
-            value = value.replace("e", "E")
-            match = re.match(r"(\d+)(E.*)", value)
-            if match:
-                value = match.group(1) + ".0" + match.group(2)
-        return value
+        s = str(self.mantissa)
+        if self.exponent != 0:
+            s += "E"
+            if self.exponent > 0:
+                s += "+"
+            s += str(self.exponent)
+        return s
 
 
 @dataclass

@@ -288,9 +288,6 @@ def parseHexNumber(s: Stream, start: int):
 def parseDecimalNumber(s: Stream, start: int) -> Result:
     i = start
 
-    # gonna parse the whole thing with Python,
-    # so intermediate results aren't important
-
     # optional sign
     _, i = parseSign(s, i)
 
@@ -302,24 +299,28 @@ def parseDecimalNumber(s: Stream, start: int) -> Result:
         if result is None:
             raise ParseError(s, i, "Expected digit after decimal point.")
 
-    if s[i] in ("e", "E"):
-        _, i = parseSign(s, i + 1)
-        result, i = parseDigits(s, i)
-        if result is None:
-            raise ParseError(s, i, "Expected number after exponent.")
-
-    chars = s[start:i].replace("_", "")
-    value: Union[int, float]
+    mantissaChars = s[start:i].replace("_", "")
+    mantissa: Union[int, float]
     try:
-        value = int(chars, 10)
+        mantissa = int(mantissaChars, 10)
     except ValueError:
         try:
-            value = float(chars)
+            mantissa = float(mantissaChars)
         except ValueError:
             raise ParseError(
                 s, start, "Number-like string didn't actually parse as a number."
             )
-    return Result(types.Decimal(value), i)
+
+    exponent = 0
+    if s[i] in ("e", "E"):
+        exponentStart = i + 1
+        _, i = parseSign(s, i + 1)
+        result, i = parseDigits(s, i)
+        if result is None:
+            raise ParseError(s, i, "Expected number after exponent.")
+        exponent = int(s[exponentStart:i].replace("_", ""))
+
+    return Result(types.Decimal(mantissa, exponent), i)
 
 
 def parseDigits(s: Stream, start: int) -> Result:
