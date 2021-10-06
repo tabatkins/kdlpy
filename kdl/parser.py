@@ -22,7 +22,8 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
         node, i = parseNode(s, i)
         if node is None:
             raise ParseError(s, i, "Expected a node")
-        doc.children.append(node)
+        if not node.escaped:
+            doc.children.append(node)
         _, i = parseLinespace(s, i)
 
 
@@ -49,6 +50,8 @@ def parseNode(s: Stream, start: int) -> Result:
         entity, i = parseEntity(s, i)
         if entity is None:
             break
+        if entity[1].escaped:
+            continue
         if entity[0] is None:
             node.values.append(entity[1])
         else:
@@ -57,7 +60,7 @@ def parseNode(s: Stream, start: int) -> Result:
     _, i = parseNodespace(s, i)
 
     children, i = parseNodeChildren(s, i)
-    if children is not None:
+    if children is not None and not children.escaped:
         node.children = children
 
     _, i = parseNodespace(s, i)
@@ -77,7 +80,8 @@ def parseNodeChildren(s: Stream, start: int) -> Result:
         _, i = parseLinespace(s, i)
         node, i = parseNode(s, i)
         if node is not None:
-            nodes.append(node)
+            if not node.escaped:
+                nodes.append(node)
         else:
             break
     _, i = parseLinespace(s, i)
