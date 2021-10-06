@@ -502,12 +502,16 @@ def parseNewline(s: Stream, start: int) -> Result:
 
 
 def parseLinespace(s: Stream, start: int) -> Result:
-    if not isLinespaceChar(s[start]):
+    i = start
+    while True:
+        nl, i = parseNewline(s, i)
+        ws, i = parseWhitespace(s, i)
+        sc, i = parseSingleLineComment(s, i)
+        if nl is None and ws is None and sc is None:
+            break
+    if i == start:
         return Result.fail(start)
-    end = start + 1
-    while isLinespaceChar(s[end]):
-        end += 1
-    return Result(True, end)
+    return Result(True, i)
 
 
 def parseNodespace(s: Stream, start: int) -> Result:
@@ -523,9 +527,12 @@ def parseEscline(s: Stream, start: int) -> Result:
     if s[start] != "\\":
         return Result.fail(start)
     _, i = parseWhitespace(s, start + 1)
-    if s[i] != "\n":
-        return Result.fail(start)
-    return Result(True, i + 1)
+    if s[i] == "\n":
+        return Result(True, i + 1)
+    sl, i = parseSingleLineComment(s, i)
+    if sl is not None:
+        return Result(True, i)
+    return Result.fail(start)
 
 
 def parseWhitespace(s: Stream, start: int) -> Result:
@@ -605,3 +612,13 @@ def parseSlashDash(s: Stream, start: int) -> Result:
         _, i = parseNodespace(s, start + 2)
         return Result(True, i)
     return Result.fail(start)
+
+
+def parseSingleLineComment(s: Stream, start: int) -> Result:
+    if not (s[start] == "/" and s[start + 1] == "/"):
+        return Result.fail(start)
+    i = start + 2
+    while not isNewlineChar(s[i]) and not s.eof(i):
+        i += 1
+    _, i = parseNewline(s, i)
+    return Result(True, i)
