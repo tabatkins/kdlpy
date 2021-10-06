@@ -520,7 +520,10 @@ def parseNodespace(s: Stream, start: int) -> Result:
         _, i = parseWhitespace(s, i)
         escline, i = parseEscline(s, i)
         if escline is None:
-            return Result(True, i)
+            break
+    if i == start:
+        return Result.fail(start)
+    return Result(True, i)
 
 
 def parseEscline(s: Stream, start: int) -> Result:
