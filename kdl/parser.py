@@ -539,6 +539,18 @@ def parseEscline(s: Stream, start: int) -> Result:
 
 
 def parseWhitespace(s: Stream, start: int) -> Result:
+    i = start
+    while True:
+        sp, i = parseUnicodeSpace(s, i)
+        bc, i = parseBlockComment(s, i)
+        if sp is None and bc is None:
+            break
+    if i == start:
+        return Result.fail(start)
+    return Result(True, i)
+
+
+def parseUnicodeSpace(s: Stream, start: int) -> Result:
     if not isWSChar(s[start]):
         return Result.fail(start)
     end = start + 1
@@ -625,3 +637,18 @@ def parseSingleLineComment(s: Stream, start: int) -> Result:
         i += 1
     _, i = parseNewline(s, i)
     return Result(True, i)
+
+
+def parseBlockComment(s: Stream, start: int) -> Result:
+    if not (s[start] == "/" and s[start + 1] == "*"):
+        return Result.fail(start)
+    i = start + 2
+    while True:
+        if s.eof(i):
+            raise ParseError(s, start, "Hit EOF while inside a multiline comment")
+        if s[i] == "*" and s[i + 1] == "/":
+            return Result(True, i + 2)
+        if s[i] == "/" and s[i + 1] == "*":
+            _, i = parseBlockComment(s, i)
+            continue
+        i += 1
