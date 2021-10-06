@@ -39,33 +39,31 @@ def parseNode(s: Stream, start: int) -> Result:
     if name is None:
         return Result.fail(start)
 
+    node = types.Node(tag=tag, name=name, escaped=bool(sd))
+
     # props and values
-    entities = []
     while True:
         space, i = parseNodespace(s, i)
         if space is None:
             break
         entity, i = parseEntity(s, i)
-        if entity is not None:
-            entities.append(entity)
-            continue
-        break
+        if entity is None:
+            break
+        if entity[0] is None:
+            node.values.append(entity[1])
+        else:
+            node.properties[entity[0]] = entity[1]
 
     _, i = parseNodespace(s, i)
 
     children, i = parseNodeChildren(s, i)
-    if children is None:
-        children = types.Children()
+    if children is not None:
+        node.children = children
 
     _, i = parseNodespace(s, i)
     _, i = parseNodeTerminator(s, i)
 
-    return Result(
-        types.Node(
-            name=name, tag=tag, entities=entities, children=children, escaped=bool(sd)
-        ),
-        i,
-    )
+    return Result(node, i)
 
 
 def parseNodeChildren(s: Stream, start: int) -> Result:
@@ -147,7 +145,7 @@ def parseEntity(s: Stream, start: int) -> Result:
         ent, i = parseValue(s, i)
         if ent is None:
             return Result.fail(start)
-    ent.escaped = bool(sd)
+    ent[1].escaped = bool(sd)
     return Result(ent, i)
 
 
@@ -164,24 +162,20 @@ def parseProperty(s: Stream, start: int) -> Result:
     entity, i = parseValue(s, i + 1)
     if entity is None:
         raise ParseError(s, i, "Expected value after prop=.")
-    entity.key = key
-    return Result(entity, i)
+    return Result((key, entity[1]), i)
 
 
 def parseValue(s: Stream, start: int) -> Result:
     tag, i = parseTag(s, start)
 
-    res, i = parseNumber(s, i)
-    if res is not None:
-        return Result(types.Entity(None, tag, res), i)
-
-    res, i = parseKeyword(s, i)
-    if res is not None:
-        return Result(types.Entity(None, tag, res), i)
-
-    res, i = parseString(s, i)
-    if res is not None:
-        return Result(types.Entity(None, tag, res), i)
+    val, i = parseNumber(s, i)
+    if val is None:
+        val, i = parseKeyword(s, i)
+        if val is None:
+            val, i = parseString(s, i)
+    if val is not None:
+        val.tag = tag
+        return Result((None, val), i)
 
     # Failed to find a value
     # But if I found a tag, something's up

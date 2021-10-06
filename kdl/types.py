@@ -10,6 +10,9 @@ from .stream import Stream
 from .result import Result
 
 NodeT = TypeVar("NodeT", bound="Node")
+Entity = Union[
+    "Binary", "Octal", "Decimal", "Hex", "Keyword", "RawString", "EscapedString"
+]
 
 
 @dataclass
@@ -67,7 +70,10 @@ class Document:
 class Node:
     name: str
     tag: Optional[str] = None
-    entities: list[Entity] = dataclasses.field(default_factory=list)
+    values: list[Entity] = dataclasses.field(default_factory=list)
+    properties: OrderedDict[str, Entity] = dataclasses.field(
+        default_factory=OrderedDict
+    )
     children: Children = dataclasses.field(default_factory=Children)
     escaped: bool = False
 
@@ -85,16 +91,13 @@ class Node:
         # Print all the values, then all the properties
         # in alpha order, using only the last if a key
         # is duplicated.
-        properties = {}
-        for entity in self.entities:
-            if entity.escaped:
-                continue
-            if entity.key is None:
-                s += f" {entity.print()}"
-            else:
-                properties[entity.key] = entity
-        for key, entity in sorted(properties.items()):
-            s += f" {entity.print()}"
+        for value in self.values:
+            if not value.escaped:
+                s += f" {value.print()}"
+
+        for key, val in sorted(self.properties.items(), key=lambda x: x[0]):
+            if not val.escaped:
+                s += f" {printIdent(key)}={val.print()}"
 
         if self.children and not self.children.escaped:
             childrenText = ""
@@ -112,50 +115,38 @@ class Node:
 
 
 @dataclass
-class Entity:
-    key: Optional[str]
-    tag: Optional[str]
-    value: Union[Binary, Octal, Decimal, Hex, Keyword, RawString, EscapedString]
-    escaped: bool = False
-
-    def print(self):
-        if self.key is None:
-            s = ""
-        else:
-            s = printIdent(self.key) + "="
-        if self.tag is not None:
-            s += f"({printIdent(self.tag)})"
-        s += self.value.print()
-        return s
-
-
-@dataclass
 class Binary:
     value: int
+    tag: Optional[str] = None
+    escaped: bool = False
 
     def print(self) -> str:
-        return str(self.value)
+        return printTag(self.tag) + str(self.value)
 
 
 @dataclass
 class Octal:
     value: int
+    tag: Optional[str] = None
+    escaped: bool = False
 
     def print(self) -> str:
-        return str(self.value)
+        return printTag(self.tag) + str(self.value)
 
 
 @dataclass
 class Decimal:
     mantissa: Union[int, float]
     exponent: int = 0
+    tag: Optional[str] = None
+    escaped: bool = False
 
     @property
     def value(self):
         return self.mantissa * (10.0 ** self.exponent)
 
     def print(self) -> str:
-        s = str(self.mantissa)
+        s = printTag(self.tag) + str(self.mantissa)
         if self.exponent != 0:
             s += "E"
             if self.exponent > 0:
@@ -167,33 +158,48 @@ class Decimal:
 @dataclass
 class Hex:
     value: int
+    tag: Optional[str] = None
+    escaped: bool = False
 
     def print(self) -> str:
-        return str(self.value)
+        return printTag(self.tag) + str(self.value)
 
 
 @dataclass
 class Keyword:
     value: str
+    tag: Optional[str] = None
+    escaped: bool = False
 
     def print(self) -> str:
-        return self.value
+        return printTag(self.tag) + self.value
 
 
 @dataclass
 class RawString:
     value: str
+    tag: Optional[str] = None
+    escaped: bool = False
 
     def print(self) -> str:
-        return f'"{escapedFromRaw(self.value)}"'
+        return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
 
 
 @dataclass
 class EscapedString:
     value: str
+    tag: Optional[str] = None
+    escaped: bool = False
 
     def print(self) -> str:
-        return f'"{escapedFromRaw(self.value)}"'
+        return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+
+
+def printTag(tag: Optional[str]) -> str:
+    if tag is not None:
+        return f"({printIdent(tag)})"
+    else:
+        return ""
 
 
 def escapedFromRaw(chars: str) -> str:
