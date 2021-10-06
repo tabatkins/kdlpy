@@ -72,6 +72,9 @@ class Node:
     escaped: bool = False
 
     def print(self, indent: int = 0) -> str:
+        if self.escaped:
+            return ""
+
         s = "    " * indent
 
         if self.tag is not None:
@@ -84,6 +87,8 @@ class Node:
         # is duplicated.
         properties = {}
         for entity in self.entities:
+            if entity.escaped:
+                continue
             if entity.key is None:
                 s += f" {entity.print()}"
             else:
@@ -91,11 +96,16 @@ class Node:
         for key, entity in sorted(properties.items()):
             s += f" {entity.print()}"
 
-        if self.children:
-            s += " {\n"
+        if self.children and not self.children.escaped:
+            childrenText = ""
             for child in self.children:
-                s += child.print(indent=indent + 1)
-            s += "    " * indent + "}\n"
+                childrenText += child.print(indent=indent + 1)
+            if childrenText:
+                s += " {\n"
+                s += childrenText
+                s += "    " * indent + "}\n"
+            else:
+                s += "\n"
         else:
             s += "\n"
         return s

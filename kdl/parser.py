@@ -28,6 +28,9 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
 
 def parseNode(s: Stream, start: int) -> Result:
     i = start
+
+    sd, i = parseSlashDash(s, i)
+
     # tag?
     tag, i = parseTag(s, i)
 
@@ -42,13 +45,9 @@ def parseNode(s: Stream, start: int) -> Result:
         space, i = parseNodespace(s, i)
         if space is None:
             break
-        prop, i = parseProperty(s, i)
-        if prop is not None:
-            entities.append(prop)
-            continue
-        val, i = parseValue(s, i)
-        if val is not None:
-            entities.append(val)
+        entity, i = parseEntity(s, i)
+        if entity is not None:
+            entities.append(entity)
             continue
         break
 
@@ -62,15 +61,20 @@ def parseNode(s: Stream, start: int) -> Result:
     _, i = parseNodeTerminator(s, i)
 
     return Result(
-        types.Node(name=name, tag=tag, entities=entities, children=children), i
+        types.Node(
+            name=name, tag=tag, entities=entities, children=children, escaped=bool(sd)
+        ),
+        i,
     )
 
 
 def parseNodeChildren(s: Stream, start: int) -> Result:
-    if s[start] != "{":
+    sd, i = parseSlashDash(s, start)
+
+    if s[i] != "{":
         return Result.fail(start)
+    i += 1
     nodes = []
-    i = start + 1
     while True:
         _, i = parseLinespace(s, i)
         node, i = parseNode(s, i)
@@ -83,7 +87,7 @@ def parseNodeChildren(s: Stream, start: int) -> Result:
         raise ParseError(s, start, "Hit EOF while searching for end of child list")
     if s[i] != "}":
         raise ParseError(s, i, "Junk between end of child list and closing }")
-    return Result(types.Children(nodes), i + 1)
+    return Result(types.Children(nodes, escaped=bool(sd)), i + 1)
 
 
 def parseTag(s: Stream, start: int) -> Result:
@@ -135,8 +139,22 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
     raise ParseError(s, start, f"Junk after node, before terminator.")
 
 
+def parseEntity(s: Stream, start: int) -> Result:
+    sd, i = parseSlashDash(s, start)
+
+    ent, i = parseProperty(s, i)
+    if ent is None:
+        ent, i = parseValue(s, i)
+        if ent is None:
+            return Result.fail(start)
+    ent.escaped = bool(sd)
+    return Result(ent, i)
+
+
 def parseProperty(s: Stream, start: int) -> Result:
-    key, i = parseIdent(s, start)
+    sd, i = parseSlashDash(s, start)
+
+    key, i = parseIdent(s, i)
     if key is None:
         return Result.fail(start)
     if s[i] != "=":
@@ -580,3 +598,10 @@ def isLinespaceChar(ch: str) -> bool:
     if not ch:
         return False
     return isWSChar(ch) or isNewlineChar(ch)
+
+
+def parseSlashDash(s: Stream, start: int) -> Result:
+    if s[start] == "/" and s[start + 1] == "-":
+        _, i = parseNodespace(s, start + 2)
+        return Result(True, i)
+    return Result.fail(start)
