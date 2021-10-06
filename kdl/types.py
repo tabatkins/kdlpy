@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import dataclasses
 
 from .stream import Stream
-from .result import Result
+from .result import Result, Failure
 from . import printing
 
 NodeT = TypeVar("NodeT", bound="Node")
@@ -17,45 +17,8 @@ Entity = Union[
 
 
 @dataclass
-class Children(MutableSequence[NodeT]):
-    _nodes: list[Node] = dataclasses.field(default_factory=list)
-    escaped: bool = False
-
-    @overload
-    def __getitem__(self, index: int) -> NodeT:
-        ...
-
-    @overload
-    def __getitem__(self, index: slice) -> Children[NodeT]:
-        ...
-
-    def __getitem__(self, index):
-        return self._nodes[index]
-
-    @overload
-    def __setitem__(self, index: int, item: NodeT) -> None:
-        ...
-
-    @overload
-    def __setitem__(self, index: slice, item: Iterable[NodeT]) -> None:
-        ...
-
-    def __setitem__(self, index, item):
-        self._nodes[index] = item
-
-    def __delitem__(self, index: Union[int, slice]) -> None:
-        del self._nodes[index]
-
-    def __len__(self) -> int:
-        return len(self._nodes)
-
-    def insert(self, index: int, item: NodeT) -> None:
-        self._nodes.insert(index, item)
-
-
-@dataclass
 class Document:
-    children: Children = dataclasses.field(default_factory=Children)
+    children: list[Node] = dataclasses.field(default_factory=list)
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -77,14 +40,13 @@ class Node:
     properties: OrderedDict[str, Entity] = dataclasses.field(
         default_factory=OrderedDict
     )
-    children: Children = dataclasses.field(default_factory=Children)
-    escaped: bool = False
+    children: list[Node] = dataclasses.field(default_factory=list)
 
-    def print(self, indentLevel:int = 0, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(
+        self, indentLevel: int = 0, config: Optional[printing.PrintConfig] = None
+    ) -> str:
         if config is None:
             config = printing.defaultPrintConfig
-        if self.escaped:
-            return ""
 
         s = config.indent * indentLevel
 
@@ -97,18 +59,24 @@ class Node:
         # in alpha order, using only the last if a key
         # is duplicated.
         for value in self.values:
-            if not config.printNullArgs and isinstance(value, Keyword) and value.value == "null":
+            if (
+                not config.printNullArgs
+                and isinstance(value, Keyword)
+                and value.value == "null"
+            ):
                 continue
-            if not value.escaped:
-                s += f" {value.print(config)}"
+            s += f" {value.print(config)}"
 
         for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
-            if not config.printNullProps and isinstance(value, Keyword) and value.value == "null":
+            if (
+                not config.printNullProps
+                and isinstance(value, Keyword)
+                and value.value == "null"
+            ):
                 continue
-            if not value.escaped:
-                s += f" {printIdent(key)}={value.print(config)}"
+            s += f" {printIdent(key)}={value.print(config)}"
 
-        if self.children and not self.children.escaped:
+        if self.children:
             childrenText = ""
             for child in self.children:
                 childrenText += child.print(indentLevel=indentLevel + 1, config=config)
@@ -127,7 +95,6 @@ class Node:
 class Binary:
     value: int
     tag: Optional[str] = None
-    escaped: bool = False
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -144,7 +111,6 @@ class Binary:
 class Octal:
     value: int
     tag: Optional[str] = None
-    escaped: bool = False
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -162,7 +128,6 @@ class Decimal:
     mantissa: Union[int, float]
     exponent: int = 0
     tag: Optional[str] = None
-    escaped: bool = False
 
     @property
     def value(self):
@@ -184,7 +149,6 @@ class Decimal:
 class Hex:
     value: int
     tag: Optional[str] = None
-    escaped: bool = False
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -201,7 +165,6 @@ class Hex:
 class Keyword:
     value: str
     tag: Optional[str] = None
-    escaped: bool = False
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -213,7 +176,6 @@ class Keyword:
 class RawString:
     value: str
     tag: Optional[str] = None
-    escaped: bool = False
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -225,7 +187,6 @@ class RawString:
 class EscapedString:
     value: str
     tag: Optional[str] = None
-    escaped: bool = False
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
@@ -267,7 +228,7 @@ def isBareIdent(chars: str) -> bool:
 
 def parseBareIdent(s: Stream, start: int) -> Result:
     res, i = parseIdentStart(s, start)
-    if not res:
+    if res is Failure:
         return Result.fail(start)
     while isIdentChar(s[i]):
         i += 1

@@ -6,7 +6,7 @@ from typing import Union
 from . import types
 from .errors import ParseError
 from .stream import Stream
-from .result import Result
+from .result import Result, Failure
 
 
 def parse(input):
@@ -20,9 +20,9 @@ def parseDocument(s: Stream, start: int = 0) -> types.Document:
         if s.eof(i):
             return doc
         node, i = parseNode(s, i)
-        if node is None:
+        if node is Failure:
             raise ParseError(s, i, "Expected a node")
-        if not node.escaped:
+        if node:
             doc.children.append(node)
         _, i = parseLinespace(s, i)
 
@@ -31,26 +31,30 @@ def parseNode(s: Stream, start: int) -> Result:
     i = start
 
     sd, i = parseSlashDash(s, i)
+    if sd is Failure:
+        sd = False
 
     # tag?
     tag, i = parseTag(s, i)
+    if tag is Failure:
+        tag = None
 
     # name
     name, i = parseIdent(s, i)
-    if name is None:
+    if name is Failure:
         return Result.fail(start)
 
-    node = types.Node(tag=tag, name=name, escaped=bool(sd))
+    node = types.Node(tag=tag, name=name)
 
     # props and values
     while True:
         space, i = parseNodespace(s, i)
-        if space is None:
+        if space is Failure:
             break
         entity, i = parseEntity(s, i)
-        if entity is None:
+        if entity is Failure:
             break
-        if entity[1].escaped:
+        if entity is None:
             continue
         if entity[0] is None:
             node.values.append(entity[1])
@@ -60,17 +64,22 @@ def parseNode(s: Stream, start: int) -> Result:
     _, i = parseNodespace(s, i)
 
     children, i = parseNodeChildren(s, i)
-    if children is not None and not children.escaped:
+    if children is not Failure:
         node.children = children
 
     _, i = parseNodespace(s, i)
     _, i = parseNodeTerminator(s, i)
 
-    return Result(node, i)
+    if sd:
+        return Result(None, i)
+    else:
+        return Result(node, i)
 
 
 def parseNodeChildren(s: Stream, start: int) -> Result:
     sd, i = parseSlashDash(s, start)
+    if sd is Failure:
+        sd = False
 
     if s[i] != "{":
         return Result.fail(start)
@@ -79,24 +88,26 @@ def parseNodeChildren(s: Stream, start: int) -> Result:
     while True:
         _, i = parseLinespace(s, i)
         node, i = parseNode(s, i)
-        if node is not None:
-            if not node.escaped:
-                nodes.append(node)
-        else:
+        if node is Failure:
             break
+        if node is not None:
+            nodes.append(node)
     _, i = parseLinespace(s, i)
     if s.eof(i):
         raise ParseError(s, start, "Hit EOF while searching for end of child list")
     if s[i] != "}":
         raise ParseError(s, i, "Junk between end of child list and closing }")
-    return Result(types.Children(nodes, escaped=bool(sd)), i + 1)
+    if sd:
+        return Result(None, i + 1)
+    else:
+        return Result(nodes, i + 1)
 
 
 def parseTag(s: Stream, start: int) -> Result:
     if s[start] != "(":
         return Result.fail(start)
     tag, end = parseIdent(s, start + 1)
-    if tag is None:
+    if tag is Failure:
         return Result.fail(start)
     if s[end] != ")":
         raise ParseError(s, end, f"Junk between tag ident and closing paren.")
@@ -105,14 +116,14 @@ def parseTag(s: Stream, start: int) -> Result:
 
 def parseIdent(s: Stream, start: int) -> Result:
     string, i = parseString(s, start)
-    if string is not None:
+    if string is not Failure:
         return Result(string.value, i)
     return parseBareIdent(s, start)
 
 
 def parseBareIdent(s: Stream, start: int) -> Result:
     res, i = parseIdentStart(s, start)
-    if not res:
+    if res is Failure:
         return Result.fail(start)
     while isIdentChar(s[i]):
         i += 1
@@ -123,7 +134,7 @@ def parseBareIdent(s: Stream, start: int) -> Result:
 
 
 def parseIdentStart(s: Stream, start: int) -> Result:
-    if s[start] in "0123456789" or (s[start] in "+-" and s[start + 1] in "0123456789"):
+    if isDigit(s[start]) or (isSign(s[start]) and isDigit(s[start + 1])):
         return Result.fail(start)
     if not isIdentChar(s[start]):
         return Result.fail(start)
@@ -143,41 +154,45 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
 
 def parseEntity(s: Stream, start: int) -> Result:
     sd, i = parseSlashDash(s, start)
+    if sd is Failure:
+        sd = False
 
     ent, i = parseProperty(s, i)
-    if ent is None:
+    if ent is Failure:
         ent, i = parseValue(s, i)
-        if ent is None:
+        if ent is Failure:
             return Result.fail(start)
-    ent[1].escaped = bool(sd)
-    return Result(ent, i)
+    if sd:
+        return Result(None, i)
+    else:
+        return Result(ent, i)
 
 
 def parseProperty(s: Stream, start: int) -> Result:
-    sd, i = parseSlashDash(s, start)
-
-    key, i = parseIdent(s, i)
-    if key is None:
+    key, i = parseIdent(s, start)
+    if key is Failure:
         return Result.fail(start)
     if s[i] != "=":
         # property name might be a string,
         # so this isn't point-of-no-return yet
         return Result.fail(start)
     entity, i = parseValue(s, i + 1)
-    if entity is None:
+    if entity is Failure:
         raise ParseError(s, i, "Expected value after prop=.")
     return Result((key, entity[1]), i)
 
 
 def parseValue(s: Stream, start: int) -> Result:
     tag, i = parseTag(s, start)
+    if tag is Failure:
+        tag = None
 
     val, i = parseNumber(s, i)
-    if val is None:
+    if val is Failure:
         val, i = parseKeyword(s, i)
-        if val is None:
+        if val is Failure:
             val, i = parseString(s, i)
-    if val is not None:
+    if val is not Failure:
         val.tag = tag
         return Result((None, val), i)
 
@@ -213,7 +228,7 @@ def parseBinaryNumber(s: Stream, start: int):
 
     # optional sign
     sign, i = parseSign(s, i)
-    if sign is None:
+    if sign is Failure:
         sign = 1
 
     # prefix
@@ -238,7 +253,7 @@ def parseOctalNumber(s: Stream, start: int):
 
     # optional sign
     sign, i = parseSign(s, i)
-    if sign is None:
+    if sign is Failure:
         sign = 1
 
     # prefix
@@ -263,7 +278,7 @@ def parseHexNumber(s: Stream, start: int):
 
     # optional sign
     sign, i = parseSign(s, i)
-    if sign is None:
+    if sign is Failure:
         sign = 1
 
     # prefix
@@ -294,7 +309,7 @@ def parseDecimalNumber(s: Stream, start: int) -> Result:
 
     if s[i] == ".":
         result, i = parseDigits(s, i + 1)
-        if result is None:
+        if result is Failure:
             raise ParseError(s, i, "Expected digit after decimal point.")
 
     mantissaChars = s[start:i].replace("_", "")
@@ -314,7 +329,7 @@ def parseDecimalNumber(s: Stream, start: int) -> Result:
         exponentStart = i + 1
         _, i = parseSign(s, i + 1)
         result, i = parseDigits(s, i)
-        if result is None:
+        if result is Failure:
             raise ParseError(s, i, "Expected number after exponent.")
         exponent = int(s[exponentStart:i].replace("_", ""))
 
@@ -386,7 +401,7 @@ def parseEscapedString(s: Stream, start: int) -> Result:
                 s, start, "Hit EOF while looking for the end of the string"
             )
         ch, i = parseEscape(s, i)
-        if ch is None:
+        if ch is Failure:
             raise ParseError(s, i, "Invalid escape sequence in string")
         rawChars += ch
 
@@ -463,7 +478,7 @@ def parseRawString(s: Stream, start: int) -> Result:
         stringEnd = i
         i += 1
         result, i = parseFinalHashes(s, i, expectedCount=hashCount)
-        if result:
+        if result is not Failure:
             return Result(types.RawString(s[stringStart:stringEnd]), i)
 
 
@@ -506,7 +521,7 @@ def parseLinespace(s: Stream, start: int) -> Result:
         nl, i = parseNewline(s, i)
         ws, i = parseWhitespace(s, i)
         sc, i = parseSingleLineComment(s, i)
-        if nl is None and ws is None and sc is None:
+        if nl is Failure and ws is Failure and sc is Failure:
             break
     if i == start:
         return Result.fail(start)
@@ -518,7 +533,7 @@ def parseNodespace(s: Stream, start: int) -> Result:
     while True:
         _, i = parseWhitespace(s, i)
         escline, i = parseEscline(s, i)
-        if escline is None:
+        if escline is Failure:
             break
     if i == start:
         return Result.fail(start)
@@ -532,7 +547,7 @@ def parseEscline(s: Stream, start: int) -> Result:
     if s[i] == "\n":
         return Result(True, i + 1)
     sl, i = parseSingleLineComment(s, i)
-    if sl is not None:
+    if sl is not Failure:
         return Result(True, i)
     return Result.fail(start)
 
@@ -542,7 +557,7 @@ def parseWhitespace(s: Stream, start: int) -> Result:
     while True:
         sp, i = parseUnicodeSpace(s, i)
         bc, i = parseBlockComment(s, i)
-        if sp is None and bc is None:
+        if sp is Failure and bc is Failure:
             break
     if i == start:
         return Result.fail(start)
