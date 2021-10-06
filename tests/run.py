@@ -20,11 +20,12 @@ def main():
     inputs, goldens = findTestFiles()
     good = []
     bad = []
+    printConfig = kdl.printing.PrintConfig(indent="    ", respectRadix=False, exponent="E")
     for filename in sorted(inputs):
         inputPath = os.path.join(TEST_DIR, filename)
         try:
             with open(inputPath, "r", encoding="utf-8") as fh:
-                output = kdl.parse(fh.read()).print()
+                output = kdl.parse(fh.read()).print(config=printConfig)
         except kdl.errors.ParseError as e:
             if filename not in goldens:
                 # Success, parse failure was intended

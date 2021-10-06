@@ -8,6 +8,7 @@ import dataclasses
 
 from .stream import Stream
 from .result import Result
+from . import printing
 
 NodeT = TypeVar("NodeT", bound="Node")
 Entity = Union[
@@ -56,10 +57,12 @@ class Children(MutableSequence[NodeT]):
 class Document:
     children: Children = dataclasses.field(default_factory=Children)
 
-    def print(self) -> str:
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
         s = ""
         for node in self.children:
-            s += node.print()
+            s += node.print(0, config)
         if s == "":
             # always end a kdl doc with a newline
             s = "\n"
@@ -77,11 +80,13 @@ class Node:
     children: Children = dataclasses.field(default_factory=Children)
     escaped: bool = False
 
-    def print(self, indent: int = 0) -> str:
+    def print(self, indentLevel:int = 0, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
         if self.escaped:
             return ""
 
-        s = "    " * indent
+        s = config.indent * indentLevel
 
         if self.tag is not None:
             s += f"({printIdent(self.tag)})"
@@ -92,23 +97,27 @@ class Node:
         # in alpha order, using only the last if a key
         # is duplicated.
         for value in self.values:
+            if not config.printNullArgs and isinstance(value, Keyword) and value.value == "null":
+                continue
             if not value.escaped:
-                s += f" {value.print()}"
+                s += f" {value.print(config)}"
 
-        for key, val in sorted(self.properties.items(), key=lambda x: x[0]):
-            if not val.escaped:
-                s += f" {printIdent(key)}={val.print()}"
+        for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
+            if not config.printNullProps and isinstance(value, Keyword) and value.value == "null":
+                continue
+            if not value.escaped:
+                s += f" {printIdent(key)}={value.print(config)}"
 
         if self.children and not self.children.escaped:
             childrenText = ""
             for child in self.children:
-                childrenText += child.print(indent=indent + 1)
+                childrenText += child.print(indentLevel=indentLevel + 1, config=config)
             if childrenText:
                 s += " {\n"
                 s += childrenText
-                s += "    " * indent + "}\n"
-            else:
-                s += "\n"
+                s += config.indent * indentLevel + "}"
+        if config.semicolons:
+            s += ";\n"
         else:
             s += "\n"
         return s
@@ -120,8 +129,15 @@ class Binary:
     tag: Optional[str] = None
     escaped: bool = False
 
-    def print(self) -> str:
-        return printTag(self.tag) + str(self.value)
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
+        s = printTag(self.tag)
+        if config.respectRadix:
+            s += "0b" + bin(self.value)
+        else:
+            s += str(self.value)
+        return s
 
 
 @dataclass
@@ -130,8 +146,15 @@ class Octal:
     tag: Optional[str] = None
     escaped: bool = False
 
-    def print(self) -> str:
-        return printTag(self.tag) + str(self.value)
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
+        s = printTag(self.tag)
+        if config.respectRadix:
+            s += "0o" + oct(self.value)
+        else:
+            s += str(self.value)
+        return s
 
 
 @dataclass
@@ -145,10 +168,12 @@ class Decimal:
     def value(self):
         return self.mantissa * (10.0 ** self.exponent)
 
-    def print(self) -> str:
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
         s = printTag(self.tag) + str(self.mantissa)
         if self.exponent != 0:
-            s += "E"
+            s += config.exponent
             if self.exponent > 0:
                 s += "+"
             s += str(self.exponent)
@@ -161,8 +186,15 @@ class Hex:
     tag: Optional[str] = None
     escaped: bool = False
 
-    def print(self) -> str:
-        return printTag(self.tag) + str(self.value)
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
+        s = printTag(self.tag)
+        if config.respectRadix:
+            s += "0x" + hex(self.value)
+        else:
+            s += str(self.value)
+        return s
 
 
 @dataclass
@@ -171,7 +203,9 @@ class Keyword:
     tag: Optional[str] = None
     escaped: bool = False
 
-    def print(self) -> str:
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
         return printTag(self.tag) + self.value
 
 
@@ -181,7 +215,9 @@ class RawString:
     tag: Optional[str] = None
     escaped: bool = False
 
-    def print(self) -> str:
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
         return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
 
 
@@ -191,7 +227,9 @@ class EscapedString:
     tag: Optional[str] = None
     escaped: bool = False
 
-    def print(self) -> str:
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
         return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
 
 
