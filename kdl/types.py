@@ -180,7 +180,18 @@ class RawString:
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
             config = printing.defaultPrintConfig
-        return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+        if config.respectStringType:
+            hashes = "#" * findRequiredHashCount(self.value)
+            return f'{printTag(self.tag)}r{hashes}"{self.value}"{hashes}'
+        else:
+            return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+
+
+def findRequiredHashCount(chars: str) -> int:
+    for i in range(0, 100):
+        ender = '"' + ("#" * i)
+        if ender not in chars:
+            return i
 
 
 @dataclass

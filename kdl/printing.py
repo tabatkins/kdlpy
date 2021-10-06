@@ -9,6 +9,7 @@ class PrintConfig:
     printNullArgs: bool = True
     printNullProps: bool = True
     respectRadix: bool = True
+    respectStringType: bool = True
     exponent: str = "e"
 
 

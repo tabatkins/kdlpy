@@ -21,7 +21,7 @@ def main():
     good = []
     bad = []
     printConfig = kdl.printing.PrintConfig(
-        indent="    ", respectRadix=False, exponent="E"
+        indent="    ", respectRadix=False, respectStringType=False, exponent="E"
     )
     for filename in sorted(inputs):
         inputPath = os.path.join(TEST_DIR, filename)
