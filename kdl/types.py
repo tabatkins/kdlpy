@@ -29,6 +29,9 @@ class Document:
             s = "\n"
         return s
 
+    def __str__(self) -> str:
+        return self.print()
+
 
 @dataclass
 class Node:
@@ -80,6 +83,9 @@ class Node:
             s += "\n"
         return s
 
+    def __str__(self) -> str:
+        return self.print()
+
 
 @dataclass
 class Binary:
@@ -96,6 +102,9 @@ class Binary:
             s += str(self.value)
         return s
 
+    def __str__(self) -> str:
+        return self.print()
+
 
 @dataclass
 class Octal:
@@ -111,6 +120,9 @@ class Octal:
         else:
             s += str(self.value)
         return s
+
+    def __str__(self) -> str:
+        return self.print()
 
 
 @dataclass
@@ -134,6 +146,9 @@ class Decimal:
             s += str(self.exponent)
         return s
 
+    def __str__(self) -> str:
+        return self.print()
+
 
 @dataclass
 class Hex:
@@ -150,6 +165,9 @@ class Hex:
             s += str(self.value)
         return s
 
+    def __str__(self) -> str:
+        return self.print()
+
 
 @dataclass
 class Bool:
@@ -160,6 +178,9 @@ class Bool:
         if config is None:
             config = printing.defaultPrintConfig
         return printTag(self.tag) + ("true" if self.value else "false")
+
+    def __str__(self) -> str:
+        return self.print()
 
 
 @dataclass
@@ -175,6 +196,9 @@ class Null:
             config = printing.defaultPrintConfig
         return printTag(self.tag) + "null"
 
+    def __str__(self) -> str:
+        return self.print()
+
 
 @dataclass
 class RawString:
@@ -189,6 +213,9 @@ class RawString:
             return f'{printTag(self.tag)}r{hashes}"{self.value}"{hashes}'
         else:
             return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+
+    def __str__(self) -> str:
+        return self.print()
 
 
 def findRequiredHashCount(chars: str) -> int:
@@ -208,6 +235,9 @@ class String:
         if config is None:
             config = printing.defaultPrintConfig
         return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+
+    def __str__(self) -> str:
+        return self.print()
 
 
 def printTag(tag: Optional[str]) -> str:
