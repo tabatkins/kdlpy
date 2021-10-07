@@ -9,22 +9,18 @@ from .stream import Stream
 from .result import Result, Failure
 
 
-def parse(input):
-    return parseDocument(Stream(input), 0)
-
-
-def parseDocument(s: Stream, start: int = 0) -> types.Document:
+def parse(input: str) -> types.Document:
     doc = types.Document()
-    _, i = parseLinespace(s, start)
-    while True:
-        if s.eof(i):
-            return doc
+    s = Stream(input)
+    _, i = parseLinespace(s, 0)
+    while not s.eof(i):
         node, i = parseNode(s, i)
         if node is Failure:
             raise ParseError(s, i, "Expected a node")
         if node:
             doc.children.append(node)
         _, i = parseLinespace(s, i)
+    return doc
 
 
 def parseNode(s: Stream, start: int) -> Result:
