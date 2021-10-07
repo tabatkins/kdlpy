@@ -12,7 +12,7 @@ from . import printing
 
 NodeT = TypeVar("NodeT", bound="Node")
 Entity = Union[
-    "Binary", "Octal", "Decimal", "Hex", "Keyword", "RawString", "EscapedString"
+    "Binary", "Octal", "Decimal", "Hex", "Bool", "Null", "RawString", "String"
 ]
 
 
@@ -162,14 +162,24 @@ class Hex:
 
 
 @dataclass
-class Keyword:
-    value: str
+class Bool:
+    value: bool
     tag: Optional[str] = None
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
             config = printing.defaultPrintConfig
-        return printTag(self.tag) + self.value
+        return printTag(self.tag) + ("true" if self.value else "false")
+
+
+@dataclass
+class Null:
+    tag: Optional[str] = None
+
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        if config is None:
+            config = printing.defaultPrintConfig
+        return printTag(self.tag) + "null"
 
 
 @dataclass
@@ -195,7 +205,7 @@ def findRequiredHashCount(chars: str) -> int:
 
 
 @dataclass
-class EscapedString:
+class String:
     value: str
     tag: Optional[str] = None
 

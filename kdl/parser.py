@@ -368,10 +368,13 @@ def parseSign(s: Stream, start: int) -> Result:
 
 
 def parseKeyword(s: Stream, start: int) -> Result:
-    if s[start : start + 4] in ("true", "null") and not isIdentChar(s[start + 4]):
-        return Result(types.Keyword(s[start : start + 4]), start + 4)
+    val, i = parseBareIdent(s, start)
+    if s[start : start + 4] == "true" and not isIdentChar(s[start + 4]):
+        return Result(types.Bool(True), start + 4)
     if s[start : start + 5] == "false" and not isIdentChar(s[start + 5]):
-        return Result(types.Keyword(s[start : start + 5]), start + 5)
+        return Result(types.Bool(False), start + 5)
+    if s[start : start + 4] == "null" and not isIdentChar(s[start + 4]):
+        return Result(types.Null(), start + 4)
     return Result.fail(start)
 
 
@@ -405,7 +408,7 @@ def parseEscapedString(s: Stream, start: int) -> Result:
             raise ParseError(s, i, "Invalid escape sequence in string")
         rawChars += ch
 
-    return Result(types.EscapedString(rawChars), i + 1)
+    return Result(types.String(rawChars), i + 1)
 
 
 def parseEscape(s: Stream, start: int) -> Result:
