@@ -13,4 +13,4 @@ class PrintConfig:
     exponent: str = "e"
 
 
-defaultPrintConfig = PrintConfig()
+defaults = PrintConfig()

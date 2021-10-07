@@ -18,9 +18,7 @@ class Parser:
         self.printConfig = printConfig
 
     def parse(self, chars: str, config: Optional[ParseConfig] = None) -> types.Document:
-        if config is None:
-            config = self.parseConfig
-        doc = parsefuncs.parse(chars, config)
+        doc = parsefuncs.parse(chars, config or self.parseConfig or defaults)
         doc.printConfig = self.printConfig
         return doc
 
@@ -31,4 +29,4 @@ class ParseConfig:
     nativeUntaggedValues: bool = True
 
 
-defaultParseConfig = ParseConfig()
+defaults = ParseConfig()

@@ -12,7 +12,7 @@ from .result import Result, Failure
 
 def parse(input: str, config: Optional[parsing.ParseConfig] = None) -> types.Document:
     if config is None:
-        config = parsing.defaultParseConfig
+        config = parsing.defaults
     doc = types.Document()
     s = Stream(input, config)
     _, i = parseLinespace(s, 0)

@@ -20,7 +20,7 @@ class Document:
     printConfig: Optional[printing.PrintConfig] = None
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
-        config = config or self.printConfig or printing.defaultPrintConfig
+        config = config or self.printConfig or printing.defaults
         s = ""
         for node in self.children:
             s += node.print(0, config)
@@ -47,7 +47,7 @@ class Node:
         self, indentLevel: int = 0, config: Optional[printing.PrintConfig] = None
     ) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
 
         s = config.indent * indentLevel
 
@@ -94,7 +94,7 @@ class Binary:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         s = printTag(self.tag)
         if config.respectRadix:
             s += bin(self.value)
@@ -113,7 +113,7 @@ class Octal:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         s = printTag(self.tag)
         if config.respectRadix:
             s += oct(self.value)
@@ -137,7 +137,7 @@ class Decimal:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         s = printTag(self.tag) + str(self.mantissa)
         if self.exponent != 0:
             s += config.exponent
@@ -157,7 +157,7 @@ class Hex:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         s = printTag(self.tag)
         if config.respectRadix:
             s += hex(self.value)
@@ -176,7 +176,7 @@ class Bool:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         return printTag(self.tag) + ("true" if self.value else "false")
 
     def __str__(self) -> str:
@@ -193,7 +193,7 @@ class Null:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         return printTag(self.tag) + "null"
 
     def __str__(self) -> str:
@@ -207,7 +207,7 @@ class RawString:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         if config.respectStringType:
             hashes = "#" * findRequiredHashCount(self.value)
             return f'{printTag(self.tag)}r{hashes}"{self.value}"{hashes}'
@@ -233,7 +233,7 @@ class String:
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
-            config = printing.defaultPrintConfig
+            config = printing.defaults
         return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
 
     def __str__(self) -> str:
