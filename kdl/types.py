@@ -5,6 +5,7 @@ from collections import OrderedDict
 from typing import Any, Optional, Union, MutableSequence, overload, Iterable, TypeVar
 from dataclasses import dataclass
 import dataclasses
+from abc import ABC
 
 from . import printing
 
@@ -14,14 +15,7 @@ KDLValue = Union[
     float,
     bool,
     None,
-    "Binary",
-    "Octal",
-    "Decimal",
-    "Hex",
-    "Bool",
-    "Null",
-    "RawString",
-    "String",
+    "Value",
 ]
 
 
@@ -45,8 +39,12 @@ class Document:
         return self.print()
 
 
+class Component(ABC):
+    pass
+
+
 @dataclass
-class Node:
+class Node(Component):
     name: str
     tag: Optional[str] = None
     values: list[Any] = dataclasses.field(default_factory=list)
@@ -100,8 +98,12 @@ class Node:
         return self.print()
 
 
+class Value(Component):
+    pass
+
+
 @dataclass
-class Binary:
+class Binary(Value):
     value: int
     tag: Optional[str] = None
 
@@ -120,7 +122,7 @@ class Binary:
 
 
 @dataclass
-class Octal:
+class Octal(Value):
     value: int
     tag: Optional[str] = None
 
@@ -139,7 +141,7 @@ class Octal:
 
 
 @dataclass
-class Decimal:
+class Decimal(Value):
     mantissa: Union[int, float]
     exponent: int = 0
     tag: Optional[str] = None
@@ -164,7 +166,7 @@ class Decimal:
 
 
 @dataclass
-class Hex:
+class Hex(Value):
     value: int
     tag: Optional[str] = None
 
@@ -183,7 +185,7 @@ class Hex:
 
 
 @dataclass
-class Bool:
+class Bool(Value):
     value: bool
     tag: Optional[str] = None
 
@@ -197,7 +199,7 @@ class Bool:
 
 
 @dataclass
-class Null:
+class Null(Value):
     tag: Optional[str] = None
 
     @property
@@ -214,7 +216,7 @@ class Null:
 
 
 @dataclass
-class RawString:
+class RawString(Value):
     value: str
     tag: Optional[str] = None
 
@@ -240,7 +242,7 @@ def findRequiredHashCount(chars: str) -> int:
 
 
 @dataclass
-class String:
+class String(Value):
     value: str
     tag: Optional[str] = None
 
@@ -291,14 +293,7 @@ def isKdlValue(val: Any) -> bool:
             int,
             float,
             bool,
-            Binary,
-            Octal,
-            Decimal,
-            Hex,
-            Bool,
-            Null,
-            RawString,
-            String,
+            Value,
         ),
     )
 
