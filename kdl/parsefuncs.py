@@ -202,10 +202,17 @@ def parseValue(s: Stream, start: int) -> Result:
             val = s.config.tags[tag](val)
         return Result((None, val), i)
 
+    if s[i] == "'":
+        raise ParseError(s, i, "KDL strings use double-quotes.")
+
+    ident, _ = parseBareIdent(s, i)
+    if ident is not Failure and ident.lower() in ("true", "false", "null"):
+        raise ParseError(s, i, "KDL keywords are lower-case.")
+
     # Failed to find a value
     # But if I found a tag, something's up
     if tag is not None:
-        raise ParseError(s, start, "Found a tag, but no value following it.")
+        raise ParseError(s, i, "Found a tag, but no value following it.")
     return Result.fail(start)
 
 
