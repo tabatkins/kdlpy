@@ -1,9 +1,11 @@
 from __future__ import annotations
-import typing
+from typing import Tuple, Union
+
+from . import stream
 
 
 class ParseError(Exception):
-    def __init__(self, s, i: int, msg: str):
+    def __init__(self, s: Union[str, stream.Stream], i: int, msg: str):
         self.line, self.col = lineCol(s, i)
         self.msg = f"{self.line}:{self.col} parse error:"
         if "\n" in msg:
@@ -15,7 +17,7 @@ class ParseError(Exception):
         super().__init__(self.msg)
 
 
-def lineCol(s, index: int) -> typing.Tuple[int, int]:
+def lineCol(s: Union[str, stream.Stream], index: int) -> Tuple[int, int]:
     """Determines the line and column from an index."""
     line = 1
     col = 1

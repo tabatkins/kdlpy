@@ -4,6 +4,7 @@ import sys
 import os
 import argparse
 
+from typing import Tuple, Set
 
 import kdl
 
@@ -12,7 +13,7 @@ TEST_DIR = os.path.join(THIS_DIR, "test_cases", "input")
 GOLDEN_DIR = os.path.join(THIS_DIR, "test_cases", "expected_kdl")
 
 
-def main():
+def main() -> None:
     cli = argparse.ArgumentParser()
     cli.add_argument("-v", dest="verbose", action="store_true")
     options = cli.parse_args()
@@ -87,7 +88,7 @@ def main():
         #    print(f"  * {badFilename}")
 
 
-def findTestFiles():
+def findTestFiles() -> Tuple[Set[str], Set[str]]:
     inputs = set()
     goldens = set()
     for root, _, filenames in os.walk(TEST_DIR):

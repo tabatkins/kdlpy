@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from typing import Optional, Union, MutableSequence, overload, Iterable, TypeVar
+from typing import Any, Optional, Union, MutableSequence, overload, Iterable, TypeVar
 from dataclasses import dataclass
 import dataclasses
 
 from . import printing
-
-NodeT = TypeVar("NodeT", bound="Node")
-Entity = Union[
-    "Binary", "Octal", "Decimal", "Hex", "Bool", "Null", "RawString", "String"
-]
 
 
 @dataclass
@@ -37,10 +32,8 @@ class Document:
 class Node:
     name: str
     tag: Optional[str] = None
-    values: list[Entity] = dataclasses.field(default_factory=list)
-    properties: OrderedDict[str, Entity] = dataclasses.field(
-        default_factory=OrderedDict
-    )
+    values: list[Any] = dataclasses.field(default_factory=list)
+    properties: OrderedDict[str, Any] = dataclasses.field(default_factory=OrderedDict)
     children: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
@@ -132,7 +125,7 @@ class Decimal:
     tag: Optional[str] = None
 
     @property
-    def value(self):
+    def value(self) -> float:
         return self.mantissa * (10.0 ** self.exponent)
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
@@ -260,7 +253,7 @@ def escapedFromRaw(chars: str) -> str:
     )
 
 
-def printValue(val, config) -> str:
+def printValue(val: Any, config: printing.PrintConfig) -> str:
     if isinstance(val, (int, float)):
         return str(val)
     if isinstance(val, str):

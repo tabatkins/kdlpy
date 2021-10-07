@@ -225,7 +225,7 @@ def parseNumber(s: Stream, start: int) -> Result:
     )
 
 
-def parseBinaryNumber(s: Stream, start: int):
+def parseBinaryNumber(s: Stream, start: int) -> Result:
     i = start
 
     # optional sign
@@ -250,7 +250,7 @@ def parseBinaryNumber(s: Stream, start: int):
     return Result(types.Binary(value), end)
 
 
-def parseOctalNumber(s: Stream, start: int):
+def parseOctalNumber(s: Stream, start: int) -> Result:
     i = start
 
     # optional sign
@@ -275,7 +275,7 @@ def parseOctalNumber(s: Stream, start: int):
     return Result(types.Octal(value), end)
 
 
-def parseHexNumber(s: Stream, start: int):
+def parseHexNumber(s: Stream, start: int) -> Result:
     i = start
 
     # optional sign
