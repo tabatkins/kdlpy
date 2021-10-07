@@ -59,20 +59,12 @@ class Node:
         # in alpha order, using only the last if a key
         # is duplicated.
         for value in self.values:
-            if (
-                not config.printNullArgs
-                and isinstance(value, Keyword)
-                and value.value == "null"
-            ):
+            if not config.printNullArgs and value.value is None:
                 continue
             s += f" {value.print(config)}"
 
         for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
-            if (
-                not config.printNullProps
-                and isinstance(value, Keyword)
-                and value.value == "null"
-            ):
+            if not config.printNullProps and value.value is None:
                 continue
             s += f" {printIdent(key)}={value.print(config)}"
 
@@ -176,6 +168,10 @@ class Bool:
 class Null:
     tag: Optional[str] = None
 
+    @property
+    def value(self) -> None:
+        return None
+
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:
             config = printing.defaultPrintConfig
@@ -202,6 +198,7 @@ def findRequiredHashCount(chars: str) -> int:
         ender = '"' + ("#" * i)
         if ender not in chars:
             return i
+    assert False, "A raw string requires more than 100 hashes???"
 
 
 @dataclass
