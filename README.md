@@ -12,6 +12,13 @@ more general than JSON and more powerful than XML,
 while avoiding the verbosity of XML
 or the explosive complexity of YAML.
 
+## Installing
+
+[will be on pypi shortly]
+
+When installed, a `kdlreformat` command-line program is also made available,
+which can canonicalize a KDL document. See [below][#kdlreformat] for options.
+
 ## Using
 
 The `kdl.parse(str, parseConfig?)` function parses, you guessed it, a string of KDL into a KDL document object:
@@ -204,3 +211,41 @@ A `PrintConfig` object has the following properties:
 	* `error.msg: str`: hopefully informative
 	* `error.line: int`: 1-indexed
 	* `error.col: int`: 1-indexed
+
+
+## `kdlreformat`
+
+The `kdlreformat` command-line program is installed by default
+when you install this module from pypi.
+It can also be run manually from the `kdlreformat.py` file
+at the root of this repository
+(or from the `kdl.cli.cli()` function)
+
+```
+usage: kdlreformat [-h] [--indent INDENT] [--semicolons] [--radix]
+                   [--no-radix] [--raw-strings] [--no-raw-strings]
+                   [--exponent EXPONENT]
+                   [infile] [outfile]
+
+KDL parser/printer, letting you easily reformat KDL files into a canonical
+representation.
+
+positional arguments:
+  infile
+  outfile
+
+optional arguments:
+  -h, --help           show this help message and exit
+  --indent INDENT      How many spaces for each level of indent. -1 indicates
+                       to indent with tabs.
+  --semicolons         Whether to end nodes with semicolons or not.
+  --radix              Output numeric values in the radix used by the input.
+                       (0x1a outputs as 0x1a)
+  --no-radix           Convert all numeric arguments to decimal. (0x1a outputs
+                       as 26)
+  --raw-strings        Output string values in the string type used by the
+                       input.
+  --no-raw-strings     Convert all string arguments into plain strings.
+  --exponent EXPONENT  What character to use ('e' or 'E') for indicating
+                       exponents on scinot numbers.
+```
