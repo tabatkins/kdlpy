@@ -4,8 +4,8 @@ import typing
 
 class ParseError(Exception):
     def __init__(self, s, i: int, msg: str):
-        line, col = lineCol(s, i)
-        self.msg = f"{line}:{col} parse error:"
+        self.line, self.col = lineCol(s, i)
+        self.msg = f"{self.line}:{self.col} parse error:"
         if "\n" in msg:
             self.msg += "\n" + msg
         elif len(self.msg) + len(msg) + 1 > 78:
