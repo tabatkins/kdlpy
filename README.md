@@ -1,4 +1,4 @@
-# KDL.py
+# KDL-py
 
 A handwritten Python 3.7+ implemenation of a parser
 for the [KDL Document Language](https://kdl.dev),
@@ -83,6 +83,28 @@ A `ParserConfig` object has the following properties:
 	Controls whether the parser produces native Python objects (`str`, `int`, `None`, etc) when parsing untagged values (those without a `(foo)` prefix), or always produces kdlpy objects (such as `String`, `Decimal`, etc).
 
 	Tagged values like `(date)"2021-01-01"` always become kdlpy objects (in this case, `kdl.String("2021-01-01", tag="date"))`.
+
+* `tags: Dict[str, Callable] = {}`
+
+	A dictionary of tag->converter functions,
+	letting you parse tagged nodes/values
+	(like `(date)"2021-01-01"`)
+	into whatever types you'd like.
+
+	Whenever a node or value is encountered with the given tag,
+	your converter will be called with the fully-constructured kdlpy object,
+	and whatever you return will be inserted into the document instead.
+	Note that this does not specialize on type;
+	if you intend to only handle specific types of values,
+	just check the value's type and return it unchanged
+	if you don't intend to handle it.
+
+	You can produce KDL values
+	(such as parsing `(hex)"0x12.e5"` into a `kdl.Decimal`,
+	since KDL doesn't support fractional hex values),
+	or into any other type.
+	Note that non-kdlpy types are automatically handled by the printer
+	if they have a `.to_kdl()` method.
 
 ## Customizing Printing
 
