@@ -6,8 +6,6 @@ from typing import Optional, Union, MutableSequence, overload, Iterable, TypeVar
 from dataclasses import dataclass
 import dataclasses
 
-from .stream import Stream
-from .result import Result, Failure
 from . import printing
 
 NodeT = TypeVar("NodeT", bound="Node")
@@ -239,69 +237,39 @@ def printIdent(chars):
 
 
 def isBareIdent(chars: str) -> bool:
-    s = Stream(chars)
-    _, i = parseBareIdent(s, 0)
-    return i != 0 and s.eof(i)
-
-
-def parseBareIdent(s: Stream, start: int) -> Result:
-    res, i = parseIdentStart(s, start)
-    if res is Failure:
-        return Result.fail(start)
-    while isIdentChar(s[i]):
-        i += 1
-    ident = s[start:i]
-    if isKeyword(ident):
-        return Result.fail(start)
-    return Result(ident, i)
-
-
-def parseIdentStart(s: Stream, start: int) -> Result:
-    if s[start] in "0123456789" or (s[start] in "+-" and s[start + 1] in "0123456789"):
-        return Result.fail(start)
-    if not isIdentChar(s[start]):
-        return Result.fail(start)
-    return Result(s[start], start + 1)
+    if not chars:
+        return False
+    if any(not isIdentChar(x) for x in chars):
+        return False
+    if chars[0] in "0123456789":
+        return False
+    if len(chars) > 1 and chars[0] in "+-" and chars[1] in "0123456789":
+        return False
+    if chars in ("true", "false", "null"):
+        return False
+    return True
 
 
 def isIdentChar(ch: str) -> bool:
     if not ch:
         return False
+    # reserved characters
     if ch in r'''\/(){}<>;[]=,"''':
         return False
-    if isLinespaceChar(ch):
-        return False
     cp = ord(ch)
-    if cp <= 0x20:
+    # nonprintable
+    if cp < 0x20:
         return False
+    # invalid codepoint
     if cp > 0x10FFFF:
         return False
-    return True
-
-
-def isWSChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
+    # spaces
     if cp in (0x09, 0x20, 0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF):
-        return True
+        return False
+    # more spaces
     if 0x2000 <= cp <= 0x200A:
-        return True
-    return False
-
-
-def isNewlineChar(ch: str) -> bool:
-    if not ch:
         return False
-    cp = ord(ch)
-    return cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029)
-
-
-def isLinespaceChar(ch: str) -> bool:
-    if not ch:
+    # line breaks
+    if cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029):
         return False
-    return isWSChar(ch) or isNewlineChar(ch)
-
-
-def isKeyword(ident: str) -> bool:
-    return ident in ("null", "true", "false")
+    return True
