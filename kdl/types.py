@@ -97,7 +97,7 @@ class Binary:
             config = printing.defaultPrintConfig
         s = printTag(self.tag)
         if config.respectRadix:
-            s += "0b" + bin(self.value)
+            s += bin(self.value)
         else:
             s += str(self.value)
         return s
@@ -116,7 +116,7 @@ class Octal:
             config = printing.defaultPrintConfig
         s = printTag(self.tag)
         if config.respectRadix:
-            s += "0o" + oct(self.value)
+            s += oct(self.value)
         else:
             s += str(self.value)
         return s
@@ -160,7 +160,7 @@ class Hex:
             config = printing.defaultPrintConfig
         s = printTag(self.tag)
         if config.respectRadix:
-            s += "0x" + hex(self.value)
+            s += hex(self.value)
         else:
             s += str(self.value)
         return s
