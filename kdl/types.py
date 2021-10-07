@@ -8,6 +8,22 @@ import dataclasses
 
 from . import printing
 
+KDLValue = Union[
+    str,
+    int,
+    float,
+    bool,
+    None,
+    "Binary",
+    "Octal",
+    "Decimal",
+    "Hex",
+    "Bool",
+    "Null",
+    "RawString",
+    "String",
+]
+
 
 @dataclass
 class Document:
@@ -18,6 +34,7 @@ class Document:
         config = config or self.printConfig or printing.defaults
         s = ""
         for node in self.children:
+            node = toKdlNode(node)
             s += node.print(0, config)
         if s == "":
             # always end a kdl doc with a newline
@@ -53,11 +70,13 @@ class Node:
         # in alpha order, using only the last if a key
         # is duplicated.
         for value in self.values:
+            value = toKdlValue(value)
             if not config.printNullArgs and value.value is None:
                 continue
             s += f" {printValue(value, config)}"
 
         for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
+            value = toKdlValue(value)
             if not config.printNullProps and value.value is None:
                 continue
             s += f" {printIdent(key)}={printValue(value, config)}"
@@ -65,6 +84,7 @@ class Node:
         if self.children:
             childrenText = ""
             for child in self.children:
+                child = toKdlNode(child)
                 childrenText += child.print(indentLevel=indentLevel + 1, config=config)
             if childrenText:
                 s += " {\n"
@@ -231,6 +251,52 @@ class String:
 
     def __str__(self) -> str:
         return self.print()
+
+
+def toKdlNode(val: Any) -> Node:
+    if isinstance(val, Node):
+        return val
+    if not callable(getattr(val, "to_kdl", None)):
+        raise Exception(f"Can't convert object to KDL for serialization. Got:\n{val}")
+    node = val.to_kdl()
+    if not isinstance(node, Node):
+        raise Exception(f"Expected object to convert to KDL Node. Got:\n{val}")
+    return node
+
+
+def toKdlValue(val: Any) -> KDLValue:
+    if isKdlValue(val):
+        return val
+    if not callable(getattr(val, "to_kdl", None)):
+        raise Exception(f"Can't convert object to KDL for serialization. Got:\n{val}")
+    value = val.to_kdl()
+    if not isKdlValue(value):
+        raise Exception(
+            f"Expected object to convert to KDL value or compatible primitive. Got:\n{val}"
+        )
+    return value
+
+
+def isKdlValue(val: Any) -> bool:
+    if val is None:
+        return True
+    return isinstance(
+        val,
+        (
+            str,
+            int,
+            float,
+            bool,
+            Binary,
+            Octal,
+            Decimal,
+            Hex,
+            Bool,
+            Null,
+            RawString,
+            String,
+        ),
+    )
 
 
 def printTag(tag: Optional[str]) -> str:
