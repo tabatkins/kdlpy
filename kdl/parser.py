@@ -198,7 +198,7 @@ def parseValue(s: Stream, start: int) -> Result:
 
     # Failed to find a value
     # But if I found a tag, something's up
-    if tag:
+    if tag is not None:
         raise ParseError(s, start, "Found a tag, but no value following it.")
     return Result.fail(start)
 
