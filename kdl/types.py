@@ -257,10 +257,12 @@ def toKdlNode(val: Any) -> Node:
     if isinstance(val, Node):
         return val
     if not callable(getattr(val, "to_kdl", None)):
-        raise Exception(f"Can't convert object to KDL for serialization. Got:\n{val}")
+        raise Exception(
+            f"Can't convert object to KDL for serialization. Got:\n{repr(val)}"
+        )
     node = val.to_kdl()
     if not isinstance(node, Node):
-        raise Exception(f"Expected object to convert to KDL Node. Got:\n{val}")
+        raise Exception(f"Expected object to convert to KDL Node. Got:\n{repr(val)}")
     return node
 
 
@@ -268,11 +270,13 @@ def toKdlValue(val: Any) -> KDLValue:
     if isKdlValue(val):
         return val
     if not callable(getattr(val, "to_kdl", None)):
-        raise Exception(f"Can't convert object to KDL for serialization. Got:\n{val}")
+        raise Exception(
+            f"Can't convert object to KDL for serialization. Got:\n{repr(val)}"
+        )
     value = val.to_kdl()
     if not isKdlValue(value):
         raise Exception(
-            f"Expected object to convert to KDL value or compatible primitive. Got:\n{val}"
+            f"Expected object to convert to KDL value or compatible primitive. Got:\n{repr(val)}"
         )
     return value
 
