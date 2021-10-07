@@ -1,17 +1,20 @@
 from __future__ import annotations
 import collections
 import typing
-from typing import Union
+from typing import Union, Optional
 
 from . import types
+from . import parsing
 from .errors import ParseError
 from .stream import Stream
 from .result import Result, Failure
 
 
-def parse(input: str) -> types.Document:
+def parse(input: str, config: Optional[parsing.ParseConfig] = None) -> types.Document:
+    if config is None:
+        config = parsing.defaultParseConfig
     doc = types.Document()
-    s = Stream(input)
+    s = Stream(input, config)
     _, i = parseLinespace(s, 0)
     while not s.eof(i):
         node, i = parseNode(s, i)
@@ -189,7 +192,10 @@ def parseValue(s: Stream, start: int) -> Result:
         if val is Failure:
             val, i = parseString(s, i)
     if val is not Failure:
-        val.tag = tag
+        if tag is None and s.config.nativeUntaggedValues:
+            val = val.value
+        else:
+            val.tag = tag
         return Result((None, val), i)
 
     # Failed to find a value

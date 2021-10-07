@@ -1,9 +1,13 @@
 from dataclasses import dataclass
+from typing import Any
+
+from . import parsing
 
 
 @dataclass
 class Stream:
     _chars: str
+    config: parsing.ParseConfig
 
     def __getitem__(self, key) -> str:
         try:

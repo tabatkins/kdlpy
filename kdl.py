@@ -2,7 +2,7 @@
 
 
 def main():
-    from kdl import parser
+    import kdl
     import argparse
     import sys
 
@@ -22,7 +22,7 @@ def main():
     options = cli.parse_args()
 
     with options.infile as fh:
-        doc = parser.parse(fh.read())
+        doc = kdl.parse(fh.read())
     with options.outfile as fh:
         fh.write(doc.print())
 

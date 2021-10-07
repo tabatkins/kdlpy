@@ -20,17 +20,21 @@ def main():
     inputs, goldens = findTestFiles()
     good = []
     bad = []
-    printConfig = kdl.printing.PrintConfig(
+    printConfig = kdl.PrintConfig(
         indent="    ",
         respectRadix=False,
         respectStringType=False,
         exponent="E",
     )
+    parseConfig = kdl.ParseConfig(
+        nativeUntaggedValues=False,
+    )
+    parser = kdl.Parser(parseConfig, printConfig)
     for filename in sorted(inputs):
         inputPath = os.path.join(TEST_DIR, filename)
         try:
             with open(inputPath, "r", encoding="utf-8") as fh:
-                output = kdl.parse(fh.read()).print(config=printConfig)
+                output = parser.parse(fh.read()).print()
         except kdl.errors.ParseError as e:
             if filename not in goldens:
                 # Success, parse failure was intended
@@ -44,6 +48,7 @@ def main():
                     print("================")
             continue
         except Exception as e:
+            raise
             # Whoops, internal error
             bad.append(filename)
             if options.verbose:

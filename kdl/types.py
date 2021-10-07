@@ -17,10 +17,10 @@ Entity = Union[
 @dataclass
 class Document:
     children: list[Node] = dataclasses.field(default_factory=list)
+    printConfig: Optional[printing.PrintConfig] = None
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
-        if config is None:
-            config = printing.defaultPrintConfig
+        config = config or self.printConfig or printing.defaultPrintConfig
         s = ""
         for node in self.children:
             s += node.print(0, config)
@@ -59,12 +59,12 @@ class Node:
         for value in self.values:
             if not config.printNullArgs and value.value is None:
                 continue
-            s += f" {value.print(config)}"
+            s += f" {printValue(value, config)}"
 
         for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
             if not config.printNullProps and value.value is None:
                 continue
-            s += f" {printIdent(key)}={value.print(config)}"
+            s += f" {printIdent(key)}={printValue(value, config)}"
 
         if self.children:
             childrenText = ""
@@ -230,7 +230,21 @@ def escapedFromRaw(chars: str) -> str:
     )
 
 
-def printIdent(chars):
+def printValue(val, config) -> str:
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, str):
+        return f'"{escapedFromRaw(val)}"'
+    if val is True:
+        return "true"
+    if val is False:
+        return "false"
+    if val is None:
+        return "null"
+    return val.print(config)
+
+
+def printIdent(chars: str) -> str:
     if isBareIdent(chars):
         return chars
     return f'"{escapedFromRaw(chars)}"'
