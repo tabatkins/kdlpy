@@ -76,6 +76,7 @@ def cli() -> None:
     options = cli.parse_args()
     parseConfig = kdl.ParseConfig(
         nativeUntaggedValues=False,
+        nativeTaggedValues=False,
     )
     printConfig = kdl.PrintConfig(
         indent=" " * options.indent if options.indent >= 0 else "\t",
