@@ -25,9 +25,12 @@ class Parser:
 
 @dataclass
 class ParseConfig:
-    tags: Dict[str, Callable] = field(default_factory=dict)
     nativeUntaggedValues: bool = True
     nativeTaggedValues: bool = True
+    valueConverters: Dict[str, Callable] = field(default_factory=dict)
+    nodeConverters: Dict[Union[str, Tuple[str, str]], Callable] = field(
+        default_factory=dict
+    )
 
 
 defaults = ParseConfig()

@@ -151,14 +151,14 @@ A `ParserConfig` object has the following properties:
 		Converts it to a `bytes` object.
 
 
-* `tags: Dict[str, Callable] = {}`
+* `valueConverters: Dict[str, Callable] = {}`
 
 	A dictionary of tag->converter functions,
-	letting you parse tagged nodes/values
+	letting you parse tagged values
 	(like `(date)"2021-01-01"`)
 	into whatever types you'd like.
 
-	Whenever a node or value is encountered with the given tag,
+	Whenever a value is encountered with the given tag,
 	your converter will be called with two arguments:
 	the fully-constructed kdl-py object,
 	and a `ParseFragment` object giving you access
@@ -168,7 +168,7 @@ A `ParserConfig` object has the following properties:
 	(Note that this does *not* specialize on value type;
 	a converter set to handle, say, a "base6" tag,
 	intending it to be used on numbers like `(base6)123450`,
-	will get called for `(base6)node foo="bar"` too.
+	will get called for `(base6)"a string"` too.
 	If you intend to only handle specific types of values,
 	make sure to check the value's type
 	and return it unchanged if you don't intend to handle it.)
@@ -179,6 +179,19 @@ A `ParserConfig` object has the following properties:
 	or into any other type.
 	Note that non-kdl-py types are automatically handled by the printer
 	if they have a `.to_kdl()` method.
+
+* `nodeConverters: Dict[Union[str, Tuple[str, str]], Callable] = {}`
+
+	Similar to `valueConverters`,
+	except the converters here are called on `kdl.Node`s.
+
+	The keys for the map are different, as well,
+	because the node name is as important or more than the tag
+	for indicating identity.
+	You can use either a `(tag, name)` tuple,
+	which will be called only when both match,
+	or just a `name` string (*not* a tag),
+	which will be used when there's not a more specific tag+name match.
 
 ### ParseFragment
 

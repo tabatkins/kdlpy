@@ -44,6 +44,8 @@ def parseNode(s: Stream, start: int) -> Result:
     if name is Failure:
         return Result.fail(start)
 
+    nameEnd = i
+
     node = types.Node(tag=tag, name=name)
 
     # props and args
@@ -73,8 +75,14 @@ def parseNode(s: Stream, start: int) -> Result:
     if sd:
         return Result(None, i)
     else:
-        if tag is not None and tag in s.config.tags:
-            node = s.config.tags[tag](node)
+        if (tag, name) in s.config.nodeConverters:
+            node = s.config.nodeConverters[tag, name](
+                node, ParseFragment(s[start:nameEnd], s, start)
+            )
+        elif name in s.config.nodeConverters:
+            node = s.config.nodeConverters[name](
+                node, ParseFragment(s[start:nameEnd], s, start)
+            )
         return Result(node, i)
 
 
@@ -200,9 +208,15 @@ def parseValue(s: Stream, start: int) -> Result:
             val = val.value
         else:
             val.tag = tag
-        if tag is not None and tag in s.config.tags:
-            val = s.config.tags[tag](val, ParseFragment(s[valueStart:i], s, i))
-        if tag is not None and s.config.nativeTaggedValues:
+        if tag is not None and tag in s.config.valueConverters:
+            val = s.config.valueConverters[tag](
+                val, ParseFragment(s[valueStart:i], s, i)
+            )
+        if (
+            tag is not None
+            and s.config.nativeTaggedValues
+            and isinstance(val, types.Value)
+        ):
             val = converters.toNative(val, ParseFragment(s[valueStart:i], s, i))
         return Result((None, val), i)
 
