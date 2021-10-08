@@ -10,9 +10,14 @@ def createRelease():
         print("Run this command from inside the kdlpy project root folder.")
         sys.exit(1)
 
-    treeDirty = subprocess.check_output("git diff --stat", shell=True).decode(encoding="utf-8") != ""
+    treeDirty = (
+        subprocess.check_output("git diff --stat", shell=True).decode(encoding="utf-8")
+        != ""
+    )
     if treeDirty:
-        print("Working tree is dirty. Finish committing files or stash, then try again.")
+        print(
+            "Working tree is dirty. Finish committing files or stash, then try again."
+        )
         sys.exit(1)
 
     with open("semver.txt") as fh:
@@ -107,7 +112,9 @@ def createRelease():
 def inProjectRoot(projectName):
     # Checks whether the cwd is in the project root
     try:
-        remotes = subprocess.check_output("git remote -v", stderr=subprocess.DEVNULL, shell=True).decode("utf-8")
+        remotes = subprocess.check_output(
+            "git remote -v", stderr=subprocess.DEVNULL, shell=True
+        ).decode("utf-8")
         if projectName in remotes:
             return os.path.isdir(".git")
         else:
