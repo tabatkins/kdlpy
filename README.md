@@ -55,14 +55,14 @@ import kdl
 >>>
 >>> doc
 Document(
-    children=[
+    nodes=[
         Node(
             name='node',
-            values=['arg'],
-            children=[
+            args=['arg'],
+            nodes=[
                 Node(
                     name='child',
-                    properties=OrderedDict([
+                    props=OrderedDict([
                         ('foo', 1.0),
                         ('bar', True)
                     ])

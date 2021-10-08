@@ -36,7 +36,7 @@ class Node:
     name: str
     tag: Optional[str] = None
     args: list[Any] = dataclasses.field(default_factory=list)
-    properties: OrderedDict[str, Any] = dataclasses.field(default_factory=OrderedDict)
+    props: OrderedDict[str, Any] = dataclasses.field(default_factory=OrderedDict)
     nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
@@ -61,7 +61,7 @@ class Node:
                 continue
             s += f" {printValue(arg, config)}"
 
-        for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
+        for key, value in sorted(self.props.items(), key=lambda x: x[0]):
             value = toKdlValue(value)
             if not config.printNullProps and (value is None or isinstance(value, Null)):
                 continue

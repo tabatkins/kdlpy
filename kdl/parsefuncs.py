@@ -61,7 +61,7 @@ def parseNode(s: Stream, start: int) -> Result:
         if entity[0] is None:
             node.args.append(entity[1])
         else:
-            node.properties[entity[0]] = entity[1]
+            node.props[entity[0]] = entity[1]
 
     _, i = parseNodespace(s, i)
 
