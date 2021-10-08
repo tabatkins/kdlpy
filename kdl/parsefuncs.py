@@ -5,7 +5,8 @@ from typing import Union, Optional
 
 from . import types
 from . import parsing
-from .errors import ParseError
+from . import converters
+from .errors import ParseError, ParseFragment
 from .stream import Stream
 from .result import Result, Failure
 
@@ -188,6 +189,7 @@ def parseValue(s: Stream, start: int) -> Result:
     if tag is Failure:
         tag = None
 
+    valueStart = i
     val, i = parseNumber(s, i)
     if val is Failure:
         val, i = parseKeyword(s, i)
@@ -199,7 +201,9 @@ def parseValue(s: Stream, start: int) -> Result:
         else:
             val.tag = tag
         if tag is not None and tag in s.config.tags:
-            val = s.config.tags[tag](val)
+            val = s.config.tags[tag](val, ParseFragment(s[valueStart:i], s, i))
+        if tag is not None and s.config.nativeTaggedValues:
+            val = converters.toNative(val, ParseFragment(s[valueStart:i], s, i))
         return Result((None, val), i)
 
     if s[i] == "'":

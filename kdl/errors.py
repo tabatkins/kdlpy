@@ -28,3 +28,13 @@ def lineCol(s: Union[str, stream.Stream], index: int) -> Tuple[int, int]:
             continue
         col += 1
     return line, col
+
+
+class ParseFragment:
+    def __init__(self, fragment: str, s: stream.Stream, i: int):
+        self.fragment = fragment
+        self._s = s
+        self._i = i
+
+    def error(self, msg: str) -> ParseError:
+        return ParseError(self._s, self._i, msg)

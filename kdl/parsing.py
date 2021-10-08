@@ -27,6 +27,7 @@ class Parser:
 class ParseConfig:
     tags: Dict[str, Callable] = field(default_factory=dict)
     nativeUntaggedValues: bool = True
+    nativeTaggedValues: bool = True
 
 
 defaults = ParseConfig()

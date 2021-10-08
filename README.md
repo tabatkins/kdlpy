@@ -69,6 +69,37 @@ node_name "arg" {
 
 Stringifying a `kdl.Document` object will produce a valid KDL document back. You can also call `doc.print(printConfig?)` to customize the printing with a `PrintConfig` object, described below.  See below for how to configure printing options.
 
+### Inserting Native Values
+
+kdl-py allows a number of native Python objects to be used directly in KDL documents by default,
+and allows you to customize your own objects for use.
+
+kdl-py automatically recognizes and correctly serializes the following objects:
+
+* `bool`: as untagged `true` or `false`
+* `None`: as untagged `null`
+* `int`, `float`: as untagged decimal number
+* `str`: as untagged string
+* `bytes`: as `(base64)`-tagged string
+* `decimal.Decimal`: as `(decimal)`-tagged string
+* `datetime`, `date`, and `time`: as `(date-time)`, `(date)`, or `(time)`-tagged strings
+* `ipaddress.IPv4Address` and `ipaddress.IPv6Address`: as `(ipv4)` or `(ipv6)`-tagged strings
+* `urllib.parse.ParseResult` (the result of calling `urllib.parse.urlparse()`): as `(url)`-tagged string
+* `uuid.UUID`: as `(uuid)`-tagged string
+* `re.Pattern` (the result of calling `re.compile()`): as `(regex)`-tagged raw string
+
+All of the tags used above are reserved and predefined by the [KDL specification](https://github.com/kdl-org/kdl/blob/main/SPEC.md#reserved-type-annotations-for-numbers-without-decimals).
+
+In addition, any value with a `.to_kdl()` method
+can be used in a kdl-py document.
+The method will be called when the document is stringified,
+and must return one of the kdl-py types,
+or any of the native types defined above.
+
+(For *parsing* KDL into these native types,
+or your own types,
+see the `ParseConfig` section, below.)
+
 ## Customizing Parsing
 
 Parsing can be controlled via a `kdl.ParseConfig` object,
@@ -87,9 +118,38 @@ A `ParserConfig` object has the following properties:
 
 * `nativeUntaggedValues: bool = True`
 
-	Controls whether the parser produces native Python objects (`str`, `int`, `None`, etc) when parsing untagged values (those without a `(foo)` prefix), or always produces kdlpy objects (such as `String`, `Decimal`, etc).
+	Controls whether the parser produces native Python objects (`str`, `int`, `float`, `bool`, `None`) when parsing untagged values (those without a `(foo)` prefix), or always produces kdl-py objects (such as `kdl.String`, `kdl.Decimal`, etc).
 
-	Tagged values like `(date)"2021-01-01"` always become kdlpy objects (in this case, `kdl.String("2021-01-01", tag="date"))`.
+* `nativeTaggedValues: bool = True`
+
+	Controls whether the parser produces native Python objects
+	when parsing *tagged* values,
+	for some of [KDL's predefined tags](https://github.com/kdl-org/kdl/blob/main/SPEC.md#reserved-type-annotations-for-numbers-without-decimals):
+
+	* `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64` on numbers:
+		Checks that the value is in the specified range,
+		then converts it to an `int`.
+		(It will serialize back out as an ordinary untagged number.)
+	* `f32`, `f64` on numbers:
+		Converts it to a `float`.
+		(It will serialize back out as an ordinary untagged number.)
+	* `decimal64`, `decimal128` on numbers, and `decimal` on strings:
+		Converts it to a `decimal.Decimal` object.
+		(Always reserializes to a `(decimal)`-tagged string.)
+	* `date-time`, `date`, `time` on strings:
+		Converts to a `datetime`, `time`, or `date` object.
+	* `ipv4`, `ipv6` on strings:
+		Converts it to an `ipaddress.IPv4Address` or `ipaddress.IPv6Address` object.
+	* `url` on strings:
+		Converts it to a `urllib.parse.ParseResult` tuple.
+	* `uuid` on strings:
+		Converts it to a `uuid.UUID` object.
+	* `regex` on strings:
+		Converts it to a `re.Pattern` object.
+		(It will serialize back out as a raw string.)
+	* `base64` on strings:
+		Converts it to a `bytes` object.
+
 
 * `tags: Dict[str, Callable] = {}`
 
@@ -99,23 +159,50 @@ A `ParserConfig` object has the following properties:
 	into whatever types you'd like.
 
 	Whenever a node or value is encountered with the given tag,
-	your converter will be called with the fully-constructured kdlpy object,
-	and whatever you return will be inserted into the document instead.
-	Note that this does not specialize on type;
-	if you intend to only handle specific types of values,
-	just check the value's type and return it unchanged
-	if you don't intend to handle it.
+	your converter will be called with two arguments:
+	the fully-constructed kdl-py object,
+	and a `ParseFragment` object giving you access
+	to the precise characters parsed from the document.
+	Whatever you return will be inserted into the document instead.
+
+	(Note that this does *not* specialize on value type;
+	a converter set to handle, say, a "base6" tag,
+	intending it to be used on numbers like `(base6)123450`,
+	will get called for `(base6)node foo="bar"` too.
+	If you intend to only handle specific types of values,
+	make sure to check the value's type
+	and return it unchanged if you don't intend to handle it.)
 
 	You can produce KDL values
 	(such as parsing `(hex)"0x12.e5"` into a `kdl.Decimal`,
 	since KDL doesn't support fractional hex values),
 	or into any other type.
-	Note that non-kdlpy types are automatically handled by the printer
+	Note that non-kdl-py types are automatically handled by the printer
 	if they have a `.to_kdl()` method.
+
+### ParseFragment
+
+	`kdl.ParseFragment` is passed to your custom converters,
+	specified in `kdl.ParseConfig.tags`,
+	giving you direct access to the input characters
+	before any additional processing was done on them.
+	This is useful, for example,
+	to handle numeric types
+	that might have lost precision in the normal parse.
+
+	It exposes a `.fragment` property,
+	containing the raw text of the value
+	(after the tag, if any).
+
+	It also exposes a `.error(str)` method,
+	which takes a custom error message
+	and returns a `kdl.ParseError`
+	with the `ParseFragment`'s location already built in.
+	This should be called if your conversion fails for any reason.
 
 ## Customizing Printing
 
-Like parsing, printing a kdlpy `Document` back to a KDL string can be controlled by a `kdl.PrintConfig` object,
+Like parsing, printing a kdl-py `Document` back to a KDL string can be controlled by a `kdl.PrintConfig` object,
 which can be provided in three ways.
 In order of importance:
 
@@ -170,7 +257,7 @@ A `PrintConfig` object has the following properties:
 	like `0x1b` for hex numbers.
 	When `False`, the printer always outputs decimal numbers.
 
-	Again, this only has an effect on kdlpy objects;
+	Again, this only has an effect on kdl-py objects;
 	native Python numbers are printed as normal for Python.
 
 * `exponent: str = "e"`
@@ -179,7 +266,7 @@ A `PrintConfig` object has the following properties:
 	when printed with scientific notation.
 	Should only be set to "e" or "E".
 
-	Like the previous options, this only has an effect on kdlpy objects;
+	Like the previous options, this only has an effect on kdl-py objects;
 	native Python numbers are printed as normal for Python.
 
 ## Full API Reference

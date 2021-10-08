@@ -5,18 +5,10 @@ from collections import OrderedDict
 from typing import Any, Optional, Union, MutableSequence, overload, Iterable, TypeVar
 from dataclasses import dataclass
 import dataclasses
-from abc import ABC
+from abc import ABCMeta
 
 from . import printing
-
-KDLValue = Union[
-    str,
-    int,
-    float,
-    bool,
-    None,
-    "Value",
-]
+from .converters import toKdlValue
 
 
 @dataclass
@@ -39,12 +31,8 @@ class Document:
         return self.print()
 
 
-class Component(ABC):
-    pass
-
-
 @dataclass
-class Node(Component):
+class Node:
     name: str
     tag: Optional[str] = None
     values: list[Any] = dataclasses.field(default_factory=list)
@@ -98,12 +86,34 @@ class Node(Component):
         return self.print()
 
 
-class Value(Component):
+class Value(metaclass=ABCMeta):
+    value: Any
+    tag: Optional[str]
+
+
+@dataclass
+class ExactValue(Value):
+    # Not produced by anything in the parser,
+    # but used when a native type needs a precise output
+    # not captured by the native semantics,
+    # like precise number formatting.
+    # .chars *must* be a valid KDL value
+    chars: str
+    tag: Optional[str] = None
+
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        return printTag(self.tag) + self.chars
+
+    def __str__(self) -> str:
+        return self.print()
+
+
+class Numberish(Value, metaclass=ABCMeta):
     pass
 
 
 @dataclass
-class Binary(Value):
+class Binary(Numberish):
     value: int
     tag: Optional[str] = None
 
@@ -122,7 +132,7 @@ class Binary(Value):
 
 
 @dataclass
-class Octal(Value):
+class Octal(Numberish):
     value: int
     tag: Optional[str] = None
 
@@ -141,7 +151,7 @@ class Octal(Value):
 
 
 @dataclass
-class Decimal(Value):
+class Decimal(Numberish):
     mantissa: Union[int, float]
     exponent: int = 0
     tag: Optional[str] = None
@@ -166,7 +176,7 @@ class Decimal(Value):
 
 
 @dataclass
-class Hex(Value):
+class Hex(Numberish):
     value: int
     tag: Optional[str] = None
 
@@ -215,8 +225,12 @@ class Null(Value):
         return self.print()
 
 
+class Stringish(Value, metaclass=ABCMeta):
+    pass
+
+
 @dataclass
-class RawString(Value):
+class RawString(Stringish):
     value: str
     tag: Optional[str] = None
 
@@ -242,7 +256,7 @@ def findRequiredHashCount(chars: str) -> int:
 
 
 @dataclass
-class String(Value):
+class String(Stringish):
     value: str
     tag: Optional[str] = None
 
@@ -266,36 +280,6 @@ def toKdlNode(val: Any) -> Node:
     if not isinstance(node, Node):
         raise Exception(f"Expected object to convert to KDL Node. Got:\n{repr(val)}")
     return node
-
-
-def toKdlValue(val: Any) -> KDLValue:
-    if isKdlValue(val):
-        return val
-    if not callable(getattr(val, "to_kdl", None)):
-        raise Exception(
-            f"Can't convert object to KDL for serialization. Got:\n{repr(val)}"
-        )
-    value = val.to_kdl()
-    if not isKdlValue(value):
-        raise Exception(
-            f"Expected object to convert to KDL value or compatible primitive. Got:\n{repr(val)}"
-        )
-    return value
-
-
-def isKdlValue(val: Any) -> bool:
-    if val is None:
-        return True
-    return isinstance(
-        val,
-        (
-            str,
-            int,
-            float,
-            bool,
-            Value,
-        ),
-    )
 
 
 def printTag(tag: Optional[str]) -> str:
