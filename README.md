@@ -19,7 +19,7 @@ pip install kdl-py
 ```
 
 When installed, a `kdlreformat` command-line program is also made available,
-which can canonicalize a KDL document. See [below][#kdlreformat] for options.
+which can canonicalize a KDL document. See [below](#kdlreformat) for options.
 
 ## Using
 
