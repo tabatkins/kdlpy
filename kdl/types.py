@@ -13,13 +13,13 @@ from .converters import toKdlValue
 
 @dataclass
 class Document:
-    children: list[Node] = dataclasses.field(default_factory=list)
+    nodes: list[Node] = dataclasses.field(default_factory=list)
     printConfig: Optional[printing.PrintConfig] = None
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         config = config or self.printConfig or printing.defaults
         s = ""
-        for node in self.children:
+        for node in self.nodes:
             node = toKdlNode(node)
             s += node.print(0, config)
         if s == "":
@@ -35,9 +35,9 @@ class Document:
 class Node:
     name: str
     tag: Optional[str] = None
-    values: list[Any] = dataclasses.field(default_factory=list)
+    args: list[Any] = dataclasses.field(default_factory=list)
     properties: OrderedDict[str, Any] = dataclasses.field(default_factory=OrderedDict)
-    children: list[Node] = dataclasses.field(default_factory=list)
+    nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
         self, indentLevel: int = 0, config: Optional[printing.PrintConfig] = None
@@ -52,24 +52,24 @@ class Node:
 
         s += printIdent(self.name)
 
-        # Print all the values, then all the properties
+        # Print all the args, then all the properties
         # in alpha order, using only the last if a key
         # is duplicated.
-        for value in self.values:
-            value = toKdlValue(value)
-            if not config.printNullArgs and value.value is None:
+        for arg in self.args:
+            arg = toKdlValue(arg)
+            if not config.printNullArgs and (arg is None or isinstance(arg, Null)):
                 continue
-            s += f" {printValue(value, config)}"
+            s += f" {printValue(arg, config)}"
 
         for key, value in sorted(self.properties.items(), key=lambda x: x[0]):
             value = toKdlValue(value)
-            if not config.printNullProps and value.value is None:
+            if not config.printNullProps and (value is None or isinstance(value, Null)):
                 continue
             s += f" {printIdent(key)}={printValue(value, config)}"
 
-        if self.children:
+        if self.nodes:
             childrenText = ""
-            for child in self.children:
+            for child in self.nodes:
                 child = toKdlNode(child)
                 childrenText += child.print(indentLevel=indentLevel + 1, config=config)
             if childrenText:

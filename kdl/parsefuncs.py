@@ -22,7 +22,7 @@ def parse(input: str, config: Optional[parsing.ParseConfig] = None) -> types.Doc
         if node is Failure:
             raise ParseError(s, i, "Expected a node")
         if node:
-            doc.children.append(node)
+            doc.nodes.append(node)
         _, i = parseLinespace(s, i)
     return doc
 
@@ -46,7 +46,7 @@ def parseNode(s: Stream, start: int) -> Result:
 
     node = types.Node(tag=tag, name=name)
 
-    # props and values
+    # props and args
     while True:
         space, i = parseNodespace(s, i)
         if space is Failure:
@@ -57,15 +57,15 @@ def parseNode(s: Stream, start: int) -> Result:
         if entity is None:
             continue
         if entity[0] is None:
-            node.values.append(entity[1])
+            node.args.append(entity[1])
         else:
             node.properties[entity[0]] = entity[1]
 
     _, i = parseNodespace(s, i)
 
-    children, i = parseNodeChildren(s, i)
-    if children is not Failure:
-        node.children = children
+    nodes, i = parseNodeChildren(s, i)
+    if nodes is not Failure:
+        node.nodes = nodes
 
     _, i = parseNodespace(s, i)
     _, i = parseNodeTerminator(s, i)
