@@ -17,4 +17,8 @@ from .types import (
     Null,
     RawString,
     String,
+    ExactValue,
+    Value,
+    Numberish,
+    Stringish,
 )

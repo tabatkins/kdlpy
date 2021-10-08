@@ -290,9 +290,9 @@ A `PrintConfig` object has the following properties:
 * `kdl.Parser(parseConfig: kdl.ParseConfig?, printConfig: kdl.PrintConfig?)`
 	* `parser.parse(str, config: kdl.ParseConfig?) -> kdl.Document`
 	* `parser.print(config: kdl.PrintConfig?) -> str`
-* `kdl.Document(children: list[kdl.Node]?, printConfig: kdl.PrintConfig?)`
+* `kdl.Document(nodes: list[kdl.Node]?, printConfig: kdl.PrintConfig?)`
 	* `doc.print(PrintConfig?) -> str`
-* `kdl.Node(name: str, tag: str?, values: list[Any]?, props: dict[str, Any]?, children: list[kdl.Node]?)`
+* `kdl.Node(name: str, tag: str?, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
 * `kdl.Binary(value: int, tag: str?)`
 * `kdl.Octal(value: int, tag: str?)`
 * `kdl.Decimal(mantissa: int|float, exponent: int?, tag: str?)`
@@ -303,6 +303,8 @@ A `PrintConfig` object has the following properties:
 	* `null.value`: readonly, always `None`
 * `kdl.RawString(value: str, tag: str?)`
 * `kdl.String(value: str, tag: str?)`
+* `kdl.ExactValue(chars: str, tag: str?)` †
+* `kdl.Value`, `kdl.Numberish`, `kdl.Stringish` ‡
 * `kdl.ParseConfig(...)` see above for options
 	* `kdl.parsing.defaults`: default `ParseConfig`
 * `kdl.PrintConfig(...)` see above for options
@@ -311,6 +313,21 @@ A `PrintConfig` object has the following properties:
 	* `error.msg: str`: hopefully informative
 	* `error.line: int`: 1-indexed
 	* `error.col: int`: 1-indexed
+* `ParseFragment`: passed to converter functions
+	* `pf.fragment`: slice from the source string
+	* `pf.error(msg: str)` returns a `kdl.ParseError` with error location set properly already
+
+† Not produced by the parser.
+Can be returned by a user's `.to_kdl()` method
+if they want to produce a value *precisely* in a particular syntax,
+in a way that the built-in kdl-py classes don't.
+
+‡ Not produced by the parser.
+These are abstract base classes to help in type testing:
+`Value` matches all eight value classes,
+`Numberish` matches all four numeric value classes,
+and `Stringish` matches both string value classes.
+
 
 
 ## `kdlreformat`
