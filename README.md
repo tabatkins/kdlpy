@@ -5,12 +5,30 @@ for the [KDL Document Language](https://kdl.dev),
 fully compliant with KDL 1.0.0.
 
 [KDL](https://kdl.dev) is, as the name suggests, a document language,
-filling approximately the same niche as JSON/YAML/XML/etc.
+filling approximately the same niche as JSON/YAML/XML/etc
+to be a simple but powerful language for config files.
 It combines the best of several of these languages,
 while avoiding their pitfalls:
 more general than JSON and more powerful than XML,
 while avoiding the verbosity of XML
 or the explosive complexity of YAML.
+
+kdl-py, in particular, is focused on *ease-of-use*,
+supporting things like date/times, urls, uuids, regexes, and binary data
+directly in your KDL document
+(via powerful but simple tagged values),
+and parsing them into native Python types automatically,
+or doing the reverse and letting you build KDL document trees
+with these values directly,
+and automatically and safely serializing them into KDL text
+for later parsing!
+
+You can customize parsing and serialization further for your application very easily,
+by providing node or value "converters"
+to turn plain KDL values or nodes
+into application-specific types,
+and then turning them back into KDL text automatically
+merely by adding a `.to_kdl()` method to your classes.
 
 ## Installing
 
