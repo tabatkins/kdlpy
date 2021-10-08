@@ -14,7 +14,7 @@ while avoiding the verbosity of XML
 or the explosive complexity of YAML.
 
 kdl-py, in particular, is focused on *ease-of-use*,
-supporting things like date/times, urls, uuids, regexes, and binary data
+supporting things like date/times, ip addresses, urls, uuids, regexes, and binary data
 directly in your KDL document
 (via powerful but simple tagged values),
 and parsing them into native Python types automatically,
