@@ -14,7 +14,9 @@ or the explosive complexity of YAML.
 
 ## Installing
 
-[will be on pypi shortly]
+```sh
+pip install kdl-py
+```
 
 When installed, a `kdlreformat` command-line program is also made available,
 which can canonicalize a KDL document. See [below][#kdlreformat] for options.
