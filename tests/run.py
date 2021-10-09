@@ -26,6 +26,7 @@ def main() -> None:
         respectRadix=False,
         respectStringType=False,
         exponent="E",
+        sortProperties=True,
     )
     parseConfig = kdl.ParseConfig(
         nativeUntaggedValues=False,

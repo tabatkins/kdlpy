@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from typing import Any, Optional, Union, MutableSequence, overload, Iterable, TypeVar
+from typing import Any, Optional, Union, Iterable, Tuple
 from dataclasses import dataclass
 import dataclasses
 from abc import ABCMeta
@@ -61,7 +61,12 @@ class Node:
                 continue
             s += f" {printValue(arg, config)}"
 
-        for key, value in sorted(self.props.items(), key=lambda x: x[0]):
+        props: Iterable[Tuple[str, Any]]
+        if config.sortProperties:
+            props = sorted(self.props.items(), key=lambda x: x[0])
+        else:
+            props = self.props.items()
+        for key, value in props:
             value = toKdlValue(value)
             if not config.printNullProps and (value is None or isinstance(value, Null)):
                 continue

@@ -11,6 +11,7 @@ class PrintConfig:
     respectRadix: bool = True
     respectStringType: bool = True
     exponent: str = "e"
+    sortProperties: bool = False
 
 
 defaults = PrintConfig()
