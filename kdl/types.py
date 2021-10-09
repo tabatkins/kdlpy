@@ -303,16 +303,14 @@ def escapedFromRaw(chars: str) -> str:
 
 
 def printValue(val: Any, config: printing.PrintConfig) -> str:
+    if val is None:
+        return "null"
+    if isinstance(val, bool):
+        return "true" if val else "false"
     if isinstance(val, (int, float)):
         return str(val)
     if isinstance(val, str):
         return f'"{escapedFromRaw(val)}"'
-    if val is True:
-        return "true"
-    if val is False:
-        return "false"
-    if val is None:
-        return "null"
     return val.print(config)
 
 
