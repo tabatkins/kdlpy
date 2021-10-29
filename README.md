@@ -78,7 +78,7 @@ You can also create a `kdl.Parser()` object and call its `.parse()` method; `Par
 Either way, you'll get back a `kdl.Document` object, which is fully mutable. By default, untagged KDL values are represented with native Python objects.
 
 ```
->>> doc.children[0].children[0].properties["foo"] = 2
+>>> doc.nodes[0].nodes[0].properties["foo"] = 2
 >>>
 >>> print(doc)
 node_name "arg" {
