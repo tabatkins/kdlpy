@@ -134,7 +134,7 @@ In order of importance:
 3. Fiddling with the `kdl.parsing.defaults` object,
 	which is used if nothing else provides a config.
 
-A `ParserConfig` object has the following properties:
+A `ParseConfig` object has the following properties:
 
 * `nativeUntaggedValues: bool = True`
 
