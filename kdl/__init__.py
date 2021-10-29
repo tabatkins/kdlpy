@@ -5,7 +5,7 @@ from .cli import cli
 from .printing import PrintConfig
 from .parsing import Parser, ParseConfig
 from .parsefuncs import parse
-from .errors import ParseError
+from .errors import ParseError, ParseFragment
 from .types import (
     Document,
     Node,
