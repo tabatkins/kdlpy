@@ -215,23 +215,25 @@ A `ParserConfig` object has the following properties:
 
 ### ParseFragment
 
-	`kdl.ParseFragment` is passed to your custom converters,
-	specified in `kdl.ParseConfig.tags`,
-	giving you direct access to the input characters
-	before any additional processing was done on them.
-	This is useful, for example,
-	to handle numeric types
-	that might have lost precision in the normal parse.
+`kdl.ParseFragment` is passed to your custom converters,
+specified in `kdl.ParseConfig.tags`,
+giving you direct access to the input characters
+before any additional processing was done on them.
+This is useful, for example,
+to handle numeric types
+that might have lost precision in the normal parse.
 
-	It exposes a `.fragment` property,
-	containing the raw text of the value
-	(after the tag, if any).
+It exposes a `.fragment` property,
+containing the raw text of the value
+(after the tag, if any).
 
-	It also exposes a `.error(str)` method,
-	which takes a custom error message
-	and returns a `kdl.ParseError`
-	with the `ParseFragment`'s location already built in.
-	This should be called if your conversion fails for any reason.
+It also exposes a `.error(str)` method,
+which takes a custom error message
+and returns a `kdl.ParseError`
+with the `ParseFragment`'s location already built in,
+ready for you to `raise`.
+This should be used if your conversion fails for any reason,
+so your errors look the same as native parse errors.
 
 ## Customizing Printing
 
