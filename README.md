@@ -306,15 +306,17 @@ A `PrintConfig` object has the following properties:
 
 ## Full API Reference
 
-~in progress~
-
 * `kdl.parse(str, config: kdl.ParseConfig?) -> kdl.Document`
 * `kdl.Parser(parseConfig: kdl.ParseConfig?, printConfig: kdl.PrintConfig?)`
 	* `parser.parse(str, config: kdl.ParseConfig?) -> kdl.Document`
 	* `parser.print(config: kdl.PrintConfig?) -> str`
 * `kdl.Document(nodes: list[kdl.Node]?, printConfig: kdl.PrintConfig?)`
 	* `doc.print(PrintConfig?) -> str`
+	* `doc.get(name: str?, tag: str?) -> kdl.Node?` returns the first node child with the given name and/or tag
+	* `doc.getAll(name: str?, tag: str?) -> Iterable[kdl.Node]` returns all child nodes with the given name and/or tag
 * `kdl.Node(name: str, tag: str?, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
+	* `node.get(name: str?, tag: str?) -> kdl.Node?` returns the first node child with the given name and/or tag
+	* `node.getAll(name: str?, tag: str?) -> Iterable[kdl.Node]` returns all child nodes with the given name and/or tag
 * `kdl.Binary(value: int, tag: str?)`
 * `kdl.Octal(value: int, tag: str?)`
 * `kdl.Decimal(mantissa: int|float, exponent: int?, tag: str?)`

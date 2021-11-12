@@ -27,6 +27,33 @@ class Document:
             s = "\n"
         return s
 
+    def get(
+        self, name: Optional[str] = None, tag: Optional[str] = None
+    ) -> Optional[Node]:
+        if name is None and tag is None:
+            raise Exception("Document.get() called with no non-none arguments")
+        for node in self.nodes:
+            if name is None and node.tag == tag:
+                return node
+            if tag is None and node.name == name:
+                return node
+            if node.name == name and node.tag == tag:
+                return node
+        return None
+
+    def getAll(
+        self, name: Optional[str] = None, tag: Optional[str] = None
+    ) -> Iterable[Node]:
+        if name is None and tag is None:
+            raise Exception("Document.getAll() called with no non-none arguments")
+        for node in self.nodes:
+            if name is None and node.tag == tag:
+                yield node
+            if tag is None and node.name == name:
+                yield node
+            if node.name == name and node.tag == tag:
+                yield node
+
     def __str__(self) -> str:
         return self.print()
 
@@ -86,6 +113,33 @@ class Node:
         else:
             s += "\n"
         return s
+
+    def get(
+        self, name: Optional[str] = None, tag: Optional[str] = None
+    ) -> Optional[Node]:
+        if name is None and tag is None:
+            raise Exception("Node.get() called with no non-none arguments")
+        for node in self.nodes:
+            if name is None and node.tag == tag:
+                return node
+            if tag is None and node.name == name:
+                return node
+            if node.name == name and node.tag == tag:
+                return node
+        return None
+
+    def getAll(
+        self, name: Optional[str] = None, tag: Optional[str] = None
+    ) -> Iterable[Node]:
+        if name is None and tag is None:
+            raise Exception("Node.getAll() called with no non-none arguments")
+        for node in self.nodes:
+            if name is None and node.tag == tag:
+                yield node
+            if tag is None and node.name == name:
+                yield node
+            if node.name == name and node.tag == tag:
+                yield node
 
     def __str__(self) -> str:
         return self.print()
