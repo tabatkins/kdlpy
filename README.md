@@ -197,21 +197,19 @@ A `ParseConfig` object has the following properties:
 	(such as parsing `(hex)"0x12.e5"` into a `kdl.Decimal`,
 	since KDL doesn't support fractional hex values),
 	or into any other type.
-	Note that non-kdl-py types are automatically handled by the printer
-	if they have a `.to_kdl()` method.
+	If you return a non-KDL type,
+	you probably want to ensure it has a `.to_kdl()` method
+	(or is one of the supported built-in types),
+	so it can be serialized back into a KDL document.
 
-* `nodeConverters: Dict[Union[str, Tuple[str, str]], Callable] = {}`
+* `nodeConverters: Dict[NodeKey, Callable] = {}`
 
 	Similar to `valueConverters`,
 	except the converters here are called on `kdl.Node`s.
 
-	The keys for the map are different, as well,
-	because the node name is as important or more than the tag
-	for indicating identity.
-	You can use either a `(tag, name)` tuple,
-	which will be called only when both match,
-	or just a `name` string (*not* a tag),
-	which will be used when there's not a more specific tag+name match.
+	The keys for the map are [`NodeKey`s](#NodeKey), as well,
+	because both the node name *and* tag are valuable to key off of.
+
 
 ### ParseFragment
 
@@ -312,11 +310,14 @@ A `PrintConfig` object has the following properties:
 	* `parser.print(config: kdl.PrintConfig?) -> str`
 * `kdl.Document(nodes: list[kdl.Node]?, printConfig: kdl.PrintConfig?)`
 	* `doc.print(PrintConfig?) -> str`
-	* `doc.get(name: str?, tag: str?) -> kdl.Node?` returns the first node child with the given name and/or tag
-	* `doc.getAll(name: str?, tag: str?) -> Iterable[kdl.Node]` returns all child nodes with the given name and/or tag
+	* `doc[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
+	* `doc.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
+	* `doc.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
 * `kdl.Node(name: str, tag: str?, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
-	* `node.get(name: str?, tag: str?) -> kdl.Node?` returns the first node child with the given name and/or tag
-	* `node.getAll(name: str?, tag: str?) -> Iterable[kdl.Node]` returns all child nodes with the given name and/or tag
+	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
+	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
+	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
+	
 * `kdl.Binary(value: int, tag: str?)`
 * `kdl.Octal(value: int, tag: str?)`
 * `kdl.Decimal(mantissa: int|float, exponent: int?, tag: str?)`
@@ -351,6 +352,35 @@ These are abstract base classes to help in type testing:
 `Value` matches all eight value classes,
 `Numberish` matches all four numeric value classes,
 and `Stringish` matches both string value classes.
+
+### `NodeKey`
+
+	A few data structures and functions take a `NodeKey`
+	to match against a node.
+
+	Formally, `NodeKey` is `Union[str, Tuple[Optional[str], Optional[str]]]`;
+	that is,
+	either a string,
+	or a tuple of optional strings.
+
+	If it's a `str`,
+	then it matches any node whose **name** is that value,
+	regardless of the tag.
+
+	If it's a tuple,
+	then it matches any node whose tag is the first value
+	(including `None` to match nodes without a tag),
+	and whose name is the second value
+	(where `None` matches any node, regardless of name).
+
+	That is, the possible variants are:
+
+	* `"nodename"`: matches nodes with that name, regardless of tag.
+	* `("tagname", None)`: matches nodes with that tag, regardless of name.
+	* `("tagname", "nodename")`: matches nodes with that tag and name.
+	* `(None, None)`: matches nodes with no tag, regardless of name.
+	* `(None, "nodename")`: matches nodes with **no tag**, and that name.
+
 
 
 
