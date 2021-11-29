@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from typing import Any, Optional, Union, Iterable, Tuple
+from typing import Any, Optional, Union, Iterable, Tuple, overload, TypeVar
 from dataclasses import dataclass
 import dataclasses
 from abc import ABCMeta
@@ -10,6 +10,13 @@ from abc import ABCMeta
 from . import printing
 from .converters import toKdlValue
 
+
+class _MISSING:
+    pass
+
+VT = TypeVar("VT")
+
+NodeKey = Union[str, Tuple[Optional[str], Optional[str]]]
 
 @dataclass
 class Document:
@@ -27,32 +34,54 @@ class Document:
             s = "\n"
         return s
 
+    @overload
+    def get(self, key:NodeKey) -> Optional[Node]:
+        ...
+
+    @overload
+    def get(self, key:NodeKey, default: VT) -> Union[Node, VT]:
+        ...
+
     def get(
-        self, name: Optional[str] = None, tag: Optional[str] = None
-    ) -> Optional[Node]:
-        if name is None and tag is None:
-            raise Exception("Document.get() called with no non-none arguments")
+        self,
+        key: NodeKey,
+        default: Any = None,
+    ) -> Any:
+        tag, name = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is None and node.tag == tag:
-                return node
-            if tag is None and node.name == name:
-                return node
-            if node.name == name and node.tag == tag:
-                return node
-        return None
+            if name is not None and node.name != name:
+                continue
+            if tag is not None and node.tag != tag:
+                continue
+            return node
+        return default
+
+    def __getitem__(self, key: NodeKey) -> Node:
+        tag, name = tupleFromNodeKey(key)
+        for node in self.nodes:
+            if name is not None and node.name != name:
+                continue
+            if tag is not None and node.tag != tag:
+                continue
+            return node
+        if tag is None:
+            s = f"name '{name}'"
+        elif name is None:
+            s = f"tag '{tag}'"
+        else:
+            s = f"name '{name}' and tag '{tag}'"
+        raise KeyError(f"No node with {s}.")
 
     def getAll(
-        self, name: Optional[str] = None, tag: Optional[str] = None
+        self, key: NodeKey,
     ) -> Iterable[Node]:
-        if name is None and tag is None:
-            raise Exception("Document.getAll() called with no non-none arguments")
+        tag, name = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is None and node.tag == tag:
-                yield node
-            if tag is None and node.name == name:
-                yield node
-            if node.name == name and node.tag == tag:
-                yield node
+            if name is not None and node.name != name:
+                continue
+            if tag is not None and node.tag != tag:
+                continue
+            yield node
 
     def __str__(self) -> str:
         return self.print()
@@ -114,32 +143,54 @@ class Node:
             s += "\n"
         return s
 
+    @overload
+    def get(self, key:NodeKey) -> Optional[Node]:
+        ...
+
+    @overload
+    def get(self, key:NodeKey, default: VT) -> Union[Node, VT]:
+        ...
+
     def get(
-        self, name: Optional[str] = None, tag: Optional[str] = None
-    ) -> Optional[Node]:
-        if name is None and tag is None:
-            raise Exception("Node.get() called with no non-none arguments")
+        self,
+        key: NodeKey,
+        default: Any = None,
+    ) -> Any:
+        tag, name = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is None and node.tag == tag:
-                return node
-            if tag is None and node.name == name:
-                return node
-            if node.name == name and node.tag == tag:
-                return node
-        return None
+            if name is not None and node.name != name:
+                continue
+            if tag is not None and node.tag != tag:
+                continue
+            return node
+        return default
+
+    def __getitem__(self, key: NodeKey) -> Node:
+        tag, name = tupleFromNodeKey(key)
+        for node in self.nodes:
+            if name is not None and node.name != name:
+                continue
+            if tag is not None and node.tag != tag:
+                continue
+            return node
+        if tag is None:
+            s = f"name '{name}'"
+        elif name is None:
+            s = f"tag '{tag}'"
+        else:
+            s = f"name '{name}' and tag '{tag}'"
+        raise KeyError(f"No node with {s}.")
 
     def getAll(
-        self, name: Optional[str] = None, tag: Optional[str] = None
+        self, key: NodeKey,
     ) -> Iterable[Node]:
-        if name is None and tag is None:
-            raise Exception("Node.getAll() called with no non-none arguments")
+        tag, name = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is None and node.tag == tag:
-                yield node
-            if tag is None and node.name == name:
-                yield node
-            if node.name == name and node.tag == tag:
-                yield node
+            if name is not None and node.name != name:
+                continue
+            if tag is not None and node.tag != tag:
+                continue
+            yield node
 
     def __str__(self) -> str:
         return self.print()
@@ -347,6 +398,11 @@ def printTag(tag: Optional[str]) -> str:
     else:
         return ""
 
+
+def tupleFromNodeKey(key: NodeKey) -> Tuple[Optional[str], Optional[str]]:
+    if isinstance(key, str):
+        return None, key
+    return key
 
 def escapedFromRaw(chars: str) -> str:
     return (
