@@ -14,9 +14,11 @@ from .converters import toKdlValue
 class _MISSING:
     pass
 
+
 VT = TypeVar("VT")
 
 NodeKey = Union[str, Tuple[Optional[str], Optional[str]]]
+
 
 @dataclass
 class Document:
@@ -35,11 +37,11 @@ class Document:
         return s
 
     @overload
-    def get(self, key:NodeKey) -> Optional[Node]:
+    def get(self, key: NodeKey) -> Optional[Node]:
         ...
 
     @overload
-    def get(self, key:NodeKey, default: VT) -> Union[Node, VT]:
+    def get(self, key: NodeKey, default: VT) -> Union[Node, VT]:
         ...
 
     def get(
@@ -47,24 +49,24 @@ class Document:
         key: NodeKey,
         default: Any = None,
     ) -> Any:
-        tag, name = tupleFromNodeKey(key)
+        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
                 continue
-            if tag is not None and node.tag != tag:
+            if passedTag and node.tag != tag:
                 continue
             return node
         return default
 
     def __getitem__(self, key: NodeKey) -> Node:
-        tag, name = tupleFromNodeKey(key)
+        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
                 continue
-            if tag is not None and node.tag != tag:
+            if passedTag and node.tag != tag:
                 continue
             return node
-        if tag is None:
+        if not passedTag:
             s = f"name '{name}'"
         elif name is None:
             s = f"tag '{tag}'"
@@ -73,13 +75,14 @@ class Document:
         raise KeyError(f"No node with {s}.")
 
     def getAll(
-        self, key: NodeKey,
+        self,
+        key: NodeKey,
     ) -> Iterable[Node]:
-        tag, name = tupleFromNodeKey(key)
+        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
                 continue
-            if tag is not None and node.tag != tag:
+            if passedTag and node.tag != tag:
                 continue
             yield node
 
@@ -144,11 +147,11 @@ class Node:
         return s
 
     @overload
-    def get(self, key:NodeKey) -> Optional[Node]:
+    def get(self, key: NodeKey) -> Optional[Node]:
         ...
 
     @overload
-    def get(self, key:NodeKey, default: VT) -> Union[Node, VT]:
+    def get(self, key: NodeKey, default: VT) -> Union[Node, VT]:
         ...
 
     def get(
@@ -156,24 +159,24 @@ class Node:
         key: NodeKey,
         default: Any = None,
     ) -> Any:
-        tag, name = tupleFromNodeKey(key)
+        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
                 continue
-            if tag is not None and node.tag != tag:
+            if passedTag and node.tag != tag:
                 continue
             return node
         return default
 
     def __getitem__(self, key: NodeKey) -> Node:
-        tag, name = tupleFromNodeKey(key)
+        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
                 continue
-            if tag is not None and node.tag != tag:
+            if passedTag and node.tag != tag:
                 continue
             return node
-        if tag is None:
+        if not passedTag:
             s = f"name '{name}'"
         elif name is None:
             s = f"tag '{tag}'"
@@ -182,13 +185,14 @@ class Node:
         raise KeyError(f"No node with {s}.")
 
     def getAll(
-        self, key: NodeKey,
+        self,
+        key: NodeKey,
     ) -> Iterable[Node]:
-        tag, name = tupleFromNodeKey(key)
+        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
                 continue
-            if tag is not None and node.tag != tag:
+            if passedTag and node.tag != tag:
                 continue
             yield node
 
@@ -399,10 +403,11 @@ def printTag(tag: Optional[str]) -> str:
         return ""
 
 
-def tupleFromNodeKey(key: NodeKey) -> Tuple[Optional[str], Optional[str]]:
+def tupleFromNodeKey(key: NodeKey) -> Tuple[Optional[str], Optional[str], bool]:
     if isinstance(key, str):
-        return None, key
-    return key
+        return None, key, False
+    return key[0], key[1], True
+
 
 def escapedFromRaw(chars: str) -> str:
     return (
