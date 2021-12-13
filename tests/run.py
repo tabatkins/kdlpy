@@ -6,6 +6,8 @@ import argparse
 
 from typing import Tuple, Set
 
+sys.path.insert(0,
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 import kdl
 
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -37,7 +39,7 @@ def main() -> None:
         try:
             with open(inputPath, "r", encoding="utf-8") as fh:
                 output = parser.parse(fh.read()).print()
-        except kdl.errors.ParseError as e:
+        except kdl.ParseError as e:
             if filename not in goldens:
                 # Success, parse failure was intended
                 good.append(filename)
