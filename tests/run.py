@@ -41,10 +41,10 @@ def main() -> None:
                 output = parser.parse(fh.read()).print()
         except kdl.ParseError as e:
             if filename not in goldens:
-                # Success, parse failure was intended
+                # SUCCESS: expected parse failure
                 good.append(filename)
             else:
-                # Whoops, incorrect parse failure.
+                # FAILURE: unexpected parse failure
                 bad.append(filename)
                 if options.verbose:
                     print(f"Unexpected parse failure in {filename}")
@@ -53,7 +53,7 @@ def main() -> None:
             continue
         except Exception as e:
             raise
-            # Whoops, internal error
+            # FAILURE: unexpected runtime error
             bad.append(filename)
             if options.verbose:
                 print(f"BIG BAD: Internal error in {filename}")
@@ -62,7 +62,7 @@ def main() -> None:
             continue
         # Successful parse!
         if filename not in goldens:
-            # ...but it shoudln't have
+            # FAILURE: successful parse, but should be a parse failure
             bad.append(filename)
             if options.verbose:
                 print(f"Unexpected successful parse in {filename}. Got:")
@@ -73,10 +73,12 @@ def main() -> None:
         with open(goldenPath, "r", encoding="utf-8") as fh:
             golden = fh.read()
         if output == golden:
+            # SUCCESS: successful parse, matched golden
             good.append(filename)
             continue
         bad.append(filename)
         if options.verbose:
+            # FAILURE: successful parse, but didn't match golden
             print(f"Output didn't match golden in {filename}. Got:")
             print(output)
             print("Expected:")
