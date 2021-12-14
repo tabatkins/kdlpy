@@ -49,14 +49,10 @@ class Document:
         key: NodeKey,
         default: Any = None,
     ) -> Any:
-        tag, name, passedTag = tupleFromNodeKey(key)
-        for node in self.nodes:
-            if name is not None and node.name != name:
-                continue
-            if passedTag and node.tag != tag:
-                continue
-            return node
-        return default
+        try:
+            return self[key]
+        except KeyError:
+            return default
 
     def __getitem__(self, key: NodeKey) -> Node:
         tag, name, passedTag = tupleFromNodeKey(key)
@@ -159,14 +155,10 @@ class Node:
         key: NodeKey,
         default: Any = None,
     ) -> Any:
-        tag, name, passedTag = tupleFromNodeKey(key)
-        for node in self.nodes:
-            if name is not None and node.name != name:
-                continue
-            if passedTag and node.tag != tag:
-                continue
-            return node
-        return default
+        try:
+            return self[key]
+        except KeyError:
+            return default
 
     def __getitem__(self, key: NodeKey) -> Node:
         tag, name, passedTag = tupleFromNodeKey(key)
