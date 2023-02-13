@@ -355,31 +355,31 @@ and `Stringish` matches both string value classes.
 
 ### `NodeKey`
 
-	A few data structures and functions take a `NodeKey`
-	to match against a node.
+A few data structures and functions take a `NodeKey`
+to match against a node.
 
-	Formally, `NodeKey` is `Union[str, Tuple[Optional[str], Optional[str]]]`;
-	that is,
-	either a string,
-	or a tuple of optional strings.
+Formally, `NodeKey` is `Union[str, Tuple[Optional[str], Optional[str]]]`;
+that is,
+either a string,
+or a tuple of optional strings.
 
-	If it's a `str`,
-	then it matches any node whose **name** is that value,
-	regardless of the tag.
+If it's a `str`,
+then it matches any node whose **name** is that value,
+regardless of the tag.
 
-	If it's a tuple,
-	then it matches any node whose tag is the first value
-	(including `None` to match nodes without a tag),
-	and whose name is the second value
-	(where `None` matches any node, regardless of name).
+If it's a tuple,
+then it matches any node whose tag is the first value
+(including `None` to match nodes without a tag),
+and whose name is the second value
+(where `None` matches any node, regardless of name).
 
-	That is, the possible variants are:
+That is, the possible variants are:
 
-	* `"nodename"`: matches nodes with that name, regardless of tag.
-	* `("tagname", None)`: matches nodes with that tag, regardless of name.
-	* `("tagname", "nodename")`: matches nodes with that tag and name.
-	* `(None, None)`: matches nodes with no tag, regardless of name.
-	* `(None, "nodename")`: matches nodes with **no tag**, and that name.
+* `"nodename"`: matches nodes with that name, regardless of tag.
+* `("tagname", None)`: matches nodes with that tag, regardless of name.
+* `("tagname", "nodename")`: matches nodes with that tag and name.
+* `(None, None)`: matches nodes with no tag, regardless of name.
+* `(None, "nodename")`: matches nodes with **no tag**, and that name.
 
 
 
