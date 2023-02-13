@@ -41,7 +41,7 @@ which can canonicalize a KDL document. See [below](#kdlreformat) for options.
 
 ## Using
 
-The `kdl.parse(str, parseConfig?)` function parses, you guessed it, a string of KDL into a KDL document object:
+The `kdl.parse(str, parseConfig|None)` function parses, you guessed it, a string of KDL into a KDL document object:
 
 ```py3
 import kdl
@@ -87,7 +87,7 @@ node_name "arg" {
 
 ```
 
-Stringifying a `kdl.Document` object will produce a valid KDL document back. You can also call `doc.print(printConfig?)` to customize the printing with a `PrintConfig` object, described below.  See below for how to configure printing options.
+Stringifying a `kdl.Document` object will produce a valid KDL document back. You can also call `doc.print(printConfig|None)` to customize the printing with a `PrintConfig` object, described below.  See below for how to configure printing options.
 
 ### Inserting Native Values
 
@@ -126,10 +126,10 @@ Parsing can be controlled via a `kdl.ParseConfig` object,
 which can be provided in three ways.
 In order of importance:
 
-1. Passing a `ParseConfig` object to `kdl.parse(str, ParseConfig?)`
-	or `parser.parse(str, ParseConfig?)`
+1. Passing a `ParseConfig` object to `kdl.parse(str, ParseConfig|None)`
+	or `parser.parse(str, ParseConfig|None)`
 	(if you've constructed a `kdl.Parser`).
-2. Creating a `kdl.Parser(parseConfig?, printConfig?)`,
+2. Creating a `kdl.Parser(parseConfig|None, printConfig|None)`,
 	which automatically applies it to its `.parse()` method if not overriden.
 3. Fiddling with the `kdl.parsing.defaults` object,
 	which is used if nothing else provides a config.
@@ -239,7 +239,7 @@ Like parsing, printing a kdl-py `Document` back to a KDL string can be controlle
 which can be provided in three ways.
 In order of importance:
 
-1. Passing a `PrintConfig` object to `doc.print(PrintConfig?)`.
+1. Passing a `PrintConfig` object to `doc.print(PrintConfig|None)`.
 2. Setting `doc.printConfig` to a `PrintConfig`.
 	(This is done automatically for any documents produced by a `Parser`,
 	if you pass the `printConfig` option to the constructor.)
@@ -304,31 +304,31 @@ A `PrintConfig` object has the following properties:
 
 ## Full API Reference
 
-* `kdl.parse(str, config: kdl.ParseConfig?) -> kdl.Document`
-* `kdl.Parser(parseConfig: kdl.ParseConfig?, printConfig: kdl.PrintConfig?)`
-	* `parser.parse(str, config: kdl.ParseConfig?) -> kdl.Document`
-	* `parser.print(config: kdl.PrintConfig?) -> str`
-* `kdl.Document(nodes: list[kdl.Node]?, printConfig: kdl.PrintConfig?)`
-	* `doc.print(PrintConfig?) -> str`
+* `kdl.parse(str, config: kdl.ParseConfig|None) -> kdl.Document`
+* `kdl.Parser(parseConfig: kdl.ParseConfig|None, printConfig: kdl.PrintConfig|None)`
+	* `parser.parse(str, config: kdl.ParseConfig|None) -> kdl.Document`
+	* `parser.print(config: kdl.PrintConfig|None) -> str`
+* `kdl.Document(nodes: list[kdl.Node]?, printConfig: kdl.PrintConfig|None)`
+	* `doc.print(PrintConfig|None) -> str`
 	* `doc[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `doc.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
 	* `doc.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
-* `kdl.Node(name: str, tag: str?, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
+* `kdl.Node(name: str, tag: str|None, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
 	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
 	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
 	
-* `kdl.Binary(value: int, tag: str?)`
-* `kdl.Octal(value: int, tag: str?)`
-* `kdl.Decimal(mantissa: int|float, exponent: int?, tag: str?)`
+* `kdl.Binary(value: int, tag: str|None)`
+* `kdl.Octal(value: int, tag: str|None)`
+* `kdl.Decimal(mantissa: int|float, exponent: int|None, tag: str|None)`
 	* `dec.value`: readonly, `mantissa * (10**exponent)`
-* `kdl.Hex(value: int, tag: str?)`
-* `kdl.Bool(value: bool, tag: str?)`
-* `kdl.Null(tag: str?)`
+* `kdl.Hex(value: int, tag: str|None)`
+* `kdl.Bool(value: bool, tag: str|None)`
+* `kdl.Null(tag: str|None)`
 	* `null.value`: readonly, always `None`
-* `kdl.RawString(value: str, tag: str?)`
-* `kdl.String(value: str, tag: str?)`
-* `kdl.ExactValue(chars: str, tag: str?)` †
+* `kdl.RawString(value: str, tag: str|None)`
+* `kdl.String(value: str, tag: str|None)`
+* `kdl.ExactValue(chars: str, tag: str|None)` †
 * `kdl.Value`, `kdl.Numberish`, `kdl.Stringish` ‡
 * `kdl.ParseConfig(...)` see above for options
 	* `kdl.parsing.defaults`: default `ParseConfig`
@@ -358,7 +358,7 @@ and `Stringish` matches both string value classes.
 A few data structures and functions take a `NodeKey`
 to match against a node.
 
-Formally, `NodeKey` is `Union[str, Tuple[Optional[str], Optional[str]]]`;
+Formally, `NodeKey` is `str | tuple[str|None, str|None]`;
 that is,
 either a string,
 or a tuple of optional strings.
