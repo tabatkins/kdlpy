@@ -264,7 +264,7 @@ class Decimal(Numberish):
 
     @property
     def value(self) -> float:
-        return self.mantissa * (10.0 ** self.exponent)
+        return self.mantissa * (10.0**self.exponent)
 
     def print(self, config: Optional[printing.PrintConfig] = None) -> str:
         if config is None:

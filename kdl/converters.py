@@ -106,56 +106,56 @@ def toNative(val: types.Value, pf: ParseFragment) -> KDLValue:
 
 
 def i8(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 7
+    limit = 2**7
     if not (-limit <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in an i8.")
     return int(val.value)
 
 
 def i16(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 15
+    limit = 2**15
     if not (-limit <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in an i16.")
     return int(val.value)
 
 
 def i32(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 31
+    limit = 2**31
     if not (-limit <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in an i32.")
     return int(val.value)
 
 
 def i64(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 63
+    limit = 2**63
     if not (-limit <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in an i64.")
     return int(val.value)
 
 
 def u8(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 8
+    limit = 2**8
     if not (0 <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in a u8.")
     return int(val.value)
 
 
 def u16(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 16
+    limit = 2**16
     if not (0 <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in a u16.")
     return int(val.value)
 
 
 def u32(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 32
+    limit = 2**32
     if not (0 <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in a u32.")
     return int(val.value)
 
 
 def u64(val: types.Numberish, pf: ParseFragment) -> int:
-    limit = 2 ** 64
+    limit = 2**64
     if not (0 <= val.value < limit):
         raise pf.error(f"{val.value} doesn't fit in a u64.")
     return int(val.value)

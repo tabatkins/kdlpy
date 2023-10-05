@@ -1,0 +1,3 @@
+#! /bin/sh
+
+echo "¶ Running ruff..." && ruff kdl && echo "¶ Running black..." && black kdl && echo "¶ Running mypy..." && mypy kdl && echo "¶ Running pylint..." && pylint kdl && echo "✔ All lints passed!"
