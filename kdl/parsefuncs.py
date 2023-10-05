@@ -1,14 +1,13 @@
 from __future__ import annotations
+
 import collections
 import typing
-from typing import Union, Optional
+from typing import Optional, Union
 
-from . import types
-from . import parsing
-from . import converters
+from . import converters, parsing, types
 from .errors import ParseError, ParseFragment
+from .result import Failure, Result
 from .stream import Stream
-from .result import Result, Failure
 
 
 def parse(input: str, config: Optional[parsing.ParseConfig] = None) -> types.Document:
@@ -77,11 +76,13 @@ def parseNode(s: Stream, start: int) -> Result:
     else:
         if (tag, name) in s.config.nodeConverters:
             node = s.config.nodeConverters[tag, name](
-                node, ParseFragment(s[start:nameEnd], s, start)
+                node,
+                ParseFragment(s[start:nameEnd], s, start),
             )
         elif name in s.config.nodeConverters:
             node = s.config.nodeConverters[name](
-                node, ParseFragment(s[start:nameEnd], s, start)
+                node,
+                ParseFragment(s[start:nameEnd], s, start),
             )
         return Result(node, i)
 
@@ -120,7 +121,7 @@ def parseTag(s: Stream, start: int) -> Result:
     if tag is Failure:
         return Result.fail(start)
     if s[end] != ")":
-        raise ParseError(s, end, f"Junk between tag ident and closing paren.")
+        raise ParseError(s, end, "Junk between tag ident and closing paren.")
     return Result(tag, end + 1)
 
 
@@ -159,7 +160,7 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
         return Result(";", start + 1)
     if s.eof(start):
         return Result(True, start)
-    raise ParseError(s, start, f"Junk after node, before terminator.")
+    raise ParseError(s, start, "Junk after node, before terminator.")
 
 
 def parseEntity(s: Stream, start: int) -> Result:
@@ -210,13 +211,10 @@ def parseValue(s: Stream, start: int) -> Result:
             val.tag = tag
         if tag is not None and tag in s.config.valueConverters:
             val = s.config.valueConverters[tag](
-                val, ParseFragment(s[valueStart:i], s, i)
+                val,
+                ParseFragment(s[valueStart:i], s, i),
             )
-        if (
-            tag is not None
-            and s.config.nativeTaggedValues
-            and isinstance(val, types.Value)
-        ):
+        if tag is not None and s.config.nativeTaggedValues and isinstance(val, types.Value):
             val = converters.toNative(val, ParseFragment(s[valueStart:i], s, i))
         return Result((None, val), i)
 
@@ -250,7 +248,9 @@ def parseNumber(s: Stream, start: int) -> Result:
     if res.valid:
         return res
     raise ParseError(
-        s, start, f"Expected a number, but got junk after the initial digit."
+        s,
+        start,
+        "Expected a number, but got junk after the initial digit.",
     )
 
 
@@ -269,7 +269,7 @@ def parseBinaryNumber(s: Stream, start: int) -> Result:
 
     # initial digit
     if not isBinaryDigit(s[i]):
-        raise ParseError(s, i, f"Expected binary digit after 0b, got junk.")
+        raise ParseError(s, i, "Expected binary digit after 0b, got junk.")
 
     # following digits/underscores
     end = i + 1
@@ -294,7 +294,7 @@ def parseOctalNumber(s: Stream, start: int) -> Result:
 
     # initial digit
     if not isOctalDigit(s[i]):
-        raise ParseError(s, i, f"Expected octal digit after 0o, got junk.")
+        raise ParseError(s, i, "Expected octal digit after 0o, got junk.")
 
     # following digits/underscores
     end = i + 1
@@ -319,7 +319,7 @@ def parseHexNumber(s: Stream, start: int) -> Result:
 
     # initial digit
     if not isHexDigit(s[i]):
-        raise ParseError(s, i, f"Expected hex digit after 0x, got junk.")
+        raise ParseError(s, i, "Expected hex digit after 0x, got junk.")
 
     # following digits/underscores
     end = i + 1
@@ -352,7 +352,9 @@ def parseDecimalNumber(s: Stream, start: int) -> Result:
             mantissa = float(mantissaChars)
         except ValueError:
             raise ParseError(
-                s, start, "Number-like string didn't actually parse as a number."
+                s,
+                start,
+                "Number-like string didn't actually parse as a number.",
             )
 
     exponent = 0
@@ -432,7 +434,9 @@ def parseEscapedString(s: Stream, start: int) -> Result:
             break
         if s[i] == "":
             raise ParseError(
-                s, start, "Hit EOF while looking for the end of the string"
+                s,
+                start,
+                "Hit EOF while looking for the end of the string",
             )
         ch, i = parseEscape(s, i)
         if ch is Failure:
@@ -465,7 +469,9 @@ def parseEscape(s: Stream, start: int) -> Result:
     if ch == "u":
         if s[start + 2] != "{":
             raise ParseError(
-                s, start, "Unicode escapes must surround their codepoint in {}"
+                s,
+                start,
+                "Unicode escapes must surround their codepoint in {}",
             )
         i = start + 3
         hexStart = i
@@ -478,12 +484,16 @@ def parseEscape(s: Stream, start: int) -> Result:
             raise ParseError(s, hexStart, "Unicode escape doesn't contain a codepoint")
         if hexCount > 6:
             raise ParseError(
-                s, hexStart, "Unicode escapes can contain at most six digits"
+                s,
+                hexStart,
+                "Unicode escapes can contain at most six digits",
             )
         hexValue = int(s[hexStart:i], 16)
         if hexValue > 0x10FFFF:
             raise ParseError(
-                s, hexStart, "Maximum codepoint in a unicode escape is 0x10ffff"
+                s,
+                hexStart,
+                "Maximum codepoint in a unicode escape is 0x10ffff",
             )
         return Result(chr(hexValue), i + 1)
     raise ParseError(s, start, "Invalid character escape")
@@ -507,7 +517,9 @@ def parseRawString(s: Stream, start: int) -> Result:
             i += 1
         if s[i] == "":
             raise ParseError(
-                s, start, "Hit EOF while looking for the end of the raw string."
+                s,
+                start,
+                "Hit EOF while looking for the end of the raw string.",
             )
         stringEnd = i
         i += 1

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from typing import Union, Any
-import decimal
+import base64
 import datetime
+import decimal
 import ipaddress
+import re
 import urllib.parse
 import uuid
-import re
-import base64
-
+from typing import Any, Union
 
 from . import types
 from .errors import ParseError, ParseFragment
@@ -108,56 +107,64 @@ def toNative(val: types.Value, pf: ParseFragment) -> KDLValue:
 def i8(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**7
     if not (-limit <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in an i8.")
+        msg = f"{val.value} doesn't fit in an i8."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def i16(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**15
     if not (-limit <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in an i16.")
+        msg = f"{val.value} doesn't fit in an i16."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def i32(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**31
     if not (-limit <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in an i32.")
+        msg = f"{val.value} doesn't fit in an i32."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def i64(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**63
     if not (-limit <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in an i64.")
+        msg = f"{val.value} doesn't fit in an i64."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def u8(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**8
     if not (0 <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in a u8.")
+        msg = f"{val.value} doesn't fit in a u8."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def u16(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**16
     if not (0 <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in a u16.")
+        msg = f"{val.value} doesn't fit in a u16."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def u32(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**32
     if not (0 <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in a u32.")
+        msg = f"{val.value} doesn't fit in a u32."
+        raise pf.error(msg)
     return int(val.value)
 
 
 def u64(val: types.Numberish, pf: ParseFragment) -> int:
     limit = 2**64
     if not (0 <= val.value < limit):
-        raise pf.error(f"{val.value} doesn't fit in a u64.")
+        msg = f"{val.value} doesn't fit in a u64."
+        raise pf.error(msg)
     return int(val.value)
 
 
@@ -168,71 +175,81 @@ def decim(val: types.Value, pf: ParseFragment) -> decimal.Decimal:
         chars = val.value
     try:
         return decimal.Decimal(chars)
-    except decimal.InvalidOperation as e:
-        raise pf.error(f"Couldn't parse a decimal from {pf.fragment}.")
+    except decimal.InvalidOperation:
+        msg = f"Couldn't parse a decimal from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def dateTime(val: types.Stringish, pf: ParseFragment) -> datetime.datetime:
     try:
         return datetime.datetime.fromisoformat(val.value)
-    except ValueError as e:
-        raise pf.error(f"Couldn't parse a date-time from {pf.fragment}.")
+    except ValueError:
+        msg = f"Couldn't parse a date-time from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def time(val: types.Stringish, pf: ParseFragment) -> datetime.time:
     try:
         return datetime.time.fromisoformat(val.value)
-    except ValueError as e:
-        raise pf.error(f"Couldn't parse a date-time from {pf.fragment}.")
+    except ValueError:
+        msg = f"Couldn't parse a date-time from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def date(val: types.Stringish, pf: ParseFragment) -> datetime.date:
     try:
         return datetime.date.fromisoformat(val.value)
-    except ValueError as e:
-        raise pf.error(f"Couldn't parse a date from {pf.fragment}.")
+    except ValueError:
+        msg = f"Couldn't parse a date from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def ipv4(val: types.Stringish, pf: ParseFragment) -> ipaddress.IPv4Address:
     try:
         return ipaddress.IPv4Address(val.value)
-    except ipaddress.AddressValueError as e:
-        raise pf.error(f"Couldn't parse an IPv4 address from {pf.fragment}.")
+    except ipaddress.AddressValueError:
+        msg = f"Couldn't parse an IPv4 address from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def ipv6(val: types.Stringish, pf: ParseFragment) -> ipaddress.IPv6Address:
     try:
         return ipaddress.IPv6Address(val.value)
     except ipaddress.AddressValueError:
-        raise pf.error(f"Couldn't parse an IPv6 address from {pf.fragment}.")
+        msg = f"Couldn't parse an IPv6 address from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def url(val: types.Stringish, pf: ParseFragment) -> urllib.parse.ParseResult:
     try:
         return urllib.parse.urlparse(val.value)
     except ValueError:
-        raise pf.error(f"Couldn't parse a url from {pf.fragment}.")
+        msg = f"Couldn't parse a url from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def _uuid(val: types.Stringish, pf: ParseFragment) -> uuid.UUID:
     try:
         return uuid.UUID(val.value)
     except:
-        raise pf.error(f"Couldn't parse a UUID from {pf.fragment}.")
+        msg = f"Couldn't parse a UUID from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def regex(val: types.Stringish, pf: ParseFragment) -> re.Pattern:
     try:
         return re.compile(val.value)
     except:
-        raise pf.error(f"Couldn't parse a regex from {pf.fragment}.")
+        msg = f"Couldn't parse a regex from {pf.fragment}."
+        raise pf.error(msg)
 
 
 def b64(val: types.Stringish, pf: ParseFragment) -> bytes:
     try:
         return base64.b64decode(val.value.encode("utf-8"), validate=True)
     except:
-        raise pf.error(f"Couldn't parse base64.")
+        msg = "Couldn't parse base64."
+        raise pf.error(msg)
 
 
 def toKdlValue(val: Any) -> KDLValue:
@@ -260,12 +277,14 @@ def toKdlValue(val: Any) -> KDLValue:
     if isKdlValue(val):
         return val
     if not callable(getattr(val, "to_kdl", None)):
+        msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
         raise Exception(
-            f"Can't convert object to KDL for serialization. Got:\n{repr(val)}"
+            msg,
         )
     value = val.to_kdl()
     if not isKdlValue(value):
+        msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
         raise Exception(
-            f"Expected object to convert to KDL value or compatible primitive. Got:\n{repr(val)}"
+            msg,
         )
     return value

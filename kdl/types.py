@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import re
-from collections import OrderedDict
-from typing import Any, Optional, Union, Iterable, Tuple, overload, TypeVar
-from dataclasses import dataclass
 import dataclasses
+import re
 from abc import ABCMeta
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Iterable, Optional, Tuple, TypeVar, Union, overload
 
 from . import printing
 from .converters import toKdlValue
@@ -95,7 +95,9 @@ class Node:
     nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
-        self, indentLevel: int = 0, config: Optional[printing.PrintConfig] = None
+        self,
+        indentLevel: int = 0,
+        config: Optional[printing.PrintConfig] = None,
     ) -> str:
         if config is None:
             config = printing.defaults
@@ -379,12 +381,14 @@ def toKdlNode(val: Any) -> Node:
     if isinstance(val, Node):
         return val
     if not callable(getattr(val, "to_kdl", None)):
+        msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
         raise Exception(
-            f"Can't convert object to KDL for serialization. Got:\n{repr(val)}"
+            msg,
         )
     node = val.to_kdl()
     if not isinstance(node, Node):
-        raise Exception(f"Expected object to convert to KDL Node. Got:\n{repr(val)}")
+        msg = f"Expected object to convert to KDL Node. Got:\n{val!r}"
+        raise Exception(msg)
     return node
 
 

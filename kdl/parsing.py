@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Tuple, Dict, Optional, Callable, Union
+from typing import Callable, Dict, Optional, Tuple, Union
 
-from . import parsefuncs
-from . import types
-from . import printing
+from . import parsefuncs, printing, types
 
 
 class Parser:
@@ -13,7 +11,7 @@ class Parser:
         self,
         parseConfig: Optional[ParseConfig] = None,
         printConfig: Optional[printing.PrintConfig] = None,
-    ):
+    ) -> None:
         self.parseConfig = parseConfig
         self.printConfig = printConfig
 
@@ -29,7 +27,7 @@ class ParseConfig:
     nativeTaggedValues: bool = True
     valueConverters: Dict[str, Callable] = field(default_factory=dict)
     nodeConverters: Dict[Union[str, Tuple[str, str]], Callable] = field(
-        default_factory=dict
+        default_factory=dict,
     )
 
 

@@ -1,10 +1,11 @@
 def cli() -> None:
-    import kdl
     import argparse
     import sys
 
+    import kdl
+
     cli = argparse.ArgumentParser(
-        description="KDL parser/printer, letting you easily reformat KDL files into a canonical representation."
+        description="KDL parser/printer, letting you easily reformat KDL files into a canonical representation.",
     )
     cli.add_argument(
         "infile",
@@ -66,13 +67,6 @@ def cli() -> None:
         help="What character to use ('e' or 'E') for indicating exponents on scinot numbers.",
     )
     cli.set_defaults(respectRadix=True, respectStringType=True)
-    indent: str = "\t"
-    semicolons: bool = False
-    printNullArgs: bool = True
-    printNullProps: bool = True
-    respectRadix: bool = True
-    respectStringType: bool = True
-    exponent: str = "e"
     options = cli.parse_args()
     parseConfig = kdl.ParseConfig(
         nativeUntaggedValues=False,
@@ -92,7 +86,8 @@ def cli() -> None:
         fh.write(doc.print(printConfig))
 
 
-def expFromString(s):
-    if s == "e" or s == "E":
+def expFromString(s: str) -> str:
+    if s in ("e", "E"):
         return s
-    raise argparse.ArgumentTypeError(f"Expected 'e' or 'E' for an exponent; got '{s}'")
+    msg = f"Expected 'e' or 'E' for an exponent; got '{s}'"
+    raise argparse.ArgumentTypeError(msg)

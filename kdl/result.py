@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import NamedTuple, Any
+from typing import Any, NamedTuple
 
 
 class Failure:

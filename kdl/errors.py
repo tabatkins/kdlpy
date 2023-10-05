@@ -1,11 +1,12 @@
 from __future__ import annotations
+
 from typing import Tuple, Union
 
 from . import stream
 
 
 class ParseError(Exception):
-    def __init__(self, s: Union[str, stream.Stream], i: int, msg: str):
+    def __init__(self, s: Union[str, stream.Stream], i: int, msg: str) -> None:
         self.line, self.col = lineCol(s, i)
         self.msg = f"{self.line}:{self.col} parse error:"
         if "\n" in msg:
@@ -31,7 +32,7 @@ def lineCol(s: Union[str, stream.Stream], index: int) -> Tuple[int, int]:
 
 
 class ParseFragment:
-    def __init__(self, fragment: str, s: stream.Stream, i: int):
+    def __init__(self, fragment: str, s: stream.Stream, i: int) -> None:
         self.fragment = fragment
         self._s = s
         self._i = i
