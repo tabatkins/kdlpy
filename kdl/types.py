@@ -63,12 +63,12 @@ class Document:
                 continue
             return node
         if not passedTag:
-            s = f"name '{name}'"
+            msg = name
         elif name is None:
-            s = f"tag '{tag}'"
+            msg = f"({tag})"
         else:
-            s = f"name '{name}' and tag '{tag}'"
-        raise KeyError(f"No node with {s}.")
+            msg = f"({tag}){name}"
+        raise KeyError(msg)
 
     def getAll(
         self,
@@ -169,12 +169,12 @@ class Node:
                 continue
             return node
         if not passedTag:
-            s = f"name '{name}'"
+            msg = name
         elif name is None:
-            s = f"tag '{tag}'"
+            msg = f"({tag})"
         else:
-            s = f"name '{name}' and tag '{tag}'"
-        raise KeyError(f"No node with {s}.")
+            msg = f"({tag}){name}"
+        raise KeyError(msg)
 
     def getAll(
         self,
