@@ -7,7 +7,7 @@ import ipaddress
 import re
 import urllib.parse
 import uuid
-from typing import Any, Union
+from typing import Any, Union, cast
 
 from . import types
 from .errors import ParseError, ParseFragment
@@ -77,7 +77,7 @@ def toNative(val: types.Value, pf: ParseFragment) -> KDLValue:
         if val.tag == "u64":
             return u64(val, pf)
         if val.tag in ("f32", "f64"):
-            return val.value
+            return int(val.value)
         if val.tag in ("decimal64", "decimal128"):
             return decim(val, pf)
     if isinstance(val, types.Stringish):
@@ -222,7 +222,7 @@ def ipv6(val: types.Stringish, pf: ParseFragment) -> ipaddress.IPv6Address:
 
 def url(val: types.Stringish, pf: ParseFragment) -> urllib.parse.ParseResult:
     try:
-        return urllib.parse.urlparse(val.value)
+        return cast("urllib.parse.ParseResult", urllib.parse.urlparse(val.value))
     except ValueError:
         msg = f"Couldn't parse a url from {pf.fragment}."
         raise pf.error(msg)
@@ -275,13 +275,13 @@ def toKdlValue(val: Any) -> KDLValue:
         return types.String(base64.b64encode(val).decode("utf-8"), "base-64")
 
     if isKdlValue(val):
-        return val
+        return cast("KDLValue", val)
     if not callable(getattr(val, "to_kdl", None)):
         msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
         raise Exception(
             msg,
         )
-    value = val.to_kdl()
+    value = cast("KDLValue", val.to_kdl())
     if not isKdlValue(value):
         msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
         raise Exception(

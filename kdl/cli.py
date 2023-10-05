@@ -1,5 +1,7 @@
+import argparse
+
+
 def cli() -> None:
-    import argparse
     import sys
 
     import kdl

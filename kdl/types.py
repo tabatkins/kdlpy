@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from abc import ABCMeta
+from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Tuple, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple, TypeVar, Union, overload
 
 from . import printing
 from .converters import toKdlValue
@@ -15,9 +15,11 @@ class _MISSING:
     pass
 
 
-VT = TypeVar("VT")
+if TYPE_CHECKING:
+    VT = TypeVar("VT")
 
-NodeKey = Union[str, Tuple[Optional[str], Optional[str]]]
+    NodeKey = str | tuple[str | None, str | None]
+    KDLType = Document | Node | Value
 
 
 @dataclass
@@ -30,7 +32,7 @@ class Document:
         s = ""
         for node in self.nodes:
             node = toKdlNode(node)
-            s += node.print(0, config)
+            s += node.print(config, 0)
         if s == "":
             # always end a kdl doc with a newline
             s = "\n"
@@ -96,8 +98,8 @@ class Node:
 
     def print(
         self,
-        indentLevel: int = 0,
         config: Optional[printing.PrintConfig] = None,
+        indentLevel: int = 0,
     ) -> str:
         if config is None:
             config = printing.defaults
@@ -133,7 +135,7 @@ class Node:
             childrenText = ""
             for child in self.nodes:
                 child = toKdlNode(child)
-                childrenText += child.print(indentLevel=indentLevel + 1, config=config)
+                childrenText += child.print(config=config, indentLevel=indentLevel + 1)
             if childrenText:
                 s += " {\n"
                 s += childrenText
@@ -197,6 +199,10 @@ class Node:
 class Value(metaclass=ABCMeta):
     value: Any
     tag: Optional[str]
+
+    @abstractmethod
+    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+        pass
 
 
 @dataclass
@@ -418,7 +424,7 @@ def escapedFromRaw(chars: str) -> str:
     )
 
 
-def printValue(val: Any, config: printing.PrintConfig) -> str:
+def printValue(val: None | bool | int | float | str | KDLType, config: printing.PrintConfig) -> str:
     if val is None:
         return "null"
     if isinstance(val, bool):
