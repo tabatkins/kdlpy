@@ -6,7 +6,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from . import printing, t
-from .converters import toKdlValue
 
 
 class _MISSING:
@@ -391,6 +390,90 @@ def toKdlNode(val: t.Any) -> Node:
         msg = f"Expected object to convert to KDL Node. Got:\n{val!r}"
         raise Exception(msg)
     return node
+
+
+def toKdlValue(val: t.Any) -> t.KDLValue:
+    """
+    Converts any KDLish value (a KDLValue, a primitive,
+    an object corresponding to a built-in tag,
+    or an object with .to_kdl() that returns one of the above)
+    into a KDLValue
+    """
+    import base64
+    import datetime
+    import decimal
+    import ipaddress
+    import re
+    import urllib
+    import uuid
+
+    if isinstance(val, Value):
+        return val
+    if isinstance(val, decimal.Decimal):
+        return String(str(val), "decimal")
+    if isinstance(val, datetime.datetime):
+        return String(val.isoformat(), "date-time")
+    if isinstance(val, datetime.time):
+        return String(val.isoformat(), "time")
+    if isinstance(val, datetime.date):
+        return String(val.isoformat(), "date")
+    if isinstance(val, ipaddress.IPv4Address):
+        return String(str(val), "ipv4")
+    if isinstance(val, ipaddress.IPv6Address):
+        return String(str(val), "ipv6")
+    if isinstance(val, urllib.parse.ParseResult):
+        return String(urllib.parse.urlunparse(val), "url")
+    if isinstance(val, uuid.UUID):
+        return String(str(val), "uuid")
+    if isinstance(val, re.Pattern):
+        return RawString(val.pattern, "regex")
+    if isinstance(val, bytes):
+        return String(base64.b64encode(val).decode("utf-8"), "base-64")
+
+    if not callable(getattr(val, "to_kdl", None)):
+        msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
+        raise Exception(
+            msg,
+        )
+
+    convertedVal = val.to_kdl()
+    if isKdlishValue(convertedVal):
+        return toKdlValue(convertedVal)
+    else:
+        msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
+        raise Exception(msg)
+
+
+def isKdlishValue(val: t.Any) -> bool:
+    import datetime
+    import decimal
+    import ipaddress
+    import re
+    import urllib
+    import uuid
+
+    if val is None:
+        return True
+    return isinstance(
+        val,
+        (
+            str,
+            int,
+            float,
+            bool,
+            decimal.Decimal,
+            datetime.time,
+            datetime.date,
+            datetime.datetime,
+            ipaddress.IPv4Address,
+            ipaddress.IPv6Address,
+            urllib.parse.ParseResult,
+            uuid.UUID,
+            re.Pattern,
+            bytes,
+            Value,
+        ),
+    )
 
 
 def printTag(tag: str | None) -> str:

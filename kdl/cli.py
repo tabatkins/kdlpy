@@ -1,11 +1,10 @@
 import argparse
+import sys
+
+from . import parsefuncs, parsing, printing
 
 
 def cli() -> None:
-    import sys
-
-    import kdl
-
     cliParser = argparse.ArgumentParser(
         description="KDL parser/printer, letting you easily reformat KDL files into a canonical representation.",
     )
@@ -70,11 +69,11 @@ def cli() -> None:
     )
     cliParser.set_defaults(respectRadix=True, respectStringType=True)
     options = cliParser.parse_args()
-    parseConfig = kdl.ParseConfig(
+    parseConfig = parsing.ParseConfig(
         nativeUntaggedValues=False,
         nativeTaggedValues=False,
     )
-    printConfig = kdl.PrintConfig(
+    printConfig = printing.PrintConfig(
         indent=" " * options.indent if options.indent >= 0 else "\t",
         semicolons=options.semicolons,
         respectRadix=options.respectRadix,
@@ -83,7 +82,7 @@ def cli() -> None:
     )
 
     with options.infile as fh:
-        doc = kdl.parse(fh.read(), parseConfig)
+        doc = parsefuncs.parse(fh.read(), parseConfig)
     with options.outfile as fh:
         fh.write(doc.print(printConfig))
 
