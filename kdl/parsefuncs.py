@@ -152,6 +152,9 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
     res = parseNewline(s, start)
     if res.valid:
         return res
+    res = parseSingleLineComment(s, start)
+    if res.valid:
+        return res
     if s[start] == ";":
         return Result(";", start + 1)
     if s.eof(start):
