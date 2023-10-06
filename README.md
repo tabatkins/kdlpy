@@ -33,7 +33,7 @@ merely by adding a `.to_kdl()` method to your classes.
 ## Installing
 
 ```sh
-pip install kdl-py
+pipx install kdl-py
 ```
 
 When installed, a `kdlreformat` command-line program is also made available,
@@ -196,7 +196,7 @@ A `ParseConfig` object has the following properties:
 	You can produce KDL values
 	(such as parsing `(hex)"0x12.e5"` into a `kdl.Decimal`,
 	since KDL doesn't support fractional hex values),
-	or into any other type.
+	or produce any other Python type.
 	If you return a non-KDL type,
 	you probably want to ensure it has a `.to_kdl()` method
 	(or is one of the supported built-in types),
@@ -338,7 +338,7 @@ A `PrintConfig` object has the following properties:
 	* `error.msg: str`: hopefully informative
 	* `error.line: int`: 1-indexed
 	* `error.col: int`: 1-indexed
-* `ParseFragment`: passed to converter functions
+* `kdl.ParseFragment`: passed to converter functions
 	* `pf.fragment`: slice from the source string
 	* `pf.error(msg: str)` returns a `kdl.ParseError` with error location set properly already
 
@@ -352,6 +352,18 @@ These are abstract base classes to help in type testing:
 `Value` matches all eight value classes,
 `Numberish` matches all four numeric value classes,
 and `Stringish` matches both string value classes.
+
+A few type aliases also exist,
+used by the module in a few places
+and potentially useful for your code:
+
+* `kdl.KDLAny`: a `Document`, `Node`, or any of the `Value` subtypes
+* `kdl.KDLValue`: any of the `Value` subtypes
+* `kdl.KDLishValue`: a `KDLValue` or one of the supported Python native types [see "Inserting Native Types"](#inserting-native-types)
+
+These aliases only exist when `typing.TYPE_CHECKING` is true,
+so they're *only* useful for writing types;
+they won't be visible at runtime.
 
 ### `NodeKey`
 
