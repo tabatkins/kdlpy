@@ -409,6 +409,14 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
 
     if isinstance(val, Value):
         return val
+    if val is None:
+        return Null()
+    if isinstance(val, bool):
+        return Bool(val)
+    if isinstance(val, str):
+        return String(val)
+    if isinstance(val, (int, float)):
+        return Decimal(val)
     if isinstance(val, decimal.Decimal):
         return String(str(val), "decimal")
     if isinstance(val, datetime.datetime):
