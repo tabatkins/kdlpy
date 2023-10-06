@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import collections
-import typing
-from typing import Optional, Union
-
-from . import converters, parsing, types
+from . import converters, parsing, t, types
 from .errors import ParseError, ParseFragment
 from .result import Failure, Result
 from .stream import Stream
 
 
-def parse(input: str, config: Optional[parsing.ParseConfig] = None) -> types.Document:
+def parse(input: str, config: t.ParseConfig | None = None) -> t.Document:
     if config is None:
         config = parsing.defaults
     doc = types.Document()
@@ -344,18 +340,18 @@ def parseDecimalNumber(s: Stream, start: int) -> Result:
             raise ParseError(s, i, "Expected digit after decimal point.")
 
     mantissaChars = s[start:i].replace("_", "")
-    mantissa: Union[int, float]
+    mantissa: int | float
     try:
         mantissa = int(mantissaChars, 10)
     except ValueError:
         try:
             mantissa = float(mantissaChars)
-        except ValueError:
+        except ValueError as exc:
             raise ParseError(
                 s,
                 start,
                 "Number-like string didn't actually parse as a number.",
-            )
+            ) from exc
 
     exponent = 0
     if s[i] in ("e", "E"):
@@ -401,7 +397,6 @@ def parseSign(s: Stream, start: int) -> Result:
 
 
 def parseKeyword(s: Stream, start: int) -> Result:
-    val, i = parseBareIdent(s, start)
     if s[start : start + 4] == "true" and not isIdentChar(s[start + 4]):
         return Result(types.Bool(True), start + 4)
     if s[start : start + 5] == "false" and not isIdentChar(s[start + 5]):

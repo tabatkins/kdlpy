@@ -7,33 +7,14 @@ import ipaddress
 import re
 import urllib.parse
 import uuid
-from typing import Any, Union, cast
 
-from . import types
-from .errors import ParseError, ParseFragment
-from .stream import Stream
+from . import t, types
 
-KDLValue = Union[
-    str,
-    int,
-    float,
-    bool,
-    None,
-    decimal.Decimal,
-    datetime.time,
-    datetime.date,
-    datetime.datetime,
-    ipaddress.IPv4Address,
-    ipaddress.IPv6Address,
-    urllib.parse.ParseResult,
-    uuid.UUID,
-    re.Pattern,
-    bytes,
-    "types.Value",
-]
+if t.TYPE_CHECKING:
+    from .errors import ParseFragment
 
 
-def isKdlValue(val: Any) -> bool:
+def isKdlishValue(val: t.Any) -> bool:
     if val is None:
         return True
     return isinstance(
@@ -58,7 +39,7 @@ def isKdlValue(val: Any) -> bool:
     )
 
 
-def toNative(val: types.Value, pf: ParseFragment) -> KDLValue:
+def toNative(val: t.Value, pf: ParseFragment) -> t.KDLishValue:
     if isinstance(val, types.Numberish):
         if val.tag == "i8":
             return i8(val, pf)
@@ -104,7 +85,7 @@ def toNative(val: types.Value, pf: ParseFragment) -> KDLValue:
     return val
 
 
-def i8(val: types.Numberish, pf: ParseFragment) -> int:
+def i8(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**7
     if not (-limit <= val.value < limit):
         msg = f"{val.value} doesn't fit in an i8."
@@ -112,7 +93,7 @@ def i8(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def i16(val: types.Numberish, pf: ParseFragment) -> int:
+def i16(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**15
     if not (-limit <= val.value < limit):
         msg = f"{val.value} doesn't fit in an i16."
@@ -120,7 +101,7 @@ def i16(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def i32(val: types.Numberish, pf: ParseFragment) -> int:
+def i32(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**31
     if not (-limit <= val.value < limit):
         msg = f"{val.value} doesn't fit in an i32."
@@ -128,7 +109,7 @@ def i32(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def i64(val: types.Numberish, pf: ParseFragment) -> int:
+def i64(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**63
     if not (-limit <= val.value < limit):
         msg = f"{val.value} doesn't fit in an i64."
@@ -136,7 +117,7 @@ def i64(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def u8(val: types.Numberish, pf: ParseFragment) -> int:
+def u8(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**8
     if not (0 <= val.value < limit):
         msg = f"{val.value} doesn't fit in a u8."
@@ -144,7 +125,7 @@ def u8(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def u16(val: types.Numberish, pf: ParseFragment) -> int:
+def u16(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**16
     if not (0 <= val.value < limit):
         msg = f"{val.value} doesn't fit in a u16."
@@ -152,7 +133,7 @@ def u16(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def u32(val: types.Numberish, pf: ParseFragment) -> int:
+def u32(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**32
     if not (0 <= val.value < limit):
         msg = f"{val.value} doesn't fit in a u32."
@@ -160,7 +141,7 @@ def u32(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def u64(val: types.Numberish, pf: ParseFragment) -> int:
+def u64(val: t.Numberish, pf: ParseFragment) -> int:
     limit = 2**64
     if not (0 <= val.value < limit):
         msg = f"{val.value} doesn't fit in a u64."
@@ -168,91 +149,100 @@ def u64(val: types.Numberish, pf: ParseFragment) -> int:
     return int(val.value)
 
 
-def decim(val: types.Value, pf: ParseFragment) -> decimal.Decimal:
+def decim(val: t.Value, pf: ParseFragment) -> decimal.Decimal:
     if isinstance(val, types.Numberish):
         chars = pf.fragment.replace("_", "")
     else:
         chars = val.value
     try:
         return decimal.Decimal(chars)
-    except decimal.InvalidOperation:
+    except decimal.InvalidOperation as exc:
         msg = f"Couldn't parse a decimal from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def dateTime(val: types.Stringish, pf: ParseFragment) -> datetime.datetime:
+def dateTime(val: t.Stringish, pf: ParseFragment) -> datetime.datetime:
     try:
         return datetime.datetime.fromisoformat(val.value)
-    except ValueError:
+    except ValueError as exc:
         msg = f"Couldn't parse a date-time from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def time(val: types.Stringish, pf: ParseFragment) -> datetime.time:
+def time(val: t.Stringish, pf: ParseFragment) -> datetime.time:
     try:
         return datetime.time.fromisoformat(val.value)
-    except ValueError:
+    except ValueError as exc:
         msg = f"Couldn't parse a date-time from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def date(val: types.Stringish, pf: ParseFragment) -> datetime.date:
+def date(val: t.Stringish, pf: ParseFragment) -> datetime.date:
     try:
         return datetime.date.fromisoformat(val.value)
-    except ValueError:
+    except ValueError as exc:
         msg = f"Couldn't parse a date from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def ipv4(val: types.Stringish, pf: ParseFragment) -> ipaddress.IPv4Address:
+def ipv4(val: t.Stringish, pf: ParseFragment) -> ipaddress.IPv4Address:
     try:
         return ipaddress.IPv4Address(val.value)
-    except ipaddress.AddressValueError:
+    except ipaddress.AddressValueError as exc:
         msg = f"Couldn't parse an IPv4 address from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def ipv6(val: types.Stringish, pf: ParseFragment) -> ipaddress.IPv6Address:
+def ipv6(val: t.Stringish, pf: ParseFragment) -> ipaddress.IPv6Address:
     try:
         return ipaddress.IPv6Address(val.value)
-    except ipaddress.AddressValueError:
+    except ipaddress.AddressValueError as exc:
         msg = f"Couldn't parse an IPv6 address from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def url(val: types.Stringish, pf: ParseFragment) -> urllib.parse.ParseResult:
+def url(val: t.Stringish, pf: ParseFragment) -> urllib.parse.ParseResult:
     try:
-        return cast("urllib.parse.ParseResult", urllib.parse.urlparse(val.value))
-    except ValueError:
+        return t.cast("urllib.parse.ParseResult", urllib.parse.urlparse(val.value))
+    except ValueError as exc:
         msg = f"Couldn't parse a url from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def _uuid(val: types.Stringish, pf: ParseFragment) -> uuid.UUID:
+def _uuid(val: t.Stringish, pf: ParseFragment) -> uuid.UUID:
     try:
         return uuid.UUID(val.value)
-    except:
+    except Exception as exc:
         msg = f"Couldn't parse a UUID from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def regex(val: types.Stringish, pf: ParseFragment) -> re.Pattern:
+def regex(val: t.Stringish, pf: ParseFragment) -> re.Pattern:
     try:
         return re.compile(val.value)
-    except:
+    except Exception as exc:
         msg = f"Couldn't parse a regex from {pf.fragment}."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def b64(val: types.Stringish, pf: ParseFragment) -> bytes:
+def b64(val: t.Stringish, pf: ParseFragment) -> bytes:
     try:
         return base64.b64decode(val.value.encode("utf-8"), validate=True)
-    except:
+    except Exception as exc:
         msg = "Couldn't parse base64."
-        raise pf.error(msg)
+        raise pf.error(msg) from exc
 
 
-def toKdlValue(val: Any) -> KDLValue:
+def toKdlValue(val: t.Any) -> t.KDLValue:
+    """
+    Converts any KDL-compatible value
+    (a KDLValue, a primitive, or an object corresponding
+    to a built-in tag, or an object with .to_kdl() that
+    returns one of the above)
+    into a KDLValue
+    """
+    if isinstance(val, types.Value):
+        return val
     if isinstance(val, decimal.Decimal):
         return types.String(str(val), "decimal")
     if isinstance(val, datetime.datetime):
@@ -274,17 +264,15 @@ def toKdlValue(val: Any) -> KDLValue:
     if isinstance(val, bytes):
         return types.String(base64.b64encode(val).decode("utf-8"), "base-64")
 
-    if isKdlValue(val):
-        return cast("KDLValue", val)
     if not callable(getattr(val, "to_kdl", None)):
         msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
         raise Exception(
             msg,
         )
-    value = cast("KDLValue", val.to_kdl())
-    if not isKdlValue(value):
+
+    convertedVal = val.to_kdl()
+    if isKdlishValue(convertedVal):
+        return toKdlValue(convertedVal)
+    else:
         msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
-        raise Exception(
-            msg,
-        )
-    return value
+        raise Exception(msg)

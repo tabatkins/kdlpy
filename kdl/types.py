@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import dataclasses
-import re
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple, TypeVar, Union, overload
 
-from . import printing
+from . import printing, t
 from .converters import toKdlValue
 
 
@@ -15,19 +13,16 @@ class _MISSING:
     pass
 
 
-if TYPE_CHECKING:
-    VT = TypeVar("VT")
-
-    NodeKey = str | tuple[str | None, str | None]
-    KDLType = Document | Node | Value
+if t.TYPE_CHECKING:
+    VT = t.TypeVar("VT")
 
 
 @dataclass
 class Document:
     nodes: list[Node] = dataclasses.field(default_factory=list)
-    printConfig: Optional[printing.PrintConfig] = None
+    printConfig: t.PrintConfig | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         config = config or self.printConfig or printing.defaults
         s = ""
         for node in self.nodes:
@@ -38,25 +33,25 @@ class Document:
             s = "\n"
         return s
 
-    @overload
-    def get(self, key: NodeKey) -> Optional[Node]:
+    @t.overload
+    def get(self, key: t.NodeKey) -> Node | None:
         ...
 
-    @overload
-    def get(self, key: NodeKey, default: VT) -> Union[Node, VT]:
+    @t.overload
+    def get(self, key: t.NodeKey, default: VT) -> Node | VT:
         ...
 
     def get(
         self,
-        key: NodeKey,
-        default: Any = None,
-    ) -> Any:
+        key: t.NodeKey,
+        default: VT | None = None,
+    ) -> Node | VT | None:
         try:
             return self[key]
         except KeyError:
             return default
 
-    def __getitem__(self, key: NodeKey) -> Node:
+    def __getitem__(self, key: t.NodeKey) -> Node:
         tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
@@ -74,8 +69,8 @@ class Document:
 
     def getAll(
         self,
-        key: NodeKey,
-    ) -> Iterable[Node]:
+        key: t.NodeKey,
+    ) -> t.Iterable[Node]:
         tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
@@ -91,14 +86,14 @@ class Document:
 @dataclass
 class Node:
     name: str
-    tag: Optional[str] = None
-    args: list[Any] = dataclasses.field(default_factory=list)
-    props: OrderedDict[str, Any] = dataclasses.field(default_factory=OrderedDict)
+    tag: str | None = None
+    args: list[t.Any] = dataclasses.field(default_factory=list)
+    props: OrderedDict[str, t.Any] = dataclasses.field(default_factory=OrderedDict)
     nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
         self,
-        config: Optional[printing.PrintConfig] = None,
+        config: t.PrintConfig | None = None,
         indentLevel: int = 0,
     ) -> str:
         if config is None:
@@ -120,7 +115,7 @@ class Node:
                 continue
             s += f" {printValue(arg, config)}"
 
-        props: Iterable[Tuple[str, Any]]
+        props: t.Iterable[tuple[str, t.Any]]
         if config.sortProperties:
             props = sorted(self.props.items(), key=lambda x: x[0])
         else:
@@ -146,25 +141,25 @@ class Node:
             s += "\n"
         return s
 
-    @overload
-    def get(self, key: NodeKey) -> Optional[Node]:
+    @t.overload
+    def get(self, key: t.NodeKey) -> Node | None:
         ...
 
-    @overload
-    def get(self, key: NodeKey, default: VT) -> Union[Node, VT]:
+    @t.overload
+    def get(self, key: t.NodeKey, default: VT) -> Node | VT:
         ...
 
     def get(
         self,
-        key: NodeKey,
-        default: Any = None,
-    ) -> Any:
+        key: t.NodeKey,
+        default: VT | None = None,
+    ) -> Node | VT | None:
         try:
             return self[key]
         except KeyError:
             return default
 
-    def __getitem__(self, key: NodeKey) -> Node:
+    def __getitem__(self, key: t.NodeKey) -> Node:
         tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
@@ -182,8 +177,8 @@ class Node:
 
     def getAll(
         self,
-        key: NodeKey,
-    ) -> Iterable[Node]:
+        key: t.NodeKey,
+    ) -> t.Iterable[Node]:
         tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
             if name is not None and node.name != name:
@@ -197,11 +192,11 @@ class Node:
 
 
 class Value(metaclass=ABCMeta):
-    value: Any
-    tag: Optional[str]
+    value: t.Any
+    tag: str | None
 
     @abstractmethod
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         pass
 
 
@@ -213,9 +208,9 @@ class ExactValue(Value):
     # like precise number formatting.
     # .chars *must* be a valid KDL value
     chars: str
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         return printTag(self.tag) + self.chars
 
     def __str__(self) -> str:
@@ -229,9 +224,9 @@ class Numberish(Value, metaclass=ABCMeta):
 @dataclass
 class Binary(Numberish):
     value: int
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         s = printTag(self.tag)
@@ -248,9 +243,9 @@ class Binary(Numberish):
 @dataclass
 class Octal(Numberish):
     value: int
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         s = printTag(self.tag)
@@ -266,15 +261,15 @@ class Octal(Numberish):
 
 @dataclass
 class Decimal(Numberish):
-    mantissa: Union[int, float]
+    mantissa: int | float
     exponent: int = 0
-    tag: Optional[str] = None
+    tag: str | None = None
 
     @property
     def value(self) -> float:
         return self.mantissa * (10.0**self.exponent)
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         s = printTag(self.tag) + str(self.mantissa)
@@ -292,9 +287,9 @@ class Decimal(Numberish):
 @dataclass
 class Hex(Numberish):
     value: int
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         s = printTag(self.tag)
@@ -311,9 +306,9 @@ class Hex(Numberish):
 @dataclass
 class Bool(Value):
     value: bool
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         return printTag(self.tag) + ("true" if self.value else "false")
@@ -324,13 +319,13 @@ class Bool(Value):
 
 @dataclass
 class Null(Value):
-    tag: Optional[str] = None
+    tag: str | None = None
 
     @property
     def value(self) -> None:
         return None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         return printTag(self.tag) + "null"
@@ -346,9 +341,9 @@ class Stringish(Value, metaclass=ABCMeta):
 @dataclass
 class RawString(Stringish):
     value: str
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         if config.respectStringType:
@@ -372,9 +367,9 @@ def findRequiredHashCount(chars: str) -> int:
 @dataclass
 class String(Stringish):
     value: str
-    tag: Optional[str] = None
+    tag: str | None = None
 
-    def print(self, config: Optional[printing.PrintConfig] = None) -> str:
+    def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
         return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
@@ -383,7 +378,7 @@ class String(Stringish):
         return self.print()
 
 
-def toKdlNode(val: Any) -> Node:
+def toKdlNode(val: t.Any) -> Node:
     if isinstance(val, Node):
         return val
     if not callable(getattr(val, "to_kdl", None)):
@@ -398,14 +393,14 @@ def toKdlNode(val: Any) -> Node:
     return node
 
 
-def printTag(tag: Optional[str]) -> str:
+def printTag(tag: str | None) -> str:
     if tag is not None:
         return f"({printIdent(tag)})"
     else:
         return ""
 
 
-def tupleFromNodeKey(key: NodeKey) -> Tuple[Optional[str], Optional[str], bool]:
+def tupleFromNodeKey(key: t.NodeKey) -> tuple[str | None, str | None, bool]:
     if isinstance(key, str):
         return None, key, False
     return key[0], key[1], True
@@ -424,7 +419,7 @@ def escapedFromRaw(chars: str) -> str:
     )
 
 
-def printValue(val: None | bool | int | float | str | KDLType, config: printing.PrintConfig) -> str:
+def printValue(val: t.KDLOrPrimitiveValue, config: t.PrintConfig) -> str:
     if val is None:
         return "null"
     if isinstance(val, bool):

@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Union
 
-from . import parsing
+from . import t
 
 
 @dataclass
 class Stream:
     _chars: str
-    config: parsing.ParseConfig
+    config: t.ParseConfig
 
-    def __getitem__(self, key: Union[int, slice]) -> str:
+    def __getitem__(self, key: int | slice) -> str:
         try:
             return self._chars[key]
         except IndexError:

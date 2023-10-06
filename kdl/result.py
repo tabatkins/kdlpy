@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
+
+from . import t
 
 
 class Failure:
@@ -8,7 +10,7 @@ class Failure:
 
 
 class Result(NamedTuple):
-    value: Any
+    value: t.Any
     end: int
 
     @property
