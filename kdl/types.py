@@ -7,11 +7,6 @@ from dataclasses import dataclass
 
 from . import printing, t
 
-
-class _MISSING:
-    pass
-
-
 if t.TYPE_CHECKING:
     VT = t.TypeVar("VT")
 
@@ -110,9 +105,9 @@ class Node:
         # is duplicated.
         for arg in self.args:
             arg = toKdlValue(arg)
-            if not config.printNullArgs and (arg is None or isinstance(arg, Null)):
+            if not config.printNullArgs and isinstance(arg, Null):
                 continue
-            s += f" {printValue(arg, config)}"
+            s += f" {arg.print(config)}"
 
         props: t.Iterable[tuple[str, t.Any]]
         if config.sortProperties:
@@ -121,9 +116,9 @@ class Node:
             props = self.props.items()
         for key, value in props:
             value = toKdlValue(value)
-            if not config.printNullProps and (value is None or isinstance(value, Null)):
+            if not config.printNullProps and isinstance(value, Null):
                 continue
-            s += f" {printIdent(key)}={printValue(value, config)}"
+            s += f" {printIdent(key)}={value.print(config)}"
 
         if self.nodes:
             childrenText = ""
@@ -508,18 +503,6 @@ def escapedFromRaw(chars: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
-
-
-def printValue(val: t.KDLOrPrimitiveValue, config: t.PrintConfig) -> str:
-    if val is None:
-        return "null"
-    if isinstance(val, bool):
-        return "true" if val else "false"
-    if isinstance(val, (int, float)):
-        return str(val)
-    if isinstance(val, str):
-        return f'"{escapedFromRaw(val)}"'
-    return val.print(config)
 
 
 def printIdent(chars: str) -> str:

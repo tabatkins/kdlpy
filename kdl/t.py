@@ -66,7 +66,6 @@ if TYPE_CHECKING:
     KDLValue: TypeAlias = (
         Value | Binary | Bool | Decimal | ExactValue | Hex | Null | Numberish | Octal | RawString | String | Stringish
     )
-    KDLOrPrimitiveValue: TypeAlias = None | bool | int | float | str | KDLValue
 
     import datetime
     import decimal
@@ -76,7 +75,12 @@ if TYPE_CHECKING:
     import uuid
 
     KDLishValue: TypeAlias = (
-        KDLOrPrimitiveValue
+        KDLValue
+        | None
+        | bool
+        | String
+        | int
+        | float
         | decimal.Decimal
         | datetime.time
         | datetime.date

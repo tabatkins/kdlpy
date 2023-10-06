@@ -1,3 +1,5 @@
+import typing
+
 from . import parsing, printing
 from .cli import cli
 from .errors import ParseError, ParseFragment
@@ -20,3 +22,6 @@ from .types import (
     Stringish,
     Value,
 )
+
+if typing.TYPE_CHECKING:
+    from .t import KDLAny, KDLishValue, KDLValue, NodeKey
