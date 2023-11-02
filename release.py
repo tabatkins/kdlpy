@@ -65,7 +65,7 @@ def createRelease():
     try:
         # Clear out the build artifacts, build it, upload, and clean up again.
         subprocess.call("rm -r build dist", shell=True)
-        subprocess.check_call("python setup.py sdist bdist_wheel", shell=True)
+        subprocess.check_call("python -m build", shell=True)
         if options.test:
             subprocess.check_call(
                 " ".join(
