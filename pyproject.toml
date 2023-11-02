@@ -133,7 +133,40 @@ select = [
     "RUF"
 ]
 
-[tool.ruff.per-file-ignores]
-
 [tool.ruff.flake8-implicit-str-concat]
 allow-multiline = false
+
+[project]
+name = "kdl-py"
+version = "1.1.2"
+description = "A parser for the KDL data language."
+authors = [
+    {name = "Tab Atkins-Bittner", email = "jackalmage@gmail.com"},
+]
+dependencies = [
+    "setuptools>=68.0.0",
+]
+requires-python = ">=3.7"
+readme = "README.md"
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Documentation",
+]
+dynamic=["version"]
+
+[project.urls]
+Repository = "https://github.com/tabatkins/kdlpy/"
+
+[project.scripts]
+kdlreformat = "kdl:clie"
+
+[tool.setuptools.dynamic]
+version = {file = ["semver.txt"]}
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
