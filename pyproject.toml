@@ -138,7 +138,6 @@ allow-multiline = false
 
 [project]
 name = "kdl-py"
-version = "1.1.2"
 description = "A parser for the KDL data language."
 authors = [
     {name = "Tab Atkins-Bittner", email = "jackalmage@gmail.com"},
@@ -156,13 +155,13 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Documentation",
 ]
-dynamic=["version"]
+dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/tabatkins/kdlpy/"
 
 [project.scripts]
-kdlreformat = "kdl:clie"
+kdlreformat = "kdl:cli"
 
 [tool.setuptools.dynamic]
 version = {file = ["semver.txt"]}
