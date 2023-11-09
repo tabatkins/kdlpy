@@ -82,7 +82,7 @@ class Node:
     name: str
     tag: str | None = None
     args: list[t.Any] = dataclasses.field(default_factory=list)
-    props: dict[str, t.Any] = dataclasses.field(default_factory=OrderedDict)
+    props: OrderedDict[str, t.Any] = dataclasses.field(default_factory=OrderedDict)
     nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
