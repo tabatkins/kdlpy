@@ -166,6 +166,9 @@ kdlreformat = "kdl:cli"
 [tool.setuptools.dynamic]
 version = {file = ["semver.txt"]}
 
+[tool.setuptools.packages.find]
+where = ["kdl"]
+
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
