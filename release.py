@@ -67,7 +67,7 @@ def createRelease():
     try:
         # Clear out the build artifacts, build it, upload, and clean up again.
         subprocess.call("rm -r build dist", shell=True)
-        subprocess.check_call("python -m build", shell=True)
+        subprocess.check_call("pyproject-build", shell=True)
         if options.test:
             subprocess.check_call(
                 " ".join(
