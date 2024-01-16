@@ -368,25 +368,33 @@ they won't be visible at runtime.
 ### `NodeKey`
 
 A few data structures and functions take a `NodeKey`
-to match against a node.
+to match against a node,
+based on its name and/or tag.
 
-Formally, `NodeKey` is `str | tuple[str|None, str|None]`;
+Formally, `NodeKey` is `None | str | tuple[str|None, str|None]`;
 that is,
-either a string,
+either `None`,
+a string,
 or a tuple of optional strings.
 
-If it's a `str`,
-then it matches any node whose **name** is that value,
-regardless of the tag.
+If it's `None` or a `str`,
+it matches purely on the node name;
+`None` matches any node,
+a `str` matches a node with that name.
+(The tag does not matter at all;
+it will match nodes with any tag, or no tag at all.)
 
-If it's a tuple,
-then it matches any node whose tag is the first value
-(including `None` to match nodes without a tag),
-and whose name is the second value
-(where `None` matches any node, regardless of name).
+If it's a `tuple`,
+it matches on both the tag and name.
+The first item specifies the desired tag;
+`None` matches only untagged nodes,
+while a `str` matches a node with that tag.
+The second item matches on the node name,
+in the same way as the previous paragraph.
 
 That is, the possible variants are:
 
+* `None`: matches any node.
 * `"nodename"`: matches nodes with that name, regardless of tag.
 * `("tagname", None)`: matches nodes with that tag, regardless of name.
 * `("tagname", "nodename")`: matches nodes with that tag and name.
