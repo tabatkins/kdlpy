@@ -70,16 +70,13 @@ def parseNode(s: Stream, start: int) -> Result:
     if sd:
         return Result(None, i)
     else:
-        if (tag, name) in s.config.nodeConverters:
-            node = s.config.nodeConverters[tag, name](
-                node,
-                ParseFragment(s[start:nameEnd], s, start),
-            )
-        elif name in s.config.nodeConverters:
-            node = s.config.nodeConverters[name](
-                node,
-                ParseFragment(s[start:nameEnd], s, start),
-            )
+        for key, converter in s.config.nodeConverters.items():
+            if node.matchesKey(key):
+                node = converter(
+                    node,
+                    ParseFragment(s[start:nameEnd], s, start),
+                )
+                break
         return Result(node, i)
 
 

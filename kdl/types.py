@@ -46,32 +46,19 @@ class Document:
             return default
 
     def __getitem__(self, key: t.NodeKey) -> Node:
-        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is not None and node.name != name:
-                continue
-            if passedTag and node.tag != tag:
-                continue
-            return node
-        if not passedTag:
-            msg = name
-        elif name is None:
-            msg = f"({tag})"
-        else:
-            msg = f"({tag}){name}"
+            if node.matchesKey(key):
+                return node
+        msg = printNodeKey(key)
         raise KeyError(msg)
 
     def getAll(
         self,
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
-        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is not None and node.name != name:
-                continue
-            if passedTag and node.tag != tag:
-                continue
-            yield node
+            if node.matchesKey(key):
+                yield node
 
     def __str__(self) -> str:
         return self.print()
@@ -154,32 +141,31 @@ class Node:
             return default
 
     def __getitem__(self, key: t.NodeKey) -> Node:
-        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is not None and node.name != name:
-                continue
-            if passedTag and node.tag != tag:
-                continue
-            return node
-        if not passedTag:
-            msg = name
-        elif name is None:
-            msg = f"({tag})"
-        else:
-            msg = f"({tag}){name}"
+            if node.matchesKey(key):
+                return node
+        msg = printNodeKey(key)
         raise KeyError(msg)
 
     def getAll(
         self,
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
-        tag, name, passedTag = tupleFromNodeKey(key)
         for node in self.nodes:
-            if name is not None and node.name != name:
-                continue
-            if passedTag and node.tag != tag:
-                continue
-            yield node
+            if node.matchesKey(key):
+                yield node
+
+    def matchesKey(self, key: t.NodeKey) -> bool:
+        if key is None:
+            return True
+        if isinstance(key, str):
+            return self.name == key
+        tag, name = key
+        if self.tag != tag:
+            return False
+        if name is None:
+            return True
+        return self.name == name
 
     def __str__(self) -> str:
         return self.print()
@@ -486,10 +472,12 @@ def printTag(tag: str | None) -> str:
         return ""
 
 
-def tupleFromNodeKey(key: t.NodeKey) -> tuple[str | None, str | None, bool]:
+def printNodeKey(key: t.NodeKey) -> str:
+    if key is None:
+        return ""
     if isinstance(key, str):
-        return None, key, False
-    return key[0], key[1], True
+        return key
+    return f"({key[0]}){key[1] or ''}"
 
 
 def escapedFromRaw(chars: str) -> str:

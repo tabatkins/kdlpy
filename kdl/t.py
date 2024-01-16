@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         Value,
     )
 
-    NodeKey = str | tuple[str | None, str | None]
+    NodeKey = None | str | tuple[str | None, str | None]
 
     KDLAny: TypeAlias = Document | Node | KDLValue
     KDLValue: TypeAlias = (
