@@ -49,8 +49,7 @@ class Document:
         for node in self.nodes:
             if node.matchesKey(key):
                 return node
-        msg = printNodeKey(key)
-        raise KeyError(msg)
+        raise KeyError(key)
 
     def getAll(
         self,
@@ -144,8 +143,7 @@ class Node:
         for node in self.nodes:
             if node.matchesKey(key):
                 return node
-        msg = printNodeKey(key)
-        raise KeyError(msg)
+        raise KeyError(key)
 
     def getAll(
         self,
@@ -470,14 +468,6 @@ def printTag(tag: str | None) -> str:
         return f"({printIdent(tag)})"
     else:
         return ""
-
-
-def printNodeKey(key: t.NodeKey) -> str:
-    if key is None:
-        return ""
-    if isinstance(key, str):
-        return key
-    return f"({key[0]}){key[1] or ''}"
 
 
 def escapedFromRaw(chars: str) -> str:
