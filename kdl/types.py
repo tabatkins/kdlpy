@@ -154,16 +154,18 @@ class Node:
                 yield node
 
     def matchesKey(self, key: t.NodeKey) -> bool:
-        if key is None:
+        # Match based on node name
+        if key is None or key == Ellipsis:
             return True
         if isinstance(key, str):
             return self.name == key
-        tag, name = key
-        if self.tag != tag:
+        # Match on tag *and* node name
+        tag, name = t.cast("tuple[t.TagKey, t.NameKey]", key)
+        if not self.matchesKey(name):
             return False
-        if name is None:
+        if tag == Ellipsis:
             return True
-        return self.name == name
+        return self.tag == tag
 
     def __str__(self) -> str:
         return self.print()

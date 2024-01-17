@@ -371,38 +371,25 @@ A few data structures and functions take a `NodeKey`
 to match against a node,
 based on its name and/or tag.
 
-Formally, `NodeKey` is `None | str | tuple[str|None, str|None]`;
-that is,
-either `None`,
-a string,
-or a tuple of optional strings.
+A NodeKey is either a `str`, `None`, or `...` (`Ellipsis`),
+or a tuple of two of those values.
 
-If it's `None` or a `str`,
-it matches purely on the node name;
-`None` matches any node,
-a `str` matches a node with that name.
-(The tag does not matter at all;
-it will match nodes with any tag, or no tag at all.)
+If it's a single value, it matches based on the node's name.
+A string matches nodes whose name is that string;
+`None` and `...` match any node, regardless of its name.
+The node's tag (or lack of one) doesn't influence this matching at all.
 
-If it's a `tuple`,
-it matches on both the tag and name.
-The first item specifies the desired tag;
-`None` matches only untagged nodes,
-while a `str` matches a node with that tag.
-The second item matches on the node name,
-in the same way as the previous paragraph.
+If it's a tuple, the first value matches the node's tag,
+and the second matches the node's name.
+The tag segment matches the same as above,
+except `None` specifically matches *untagged* nodes only
+(`...` still matches any tag).
+The name segment matches the same as above.
 
-That is, the possible variants are:
-
-* `None`: matches any node.
-* `"nodename"`: matches nodes with that name, regardless of tag.
-* `("tagname", None)`: matches nodes with that tag, regardless of name.
-* `("tagname", "nodename")`: matches nodes with that tag and name.
-* `(None, None)`: matches nodes with no tag, regardless of name.
-* `(None, "nodename")`: matches nodes with **no tag**, and that name.
-
-
-
+So, for example, `"foo"` would match `foo 1` and `(tag)foo 2`, but not `bar 3`.
+`("tag", "foo")` would match `(tag)foo 2` but not `foo 1`;
+`(None, "foo")` would match `foo 1` but not `(tag)foo 2`;
+`(..., "foo")` would match either.
 
 ## `kdlreformat`
 
