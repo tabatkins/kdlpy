@@ -57,7 +57,7 @@ class Document:
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
         for node in self.nodes:
-            if node.matchesKey(key):
+            if nodeMatchesKey(node, key):
                 yield node
 
     def __str__(self) -> str:
@@ -151,15 +151,21 @@ class Node:
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
         for node in self.nodes:
-            if node.matchesKey(key):
+            if nodeMatchesKey(node, key):
                 yield node
 
     def matchesKey(self, key: t.NodeKey) -> bool:
-        if isinstance(key, tuple):
-            tagKey, nameKey = key
-            return tagMatchesKey(self.tag, tagKey) and nameMatchesKey(self.name, nameKey)
-        else:
-            return nameMatchesKey(self.name, key)
+        return nodeMatchesKey(self, key)
+
+    def getProps(self, key: t.ValueKey) -> t.Iterable[tuple[str, t.Any]]:
+        for name, val in self.props.items():
+            if valueMatchesKey(val, key):
+                yield name, val
+
+    def getArgs(self, key: t.ValueKey) -> t.Iterable[t.Any]:
+        for val in self.args:
+            if valueMatchesKey(val, key):
+                yield val
 
     def __str__(self) -> str:
         return self.print()
@@ -174,11 +180,7 @@ class Value(metaclass=ABCMeta):
         pass
 
     def matchesKey(self, key: t.ValueKey) -> bool:
-        if isinstance(key, tuple):
-            tagKey, typeKey = key
-            return tagMatchesKey(self.tag, tagKey) and valueMatchesKey(self, typeKey)
-        else:
-            return tagMatchesKey(self.tag, key)
+        return valueMatchesKey(self, key)
 
 
 @dataclass
@@ -471,6 +473,30 @@ def printTag(tag: str | None) -> str:
         return ""
 
 
+def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
+    if not isinstance(node, Node):
+        node = node.to_kdl()
+    if isinstance(key, tuple):
+        tagKey, nameKey = key
+        return tagMatchesKey(node.tag, tagKey) and nameMatchesKey(node.name, nameKey)
+    else:
+        return nameMatchesKey(node.name, key)
+
+
+def valueMatchesKey(value: t.Any, key: t.ValueKey) -> bool:
+    # Need to allow for both Value and values that were converted to other types
+    # non-Value objects are untagged, by definition
+    if isinstance(value, Value):
+        tag = value.tag
+    else:
+        tag = None
+    if isinstance(key, tuple):
+        tagKey, typeKey = key
+        return tagMatchesKey(tag, tagKey) and typeMatchesKey(value, typeKey)
+    else:
+        return tagMatchesKey(tag, key)
+
+
 def tagMatchesKey(val: str | None, key: t.TagKey) -> bool:
     if key == Ellipsis:
         return True
@@ -503,7 +529,7 @@ def nameMatchesKey(val: str, key: t.NameKey) -> bool:
     raise Exception(msg)
 
 
-def valueMatchesKey(val: Value, key: t.TypeKey) -> bool:
+def typeMatchesKey(val: Value, key: t.TypeKey) -> bool:
     if key == Ellipsis:
         return True
     try:

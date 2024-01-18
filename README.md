@@ -323,6 +323,10 @@ A `PrintConfig` object has the following properties:
 	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
 	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
+	* `node.getProps(ValueKey) -> Iterable[tuple[str, Any]]` returns an iterator of `(name, value)` pairs for the properties whose value matches the [`ValueKey`](#ValueKey)
+		(Note: for this purpose, non-KDL values, such as `int`, have no tag, and can only meaningfully be tested via a `TypeKey`.)
+	* `node.getArgs(ValueKey) -> Iterable[Any]` returns an iterator of the arguments that match the [`ValueKey`](#ValueKey)
+		(Same disclaimer as `.getProps()`.)
 	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#NodeKey)
 
 * `kdl.Value` ‡
@@ -350,9 +354,11 @@ A `PrintConfig` object has the following properties:
 * `kdl.ParseFragment`: passed to converter functions
 	* `pf.fragment`: slice from the source string
 	* `pf.error(msg: str)` returns a `kdl.ParseError` with error location set properly already
+* `kdl.nodeMatchesKey(val: Any, key: kdl.NodeKey) -> bool`
+* `kdl.valueMatchesKey(val: Any, key: kdl.ValueKey) -> bool`
 * `kdl.tagMatchesKey(val: str|None, key: kdl.TagKey) -> bool`
 * `kdl.nameMatchesKey(val: str|None, key: kdl.NameKey) -> bool`
-* `kdl.valueMatchesKey(val: str|None, key: kdl.TypeKey) -> bool`
+* `kdl.typeMatchesKey(val: str|None, key: kdl.TypeKey) -> bool`
 	* Functions implementing the tag/name/type matching
 		used by the `node.matchesKey()` and `value.matchesKey()` methods,
 		in case you want to use the same filtering yourself.
