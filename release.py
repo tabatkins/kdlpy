@@ -18,7 +18,7 @@ def createRelease():
     )
     if treeDirty:
         print(
-            "Working tree is dirty. Finish committing files or stash, then try again."
+            "Working tree is dirty. Finish committing files or stash, then try again.",
         )
         sys.exit(1)
 
@@ -78,7 +78,7 @@ def createRelease():
                         "--password",
                         secrets["test.pypi.org release key"],
                         "dist/*",
-                    ]
+                    ],
                 ),
                 shell=True,
             )
@@ -91,7 +91,7 @@ def createRelease():
                         "--password",
                         secrets["pypi.org release key"],
                         "dist/*",
-                    ]
+                    ],
                 ),
                 shell=True,
             )
@@ -115,7 +115,7 @@ def inProjectRoot(projectName):
     # Checks whether the cwd is in the project root
     try:
         remotes = subprocess.check_output(
-            "git remote -v", stderr=subprocess.DEVNULL, shell=True
+            "git remote -v", stderr=subprocess.DEVNULL, shell=True,
         ).decode("utf-8")
         if projectName in remotes:
             return os.path.isdir(".git")

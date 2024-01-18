@@ -371,32 +371,44 @@ A few data structures and functions take a `NodeKey`
 to match against a node,
 based on its name and/or tag.
 
-A NodeKey is either a `str`, `None`, `...` (`Ellipsis`),
-or a regular expression;
-or a tuple of two of those values.
+A `NodeKey` is a predicate, described below,
+which matches against the node's name,
+or a tuple of two predicates,
+matching the first against the node's tag
+and the second against the node's name.
 
-If it's a single value, it matches based on the node's name.
-A string matches nodes whose name is that string;
-`None` and `...` match any node, regardless of its name;
-a regex matches nodes whose name matches that regex.
-The node's tag (or lack of one) doesn't influence this matching at all.
+A predicate can be:
 
-Note: Regexes use `.match()` semantics,
-so the pattern has to start matching at the beginning of the name.
-If you want to match starting from anywhere,
-put a `.*?` at the beginning of your pattern.
+* `None`:
+	When matched against a tag, only succeeds against a `None` tag
+	(aka a tagless node like `foo`).
+	When matched against a name, automatically succeeds,
+	since nodes are guaranteed to have a name.
+* `...`:
+	Always succeeds.
+	Use this when, say,
+	you want to match against a particular tag, regardless of the nodename,
+	like `("my-tag", ...)`.
+* a `str`:
+	Succeeds if the tag/name is that exact string.
+* a `re.Pattern` (a regex, such as `re.compile(r".*foo")`:
+	Succeeds if the regex matches the tag/name.
+	Note that this uses `.match()` semantics,
+	automatically anchoring against the start of the string;
+	prepend your regex with `.*?` if you want it to match anywhere.
+* a function, taking a `str | None` and returning a `bool`:
+	Succeeds if the function,
+	when called with the tag/name,
+	returns True.
 
-If it's a tuple, the first value matches the node's tag,
-and the second matches the node's name.
-The tag segment matches the same as above,
-except `None` specifically matches *untagged* nodes only
-(`...` still matches any tag).
-The name segment matches the same as above.
+So, for example,
+`doc.getAll("foo")` would return all nodes whose name is "foo",
+regardless of tag.
+`doc.getAll(("my-tag", ...))` would return all nodes whose tag is "my-tag",
+regardless of the node name.
+`doc.getAll(re.compile(r"-"))` would return all nodes whose name starts with "-".
+Etc.
 
-So, for example, `"foo"` would match `foo 1` and `(tag)foo 2`, but not `bar 3`.
-`("tag", "foo")` would match `(tag)foo 2` but not `foo 1`;
-`(None, "foo")` would match `foo 1` but not `(tag)foo 2`;
-`(..., "foo")` would match either.
 
 ## `kdlreformat`
 

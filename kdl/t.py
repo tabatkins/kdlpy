@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast, overload
 
 if TYPE_CHECKING:
+    import re
     from types import EllipsisType
     from typing import (
         AbstractSet,
@@ -61,10 +62,8 @@ if TYPE_CHECKING:
         Value,
     )
 
-    import re
-
-    TagKey = str | None | EllipsisType | re.Pattern
-    NameKey = str | None | EllipsisType | re.Pattern
+    TagKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
+    NameKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
     NodeKey = NameKey | tuple[TagKey, NameKey]
 
     KDLAny: TypeAlias = Document | Node | KDLValue

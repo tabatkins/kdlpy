@@ -5,6 +5,7 @@ import re
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
+from enum import Enum
 
 from . import printing, t
 
@@ -155,22 +156,10 @@ class Node:
                 yield node
 
     def matchesKey(self, key: t.NodeKey) -> bool:
-        # Match based on node name
-        if key is None or key == Ellipsis:
-            return True
-        if isinstance(key, str):
-            return self.name == key
-        if isinstance(key, re.Pattern):
-            return bool(key.match(self.name))
-        # Match on tag *and* node name
-        tagKey, nameKey = t.cast("tuple[t.TagKey, t.NameKey]", key)
-        if not self.matchesKey(nameKey):
-            return False
-        if tagKey == Ellipsis:
-            return True
-        if isinstance(tagKey, re.Pattern):
-            return self.tag is not None and bool(tagKey.match(self.tag))
-        return self.tag == tagKey
+        if isinstance(key, tuple):
+            return matchesKey(self.tag, key[0], KeyMatchType.TAG) and matchesKey(self.name, key[1], KeyMatchType.NAME)
+        else:
+            return matchesKey(self.name, key, KeyMatchType.NAME)
 
     def __str__(self) -> str:
         return self.print()
@@ -441,7 +430,6 @@ def isKdlishValue(val: t.Any) -> bool:
     import datetime
     import decimal
     import ipaddress
-    import re
     import urllib
     import uuid
 
@@ -474,6 +462,31 @@ def printTag(tag: str | None) -> str:
         return f"({printIdent(tag)})"
     else:
         return ""
+
+
+class KeyMatchType(Enum):
+    TAG = "TAG"
+    NAME = "NAME"
+
+
+def matchesKey(val: str | None, key: t.TagKey | t.NameKey, matchType: KeyMatchType) -> bool:
+    if key == Ellipsis:
+        return True
+    elif key is None:
+        if matchType is KeyMatchType.TAG:
+            return val is None
+        elif matchType is KeyMatchType.NAME:
+            return True
+    elif isinstance(key, str):
+        return val == key
+    elif isinstance(key, re.Pattern):
+        if val is None:
+            return False
+        return bool(key.match(val))
+    elif callable(key):
+        return bool(key(val))
+    msg = f"Invalid key type {key!r}"
+    raise Exception(msg)
 
 
 def escapedFromRaw(chars: str) -> str:
