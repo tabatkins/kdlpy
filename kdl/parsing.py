@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 
 from . import parsefuncs, t
 
+if t.TYPE_CHECKING:
+    from .errors import ParseFragment
+    from .types import Node, Value
+
+    ValueConverterT: t.TypeAlias = t.Callable[[Value, ParseFragment], t.Any]
+    NodeConverterT: t.TypeAlias = t.Callable[[Node, ParseFragment], t.Any]
+
 
 class Parser:
     def __init__(
@@ -24,8 +31,8 @@ class Parser:
 class ParseConfig:
     nativeUntaggedValues: bool = True
     nativeTaggedValues: bool = True
-    valueConverters: dict[str, t.Callable] = field(default_factory=dict)
-    nodeConverters: dict[str | tuple[str, str], t.Callable] = field(
+    valueConverters: dict[t.ValueKey, ValueConverterT] = field(default_factory=dict)
+    nodeConverters: dict[t.NodeKey, NodeConverterT] = field(
         default_factory=dict,
     )
 
