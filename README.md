@@ -371,13 +371,20 @@ A few data structures and functions take a `NodeKey`
 to match against a node,
 based on its name and/or tag.
 
-A NodeKey is either a `str`, `None`, or `...` (`Ellipsis`),
+A NodeKey is either a `str`, `None`, `...` (`Ellipsis`),
+or a regular expression;
 or a tuple of two of those values.
 
 If it's a single value, it matches based on the node's name.
 A string matches nodes whose name is that string;
-`None` and `...` match any node, regardless of its name.
+`None` and `...` match any node, regardless of its name;
+a regex matches nodes whose name matches that regex.
 The node's tag (or lack of one) doesn't influence this matching at all.
+
+Note: Regexes use `.match()` semantics,
+so the pattern has to start matching at the beginning of the name.
+If you want to match starting from anywhere,
+put a `.*?` at the beginning of your pattern.
 
 If it's a tuple, the first value matches the node's tag,
 and the second matches the node's name.

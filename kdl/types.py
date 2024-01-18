@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -159,13 +160,17 @@ class Node:
             return True
         if isinstance(key, str):
             return self.name == key
+        if isinstance(key, re.Pattern):
+            return bool(key.match(self.name))
         # Match on tag *and* node name
-        tag, name = t.cast("tuple[t.TagKey, t.NameKey]", key)
-        if not self.matchesKey(name):
+        tagKey, nameKey = t.cast("tuple[t.TagKey, t.NameKey]", key)
+        if not self.matchesKey(nameKey):
             return False
-        if tag == Ellipsis:
+        if tagKey == Ellipsis:
             return True
-        return self.tag == tag
+        if isinstance(tagKey, re.Pattern):
+            return self.tag is not None and bool(tagKey.match(self.tag))
+        return self.tag == tagKey
 
     def __str__(self) -> str:
         return self.print()
@@ -384,7 +389,6 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
     import datetime
     import decimal
     import ipaddress
-    import re
     import urllib
     import uuid
 

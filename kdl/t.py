@@ -61,8 +61,10 @@ if TYPE_CHECKING:
         Value,
     )
 
-    TagKey = str | None | EllipsisType
-    NameKey = str | None | EllipsisType
+    import re
+
+    TagKey = str | None | EllipsisType | re.Pattern
+    NameKey = str | None | EllipsisType | re.Pattern
     NodeKey = NameKey | tuple[TagKey, NameKey]
 
     KDLAny: TypeAlias = Document | Node | KDLValue
