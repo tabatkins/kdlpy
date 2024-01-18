@@ -21,7 +21,19 @@ from .types import (
     String,
     Stringish,
     Value,
+    nameMatchesKey,
+    tagMatchesKey,
+    valueMatchesKey,
 )
 
 if typing.TYPE_CHECKING:
-    from .t import KDLAny, KDLishValue, KDLValue, NodeKey
+    from .t import (
+        KDLAny,
+        KDLishValue,
+        KDLValue,
+        NameKey,
+        NodeKey,
+        TagKey,
+        TypeKey,
+        ValueKey,
+    )

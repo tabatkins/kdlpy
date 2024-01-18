@@ -5,7 +5,6 @@ import re
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
-from enum import Enum
 
 from . import printing, t
 
@@ -157,9 +156,10 @@ class Node:
 
     def matchesKey(self, key: t.NodeKey) -> bool:
         if isinstance(key, tuple):
-            return matchesKey(self.tag, key[0], KeyMatchType.TAG) and matchesKey(self.name, key[1], KeyMatchType.NAME)
+            tagKey, nameKey = key
+            return tagMatchesKey(self.tag, tagKey) and nameMatchesKey(self.name, nameKey)
         else:
-            return matchesKey(self.name, key, KeyMatchType.NAME)
+            return nameMatchesKey(self.name, key)
 
     def __str__(self) -> str:
         return self.print()
@@ -176,14 +176,9 @@ class Value(metaclass=ABCMeta):
     def matchesKey(self, key: t.ValueKey) -> bool:
         if isinstance(key, tuple):
             tagKey, typeKey = key
-            if not matchesKey(self.tag, tagKey, KeyMatchType.TAG):
-                return False
-            if typeKey == ...:
-                return True
-            else:
-                return isinstance(self, t.cast("t._ClassInfo", typeKey))
+            return tagMatchesKey(self.tag, tagKey) and valueMatchesKey(self, typeKey)
         else:
-            return matchesKey(self.tag, key, KeyMatchType.TAG)
+            return tagMatchesKey(self.tag, key)
 
 
 @dataclass
@@ -476,19 +471,11 @@ def printTag(tag: str | None) -> str:
         return ""
 
 
-class KeyMatchType(Enum):
-    TAG = "TAG"
-    NAME = "NAME"
-
-
-def matchesKey(val: str | None, key: t.TagKey | t.NameKey, matchType: KeyMatchType) -> bool:
+def tagMatchesKey(val: str | None, key: t.TagKey) -> bool:
     if key == Ellipsis:
         return True
     elif key is None:
-        if matchType is KeyMatchType.TAG:
-            return val is None
-        elif matchType is KeyMatchType.NAME:
-            return True
+        return val is None
     elif isinstance(key, str):
         return val == key
     elif isinstance(key, re.Pattern):
@@ -497,8 +484,33 @@ def matchesKey(val: str | None, key: t.TagKey | t.NameKey, matchType: KeyMatchTy
         return bool(key.match(val))
     elif callable(key):
         return bool(key(val))
-    msg = f"Invalid key type {key!r}"
+    msg = f"Invalid TagKey {key!r}"
     raise Exception(msg)
+
+
+def nameMatchesKey(val: str, key: t.NameKey) -> bool:
+    if key == Ellipsis:
+        return True
+    elif key is None:
+        return True
+    elif isinstance(key, str):
+        return val == key
+    elif isinstance(key, re.Pattern):
+        return bool(key.match(val))
+    elif callable(key):
+        return bool(key(val))
+    msg = f"Invalid NameKey {key!r}"
+    raise Exception(msg)
+
+
+def valueMatchesKey(val: Value, key: t.TypeKey) -> bool:
+    if key == Ellipsis:
+        return True
+    try:
+        return isinstance(val, t.cast("t._ClassInfo", key))
+    except Exception as e:
+        msg = f"Invalid TypeKey {key!r}"
+        raise Exception(msg) from e
 
 
 def escapedFromRaw(chars: str) -> str:

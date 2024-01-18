@@ -347,6 +347,12 @@ A `PrintConfig` object has the following properties:
 * `kdl.ParseFragment`: passed to converter functions
 	* `pf.fragment`: slice from the source string
 	* `pf.error(msg: str)` returns a `kdl.ParseError` with error location set properly already
+* `kdl.tagMatchesKey(val: str|None, key: kdl.TagKey) -> bool`
+* `kdl.nameMatchesKey(val: str|None, key: kdl.NameKey) -> bool`
+* `kdl.valueMatchesKey(val: str|None, key: kdl.TypeKey) -> bool`
+	* Functions implementing the tag/name/type matching
+		used by [`ValueKey`s](#ValueKey) and [`NodeKey`s](#NodeKey),
+		in case you want to use the same filtering yourself.
 
 † Not produced by the parser.
 Can be returned by a user's `.to_kdl()` method
@@ -366,6 +372,9 @@ and potentially useful for your code:
 * `kdl.KDLAny`: a `Document`, `Node`, or any of the `Value` subtypes
 * `kdl.KDLValue`: any of the `Value` subtypes
 * `kdl.KDLishValue`: a `KDLValue` or one of the supported Python native types [see "Inserting Native Types"](#inserting-native-types)
+* `kdl.ValueKey`, `kdl.NodeKey`, `kdl.TagKey`, `kdl.NameKey`, `kdl.TypeKey`:
+	the types for [`ValueKey`s](#ValueKey) and [`NodeKey`s](#NodeKey)
+	(and their individual pieces)
 
 These aliases only exist when `typing.TYPE_CHECKING` is true,
 so they're *only* useful for writing types;
