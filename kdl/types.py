@@ -173,6 +173,18 @@ class Value(metaclass=ABCMeta):
     def print(self, config: t.PrintConfig | None = None) -> str:
         pass
 
+    def matchesKey(self, key: t.ValueKey) -> bool:
+        if isinstance(key, tuple):
+            tagKey, typeKey = key
+            if not matchesKey(self.tag, tagKey, KeyMatchType.TAG):
+                return False
+            if typeKey == ...:
+                return True
+            else:
+                return isinstance(self, t.cast("t._ClassInfo", typeKey))
+        else:
+            return matchesKey(self.tag, key, KeyMatchType.TAG)
+
 
 @dataclass
 class ExactValue(Value):

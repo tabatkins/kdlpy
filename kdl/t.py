@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, cast, overload
 
 if TYPE_CHECKING:
     import re
-    from types import EllipsisType
+    import sys
+    from types import EllipsisType, UnionType
     from typing import (
         AbstractSet,
         Any,
@@ -66,6 +67,13 @@ if TYPE_CHECKING:
     NameKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
     NodeKey = NameKey | tuple[TagKey, NameKey]
 
+    if sys.version_info >= (3, 10):
+        _ClassInfo: TypeAlias = type | UnionType | tuple[_ClassInfo, ...]
+    else:
+        _ClassInfo: TypeAlias = type | tuple[_ClassInfo, ...]
+    TypeKey: TypeAlias = EllipsisType | _ClassInfo
+    ValueKey = TagKey | tuple[TagKey, TypeKey]
+
     KDLAny: TypeAlias = Document | Node | KDLValue
     KDLValue: TypeAlias = (
         Value | Binary | Bool | Decimal | ExactValue | Hex | Null | Numberish | Octal | RawString | String | Stringish
@@ -74,7 +82,6 @@ if TYPE_CHECKING:
     import datetime
     import decimal
     import ipaddress
-    import re
     import urllib
     import uuid
 

@@ -171,27 +171,24 @@ A `ParseConfig` object has the following properties:
 		Converts it to a `bytes` object.
 
 
-* `valueConverters: Dict[str, Callable] = {}`
+* `valueConverters: Dict[ValueKey, Callable] = {}`
 
-	A dictionary of tag->converter functions,
-	letting you parse tagged values
+	A dictionary of ValueKey->converter functions,
+	letting you parse values
 	(like `(date)"2021-01-01"`)
 	into whatever types you'd like.
 
-	Whenever a value is encountered with the given tag,
-	your converter will be called with two arguments:
+	Whenever the parser encounters a value,
+	it will attempt to find an entry in this dict
+	whose [`ValueKey`](#ValueKey) matches the value.
+	If it succeeds,
+	it will call the associated converter function with two arguments:
 	the fully-constructed kdl-py object,
 	and a `ParseFragment` object giving you access
-	to the precise characters parsed from the document.
-	Whatever you return will be inserted into the document instead.
-
-	(Note that this does *not* specialize on value type;
-	a converter set to handle, say, a "base6" tag,
-	intending it to be used on numbers like `(base6)123450`,
-	will get called for `(base6)"a string"` too.
-	If you intend to only handle specific types of values,
-	make sure to check the value's type
-	and return it unchanged if you don't intend to handle it.)
+	to the precise characters parsed from the document
+	(for the value; the tag, if any, won't be included, as you can get it from the object itself).
+	Whatever you return will be inserted into the document
+	instead of the originally-parsed value.
 
 	You can produce KDL values
 	(such as parsing `(hex)"0x12.e5"` into a `kdl.Decimal`,
@@ -202,13 +199,22 @@ A `ParseConfig` object has the following properties:
 	(or is one of the supported built-in types),
 	so it can be serialized back into a KDL document.
 
+	Note that only *one* conversion can happen to a given value.
+	Your converters are checked,
+	in the dictionary's iteration order,
+	then if none of them succeeded
+	it will attempt to run the `nativeUntaggedValues` or `nativeTaggedValues` behaviors,
+	if they're turned on.
+
 * `nodeConverters: Dict[NodeKey, Callable] = {}`
 
 	Similar to `valueConverters`,
-	except the converters here are called on `kdl.Node`s.
+	except it uses [`NodeKey`s](#NodeKey),
+	and it converts `kdl.Node`s instead.
 
-	The keys for the map are [`NodeKey`s](#NodeKey), as well,
-	because both the node name *and* tag are valuable to key off of.
+	There is no native conversion of nodes;
+	if none of your converters run,
+	the node will be inserted as-is.
 
 
 ### ParseFragment
@@ -407,6 +413,27 @@ regardless of tag.
 `doc.getAll(("my-tag", ...))` would return all nodes whose tag is "my-tag",
 regardless of the node name.
 `doc.getAll(re.compile(r"-"))` would return all nodes whose name starts with "-".
+Etc.
+
+### `ValueKey`
+
+Similarly to `NodeKey`, a few things take a `ValueKey`
+to match against values,
+based on its tag and/or type.
+
+Like `NodeKey`, `ValueKey` can be a single value,
+matching against the value's tag,
+or a tuple of two values,
+matching against the tag and its type.
+
+The predicate matching against the tag is identical to `NodeKey`.
+
+The predicate matching against the type can either be `...` to match any type,
+or the same sort of argument you'd pass as the second argument to `isinstance()`.
+
+For example,
+a `"foo"` key would match any values with the tag "foo", like `(foo)1` or `(foo)"bar"`.
+A `(..., kdl.Numberish)` will match any value that's a "number" type: a Hex, Octal, Binary, or Decimal.
 Etc.
 
 
