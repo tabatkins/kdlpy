@@ -76,7 +76,10 @@ def parseNode(s: Stream, start: int) -> Result:
                     node,
                     ParseFragment(s[start:nameEnd], s, start),
                 )
-                break
+                if node == NotImplemented:
+                    continue
+                else:
+                    break
         return Result(node, i)
 
 
@@ -208,7 +211,10 @@ def parseValue(s: Stream, start: int) -> Result:
                     val,
                     ParseFragment(s[valueStart:i], s, i),
                 )
-                break
+                if val == NotImplemented:
+                    continue
+                else:
+                    break
         else:
             if tag is None and s.config.nativeUntaggedValues:
                 val = val.value

@@ -200,11 +200,14 @@ A `ParseConfig` object has the following properties:
 	so it can be serialized back into a KDL document.
 
 	Note that only *one* conversion can happen to a given value.
-	Your converters are checked,
+	Your converters are checked
 	in the dictionary's iteration order,
 	then if none of them succeeded
 	it will attempt to run the `nativeUntaggedValues` or `nativeTaggedValues` behaviors,
 	if they're turned on.
+	If a converter returns `NotImplemented`,
+	it will continue looking for a matching converter.
+
 
 * `nodeConverters: Dict[NodeKey, Callable] = {}`
 
@@ -213,7 +216,7 @@ A `ParseConfig` object has the following properties:
 	and it converts `kdl.Node`s instead.
 
 	There is no native conversion of nodes;
-	if none of your converters run,
+	if none of your converters successfully run,
 	the node will be inserted as-is.
 
 
