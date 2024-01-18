@@ -323,7 +323,10 @@ A `PrintConfig` object has the following properties:
 	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
 	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
-	
+	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#NodeKey)
+
+* `kdl.Value` ‡
+	* `val.matchesKey(ValueKey) -> bool` returns whether the value matches the [`ValueKey`](#ValueKey)
 * `kdl.Binary(value: int, tag: str|None)`
 * `kdl.Octal(value: int, tag: str|None)`
 * `kdl.Decimal(mantissa: int|float, exponent: int|None, tag: str|None)`
@@ -335,7 +338,7 @@ A `PrintConfig` object has the following properties:
 * `kdl.RawString(value: str, tag: str|None)`
 * `kdl.String(value: str, tag: str|None)`
 * `kdl.ExactValue(chars: str, tag: str|None)` †
-* `kdl.Value`, `kdl.Numberish`, `kdl.Stringish` ‡
+* `kdl.Numberish`, `kdl.Stringish` ‡
 * `kdl.ParseConfig(...)` see above for options
 	* `kdl.parsing.defaults`: default `ParseConfig`
 * `kdl.PrintConfig(...)` see above for options
@@ -351,7 +354,7 @@ A `PrintConfig` object has the following properties:
 * `kdl.nameMatchesKey(val: str|None, key: kdl.NameKey) -> bool`
 * `kdl.valueMatchesKey(val: str|None, key: kdl.TypeKey) -> bool`
 	* Functions implementing the tag/name/type matching
-		used by [`ValueKey`s](#ValueKey) and [`NodeKey`s](#NodeKey),
+		used by the `node.matchesKey()` and `value.matchesKey()` methods,
 		in case you want to use the same filtering yourself.
 
 † Not produced by the parser.
@@ -386,13 +389,10 @@ A few data structures and functions take a `NodeKey`
 to match against a node,
 based on its name and/or tag.
 
-A `NodeKey` is a predicate, described below,
-which matches against the node's name,
-or a tuple of two predicates,
-matching the first against the node's tag
-and the second against the node's name.
+A `NodeKey` is either a `NameKey` or a `(TagKey, NameKey)` tuple,
+matching against the node's name and/or tag.
 
-A predicate can be:
+`NameKey`s and `TagKey`s can be:
 
 * `None`:
 	When matched against a tag, only succeeds against a `None` tag
@@ -430,19 +430,16 @@ Similarly to `NodeKey`, a few things take a `ValueKey`
 to match against values,
 based on its tag and/or type.
 
-Like `NodeKey`, `ValueKey` can be a single value,
-matching against the value's tag,
-or a tuple of two values,
-matching against the tag and its type.
+A `ValueKey` is either a `TagKey` or a `(TagKey, TypeKey)` tuple,
+matching against the value's tag and/or type.
 
-The predicate matching against the tag is identical to `NodeKey`.
-
-The predicate matching against the type can either be `...` to match any type,
+`TagKey` works identically to how it appears in [`NodeKey`](#NodeKey).
+`TypeKey` is either `...`, which matches any type,
 or the same sort of argument you'd pass as the second argument to `isinstance()`.
 
 For example,
 a `"foo"` key would match any values with the tag "foo", like `(foo)1` or `(foo)"bar"`.
-A `(..., kdl.Numberish)` will match any value that's a "number" type: a Hex, Octal, Binary, or Decimal.
+A `(..., kdl.Numberish)` will match any value that's a "number" type: a Hex, Octal, Binary, or Decimal, regardless of its tag.
 Etc.
 
 
