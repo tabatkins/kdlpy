@@ -29,14 +29,14 @@ class Document:
         return s
 
     @t.overload
-    def get(self, key: t.NodeKey) -> Node | None:
+    def get(self, key: t.NodeKey) -> Node | None:  # noqa: F811
         ...
 
     @t.overload
-    def get(self, key: t.NodeKey, default: VT) -> Node | VT:
+    def get(self, key: t.NodeKey, default: VT) -> Node | VT:  # noqa: F811
         ...
 
-    def get(
+    def get(  # noqa: F811
         self,
         key: t.NodeKey,
         default: VT | None = None,
@@ -123,14 +123,14 @@ class Node:
         return s
 
     @t.overload
-    def get(self, key: t.NodeKey) -> Node | None:
+    def get(self, key: t.NodeKey) -> Node | None:  # noqa: F811
         ...
 
     @t.overload
-    def get(self, key: t.NodeKey, default: VT) -> Node | VT:
+    def get(self, key: t.NodeKey, default: VT) -> Node | VT:  # noqa: F811
         ...
 
-    def get(
+    def get(  # noqa: F811
         self,
         key: t.NodeKey,
         default: VT | None = None,
