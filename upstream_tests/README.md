@@ -2,9 +2,11 @@
 
 The `input` folder contains test cases for KDL parsers. The `expected_kdl`
 folder contains files with the same name as those in `input` with the expected
-output after being run through the parser and printed out again. If there's no
-file in `expected_kdl` with a name corresponding to one in `input` it
-indicates that parsing for that case should fail.
+output after being run through the parser and printed out again.
+
+If a testcase is intended to fail parsing,
+the `input` file _MUST_ have a `_fail` suffix,
+and there must be no corresponding file in `expected_kdl`.
 
 ## Translation Rules
 
@@ -52,10 +54,3 @@ please send a PR.
 If you think the disagreement is due to a genuine error or oversight in the
 KDL specification, please open an issue explaining the matter and the change
 will be considered for the next version of the KDL spec.
-
-## Credit
-
-This test suite was extracted from
-[`kdl4j`](https://github.com/hkolbeck/kdl4j), the original Java
-implementation of KDL, with huge thanks to
-[@hkolbeck](https://github.com/hkolbeck) for authoring them!
