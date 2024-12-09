@@ -13,7 +13,9 @@ if TYPE_CHECKING:
     from typing import (
         Any,
         Callable,
+        Generic,
         Iterable,
+        Literal,
         TypeAlias,
         TypeVar,
     )
