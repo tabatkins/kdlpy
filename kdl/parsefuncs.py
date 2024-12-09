@@ -44,6 +44,7 @@ def parseNode(s: Stream, start: int) -> Result:
     node = types.Node(tag=tag, name=name)
 
     # props and args
+    entryNames: set[str] = set()
     while True:
         space, i = parseNodespace(s, i)
         if space is Failure:
@@ -53,7 +54,15 @@ def parseNode(s: Stream, start: int) -> Result:
             break
         if entry is None:
             continue
-        node.entries.append(entry)
+        if entry[0] is not None and entry[0] in entryNames:
+            # repeated property name, replace the existing value
+            for i, (name, _) in enumerate(node.entries):
+                if name == entry[0]:
+                    node.entries[i] = entry
+                    break
+        else:
+            node.entries.append(entry)
+            entryNames.add(entry[0])
 
     _, i = parseNodespace(s, i)
 
