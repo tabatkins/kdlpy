@@ -4,6 +4,11 @@ A handwritten Python 3.7+ implemenation of a parser
 for the [KDL Document Language](https://kdl.dev),
 fully compliant with KDL 1.0.0.
 
+IMPORTANT NOTE: The repo is currently undergoing an upgrade to KDL 2,
+and as such the current `main` branch does not work
+(because this is a small project and I can work out of `main` if I want).
+Use the `v1.2.0` tag for the last working version of KDL 1 support.
+
 [KDL](https://kdl.dev) is, as the name suggests, a document language,
 filling approximately the same niche as JSON/YAML/XML/etc
 to be a simple but powerful language for config files.
