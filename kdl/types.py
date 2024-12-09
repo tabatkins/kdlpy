@@ -3,13 +3,13 @@ from __future__ import annotations
 import dataclasses
 import re
 from abc import ABCMeta, abstractmethod
-from collections import OrderedDict
 from dataclasses import dataclass
 
 from . import printing, t
 
 if t.TYPE_CHECKING:
     VT = t.TypeVar("VT")
+    LooseEntry = tuple[str | None, t.Any]
 
 
 @dataclass
@@ -68,8 +68,7 @@ class Document:
 class Node:
     name: str
     tag: str | None = None
-    args: list[t.Any] = dataclasses.field(default_factory=list)
-    props: dict[str, t.Any] = dataclasses.field(default_factory=OrderedDict)
+    entries: list[LooseEntry] = dataclasses.field(default_factory=list)
     nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
@@ -87,25 +86,19 @@ class Node:
 
         s += printIdent(self.name)
 
-        # Print all the args, then all the properties
-        # in alpha order, using only the last if a key
-        # is duplicated.
-        for arg in self.args:
-            arg = toKdlValue(arg)
-            if not config.printNullArgs and isinstance(arg, Null):
-                continue
-            s += f" {arg.print(config)}"
-
-        props: t.Iterable[tuple[str, t.Any]]
-        if config.sortProperties:
-            props = sorted(self.props.items(), key=lambda x: x[0])
+        entries: t.Iterable[tuple[str | None, t.Any]]
+        if config.sortEntries:
+            entries = sorted(self.entries, key=lambda x: x[0] or "")
         else:
-            props = self.props.items()
-        for key, value in props:
+            entries = self.entries
+        for name, value in entries:
             value = toKdlValue(value)
-            if not config.printNullProps and isinstance(value, Null):
+            if not config.printNulls and isinstance(value, Null):
                 continue
-            s += f" {printIdent(key)}={value.print(config)}"
+            if name is None:
+                s += f" {value.print(config)}"
+            else:
+                s += f" {printIdent(name)}={value.print(config)}"
 
         if self.nodes:
             childrenText = ""
@@ -157,14 +150,19 @@ class Node:
     def matchesKey(self, key: t.NodeKey) -> bool:
         return nodeMatchesKey(self, key)
 
-    def getProps(self, key: t.ValueKey) -> t.Iterable[tuple[str, t.Any]]:
-        for name, val in self.props.items():
+    def getEntries(self, key: t.ValueKey) -> t.Iterable[LooseEntry]:
+        for name, val in self.entries:
             if valueMatchesKey(val, key):
                 yield name, val
 
+    def getProps(self, key: t.ValueKey) -> t.Iterable[tuple[str, t.Any]]:
+        for name, val in self.entries:
+            if name is not None and valueMatchesKey(val, key):
+                yield name, val
+
     def getArgs(self, key: t.ValueKey) -> t.Iterable[t.Any]:
-        for val in self.args:
-            if valueMatchesKey(val, key):
+        for name, val in self.entries:
+            if name is None and valueMatchesKey(val, key):
                 yield val
 
     def __str__(self) -> str:

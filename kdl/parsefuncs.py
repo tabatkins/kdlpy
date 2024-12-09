@@ -48,15 +48,12 @@ def parseNode(s: Stream, start: int) -> Result:
         space, i = parseNodespace(s, i)
         if space is Failure:
             break
-        entity, i = parseEntity(s, i)
-        if entity is Failure:
+        entry, i = parseEntry(s, i)
+        if entry is Failure:
             break
-        if entity is None:
+        if entry is None:
             continue
-        if entity[0] is None:
-            node.args.append(entity[1])
-        else:
-            node.props[entity[0]] = entity[1]
+        node.entries.append(entry)
 
     _, i = parseNodespace(s, i)
 
@@ -162,7 +159,7 @@ def parseNodeTerminator(s: Stream, start: int) -> Result:
     raise ParseError(s, start, "Junk after node, before terminator.")
 
 
-def parseEntity(s: Stream, start: int) -> Result:
+def parseEntry(s: Stream, start: int) -> Result:
     sd, i = parseSlashDash(s, start)
     if sd is Failure:
         sd = False
