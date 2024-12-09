@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # The only three things that should be available during runtime.
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, overload
 
 if TYPE_CHECKING:
     import re
@@ -14,7 +14,6 @@ if TYPE_CHECKING:
         Any,
         Callable,
         Iterable,
-        overload,
         TypeAlias,
         TypeVar,
     )
