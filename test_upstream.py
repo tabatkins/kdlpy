@@ -16,12 +16,10 @@ GOLDEN_DIR = os.path.join(THIS_DIR, "upstream_tests", "test_cases", "expected_kd
 
 def main() -> None:
     cli = argparse.ArgumentParser()
-    cli.add_argument("-v", dest="verbose", action="store_true")
+    cli.add_argument("-v", dest="verbose", action="count", default=0)
+    cli.add_argument("test", nargs="?", default=None, help="Run a single test, and get a diff.")
     options = cli.parse_args()
 
-    inputs, goldens = findTestFiles()
-    good = []
-    bad = []
     printConfig = kdl.PrintConfig(
         indent="    ",
         respectRadix=False,
@@ -33,61 +31,102 @@ def main() -> None:
         nativeUntaggedValues=False,
     )
     parser = kdl.Parser(parseConfig, printConfig)
+
+    if options.test:
+        if options.test.endswith(".kdl"):
+            singleTestName = options.test
+        else:
+            singleTestName = options.test + ".kdl"
+        inputs = set([singleTestName])
+        if options.test.endswith("-fail"):
+            goldens = set()
+        else:
+            goldens = set([singleTestName])
+    else:
+        inputs, goldens = findTestFiles()
+
+    good = []
+    bad = []
     for filename in sorted(inputs):
         inputPath = os.path.join(TEST_DIR, filename)
+        inputText: str
+        with open(inputPath, "r", encoding="utf-8") as fh:
+            inputText = fh.read()
+
+        goldenText: str | None
+        if filename in goldens:
+            goldenPath = os.path.join(GOLDEN_DIR, filename)
+            with open(goldenPath, "r", encoding="utf-8") as fh:
+                goldenText = fh.read()
+        else:
+            goldenText = None
+
         try:
-            with open(inputPath, "r", encoding="utf-8") as fh:
-                output = parser.parse(fh.read()).print()
+            outputText = parser.parse(inputText).print()
         except kdl.ParseError as e:
-            if filename not in goldens:
+            if not goldenText:
                 # SUCCESS: expected parse failure
                 good.append(filename)
             else:
                 # FAILURE: unexpected parse failure
                 bad.append(filename)
-                if options.verbose:
+                if options.verbose == 2:
                     print(f"Unexpected parse failure in {filename}")
                     print(e)
+                    print("Input:")
+                    print(inputText)
+                    print("Expected:")
+                    print(goldenText)
                     print("================")
             continue
         except Exception as e:
             raise
             # FAILURE: unexpected runtime error
             bad.append(filename)
-            if options.verbose:
+            if options.verbose == 2:
                 print(f"BIG BAD: Internal error in {filename}")
                 print(e)
+                print("Input:")
+                print(inputText)
                 print("================")
             continue
         # Successful parse!
-        if filename not in goldens:
+        if not goldenText:
             # FAILURE: successful parse, but should be a parse failure
             bad.append(filename)
-            if options.verbose:
-                print(f"Unexpected successful parse in {filename}. Got:")
-                print(output)
+            if options.verbose == 2:
+                print(f"Unexpected successful parse in {filename}.")
+                print("Input:")
+                print(inputText)
+                print("Unexpected output (should be a parse failure)")
+                print(outputText)
                 print("================")
             continue
-        goldenPath = os.path.join(GOLDEN_DIR, filename)
-        with open(goldenPath, "r", encoding="utf-8") as fh:
-            golden = fh.read()
-        if output == golden:
+        if outputText == goldenText:
             # SUCCESS: successful parse, matched golden
             good.append(filename)
             continue
         bad.append(filename)
-        if options.verbose:
+        if options.verbose == 2:
             # FAILURE: successful parse, but didn't match golden
-            print(f"Output didn't match golden in {filename}. Got:")
-            print(output)
+            print(f"Output didn't match golden in {filename}.")
+            print("Input:")
+            print(inputText)
+            print("Got:")
+            print(outputText)
             print("Expected:")
-            print(golden)
+            print(goldenText)
             print("================")
 
     if not bad:
         print(f"Success, {len(good)}/{len(inputs)} tests passed.")
+        return True
     else:
         print(f"Failure, {len(good)}/{len(inputs)} tests passed.")
+        if options.verbose == 1:
+            for badfilename in bad:
+                print("* " + badfilename)
+        return False
 
 
 def findTestFiles() -> Tuple[Set[str], Set[str]]:
