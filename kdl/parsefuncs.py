@@ -228,10 +228,6 @@ def parseValue(s: Stream, start: int) -> Result[tuple[str | None, t.Any] | None]
     if s[i] == "'":
         raise ParseError(s, i, "KDL strings use double-quotes.")
 
-    ident = parseBareIdent(s, i).value
-    if ident is not None and ident.lower() in ("true", "false", "null"):
-        raise ParseError(s, i, "KDL keywords are lower-case.")
-
     # Failed to find a value
     # But if I found a tag, something's up
     if tag is not None:
@@ -581,7 +577,14 @@ def parseMultilineString(s: Stream, start: int) -> Result[types.String]:
 
 
 def parseIdentString(s: Stream, start: int) -> Result[types.String]:
-    return Result.fail(start)
+    ident, i = parseBareIdent(s, start).vi
+    if ident is None:
+        return Result.fail(start)
+    if ident.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
+        raise ParseError(
+            s, start, "Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{ident}'."
+        )
+    return Result(types.String(ident), i)
 
 
 def parseInitialHashes(s: Stream, start: int) -> Result[int]:
@@ -670,14 +673,14 @@ def parseUnicodeSpace(s: Stream, start: int) -> Result[bool]:
 def isIdentChar(ch: str) -> bool:
     if not ch:
         return False
-    if ch in r'''\/(){}<>;[]=,"''':
+    # reserved characters
+    if ch in r"(){}[]/\"#;=":
         return False
-    if isLinespaceChar(ch):
+    if isWSChar(ch):
         return False
-    cp = ord(ch)
-    if cp <= 0x20:
+    if isNewlineChar(ch):
         return False
-    if cp > 0x10FFFF:
+    if isDisallowedLiteralChar(ch):
         return False
     return True
 
@@ -706,13 +709,39 @@ def isHexDigit(ch: str) -> bool:
     return ch != "" and ch in "0123456789abcdefABCDEF"
 
 
+def isDisallowedLiteralChar(ch: str) -> bool:
+    if not ch:
+        return False
+    cp = ord(ch)
+    if 0x0 <= cp <= 0x08:
+        return True
+    if 0xE <= cp <= 0x1F:
+        return True
+    if cp == 0x7F:
+        return True
+    if 0xD800 <= cp <= 0xDFFF:
+        return True
+    if 0x200E <= cp <= 0x200F:
+        return True
+    if 0x202A <= cp <= 0x202E:
+        return True
+    if 0x2066 <= cp <= 0x2069:
+        return True
+    if cp == 0xFEFF:
+        return True
+
+    return False
+
+
 def isWSChar(ch: str) -> bool:
     if not ch:
         return False
     cp = ord(ch)
-    if cp in (0x09, 0x20, 0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF):
+    if cp in (0x9, 0xB, 0x20, 0xA0, 0x1680):
         return True
     if 0x2000 <= cp <= 0x200A:
+        return True
+    if cp in (0x202F, 0x205F, 0x3000):
         return True
     return False
 

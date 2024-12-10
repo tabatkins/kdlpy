@@ -381,11 +381,17 @@ def findRequiredHashCount(chars: str) -> int:
 class String(Stringish):
     value: str
     tag: str | None = None
+    multiline: bool = False
 
     def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
-        return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+        if self.multiline:
+            return ""
+        elif isBareIdent(self.value):
+            return printTag(self.tag) + self.value
+        else:
+            return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
 
     def __str__(self) -> str:
         return self.print()
@@ -597,7 +603,7 @@ def isBareIdent(chars: str) -> bool:
         return False
     if len(chars) > 1 and chars[0] in "+-" and chars[1] in "0123456789":
         return False
-    if chars in ("true", "false", "null"):
+    if chars.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
         return False
     return True
 
@@ -606,22 +612,58 @@ def isIdentChar(ch: str) -> bool:
     if not ch:
         return False
     # reserved characters
-    if ch in r'''\/(){}<>;[]=,"''':
+    if ch in r"(){}[]/\"#;=":
         return False
-    cp = ord(ch)
-    # nonprintable
-    if cp < 0x20:
+    if isWSChar(ch):
         return False
-    # invalid codepoint
-    if cp > 0x10FFFF:
+    if isNewline(ch):
         return False
-    # spaces
-    if cp in (0x09, 0x20, 0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF):
-        return False
-    # more spaces
-    if 0x2000 <= cp <= 0x200A:
-        return False
-    # line breaks
-    if cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029):
+    if isDisallowedLiteral(ch):
         return False
     return True
+
+
+def isDisallowedLiteral(ch: str) -> bool:
+    if not ch:
+        return False
+    cp = ord(ch)
+    if 0x0 <= cp <= 0x08:
+        return True
+    if 0xE <= cp <= 0x1F:
+        return True
+    if cp == 0x7F:
+        return True
+    if 0xD800 <= cp <= 0xDFFF:
+        return True
+    if 0x200E <= cp <= 0x200F:
+        return True
+    if 0x202A <= cp <= 0x202E:
+        return True
+    if 0x2066 <= cp <= 0x2069:
+        return True
+    if cp == 0xFEFF:
+        return True
+
+    return False
+
+
+def isWSChar(ch: str) -> bool:
+    if not ch:
+        return False
+    cp = ord(ch)
+    if cp in (0x9, 0xB, 0x20, 0xA0, 0x1680):
+        return True
+    if 0x2000 <= cp <= 0x200A:
+        return True
+    if cp in (0x202F, 0x205F, 0x3000):
+        return True
+    return False
+
+
+def isNewline(ch: str) -> bool:
+    if not ch:
+        return False
+    cp = ord(ch)
+    if cp in (0xA, 0xD, 0x85, 0xC, 0x2028, 0x2029):
+        return True
+    return False
