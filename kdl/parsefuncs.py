@@ -459,11 +459,7 @@ def parseQuotedString(s: Stream, start: int) -> Result[types.String]:
 
     rawChars = ""
     while True:
-        if s[i] not in ("\\", '"', "", "\n"):
-            rawChars += s[i]
-            i += 1
-            continue
-        elif s[i] == '"' and hashCount == 0:
+        if s[i] == '"' and hashCount == 0:
             i += 1
             if s[i] == "#":
                 raise ParseError(s, start, "Saw # characters at the end of a non-raw string.")
@@ -502,15 +498,15 @@ def parseQuotedString(s: Stream, start: int) -> Result[types.String]:
         elif s[i] == "\n":
             # Non-escaped newlines are not allowed in single-line strings.
             raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
-        else:  # s[i] == "\\"
-            if hashCount > 0:
-                ch, i = parseEscape(s, i).vi
-                if ch is None:
-                    raise ParseError(s, i, "Invalid escape sequence in string")
-                rawChars += ch
-            else:
-                rawChars += "\\"
-                i += 1
+        elif s[i] == "\\" and hashCount == 0:
+            ch, i = parseEscape(s, i).vi
+            if ch is None:
+                raise ParseError(s, i, "Invalid escape sequence in string")
+            rawChars += ch
+        else:
+            rawChars += s[i]
+            i += 1
+            continue
 
 
 def parseEscape(s: Stream, start: int) -> Result[str]:
@@ -563,10 +559,10 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
                 "Maximum codepoint in a unicode escape is 0x10ffff",
             )
         return Result(chr(hexValue), i + 1)
-    if isWSChar(ch):
+    if isLinespaceChar(ch):
         # Escaped whitespace is simply discarded.
         i = start + 2
-        while isWSChar(s[i]):
+        while isLinespaceChar(s[i]):
             i += 1
         return Result("", i)
     raise ParseError(s, start, "Invalid character escape")
