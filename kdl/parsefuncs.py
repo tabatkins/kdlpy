@@ -11,28 +11,36 @@ def parse(input: str, config: t.ParseConfig | None = None) -> t.Document:
         config = parsing.defaults
     doc = types.Document()
     s = Stream(input, config)
-    i = parseLinespace(s, 0).i
-    while not s.eof(i):
-        node, i, err = parseNode(s, i).vie
+    i = 0
+    while True:
+        i = parseLinespace(s, i).i
+        node, i, err = parseBaseNode(s, i).vie
         if err:
-            raise ParseError(s, i, "Expected a node")
+            break
         if node:
             doc.nodes.append(node)
-        i = parseLinespace(s, i).i
+        term, i = parseNodeTerminator(s, i).vi
+        if term is None:
+            raise ParseError(s, i, f"Expected a node terminator (newline, ;, or EOF). Got '{s[i]}'")
+    i = parseLinespace(s, i).i
+    if not s.eof(i):
+        # Something's leftover...
+        raise ParseError(s, i, "Unexpected non-node content")
     return doc
 
 
-def parseNode(s: Stream, start: int) -> Result[types.Node | None]:
+def parseBaseNode(s: Stream, start: int) -> Result[types.Node | None]:
     i = start
 
     sd, i = parseSlashDash(s, i).vi
-    if sd is None:
-        sd = False
+    nodeSD = sd is not None
 
     # tag?
     tag, i = parseTag(s, i).vi
     if tag is None:
         tag = None
+
+    i = parseNodespace(s, i).i
 
     # name
     val, i = parseString(s, i).vi
@@ -45,87 +53,125 @@ def parseNode(s: Stream, start: int) -> Result[types.Node | None]:
 
     # props and args
     entryNames: set[str] = set()
+    tempI = i
     while True:
-        space, i = parseNodespace(s, i).vi
+        space, tempI = parseNodespace(s, tempI).vi
         if space is None:
             break
-        entry, i, err = parseEntry(s, i).vie
+        sd, tempI = parseSlashDash(s, tempI).vi
+        entry, tempI, err = parseEntry(s, tempI).vie
         if err:
             break
-        if entry is None:
+        i = tempI
+        assert entry is not None
+        if sd:
             continue
         if entry[0] is not None and entry[0] in entryNames:
             # repeated property name, replace the existing value
-            for i, (name, _) in enumerate(node.entries):
-                if name == entry[0]:
-                    node.entries[i] = entry
+            for n, existingEntry in enumerate(node.entries):
+                if existingEntry[0] == entry[0]:
+                    node.entries[n] = entry
                     break
         else:
             node.entries.append(entry)
             if entry[0] is not None:
                 entryNames.add(entry[0])
 
+    # starting slashdashed children
+    tempI = i
+    while True:
+        space, tempI = parseNodespace(s, tempI).vi
+        if space is None:
+            break
+        sd, tempI = parseSlashDash(s, tempI).vi
+        if sd is None:
+            break
+        children, tempI = parseNodeChildren(s, tempI).vi
+        if children is None:
+            break
+        i = tempI
+
+    # real children
+    tempI = i
+    for _ in [1]:
+        space, tempI = parseNodespace(s, tempI).vi
+        if space is None:
+            break
+        children, tempI = parseNodeChildren(s, i).vi
+        if children is None:
+            break
+        node.nodes = children
+        i = tempI
+        break
+
+    # ending slashdashed children
+    tempI = i
+    while True:
+        space, tempI = parseNodespace(s, tempI).vi
+        if space is None:
+            break
+        sd, tempI = parseSlashDash(s, tempI).vi
+        if sd is None:
+            break
+        children, tempI = parseNodeChildren(s, tempI).vi
+        if children is None:
+            break
+        i = tempI
+
     i = parseNodespace(s, i).i
 
-    nodes, i = parseNodeChildren(s, i).vi
-    if nodes is not None:
-        node.nodes = nodes
+    for key, converter in s.config.nodeConverters.items():
+        if node.matchesKey(key):
+            node = converter(
+                node,
+                ParseFragment(s[start:nameEnd], s, start),
+            )
+            if node == NotImplemented:
+                continue
+            else:
+                break
 
-    i = parseNodespace(s, i).i
-    i = parseNodeTerminator(s, i).i
-
-    if sd:
+    if nodeSD:
         return Result(None, i)
     else:
-        for key, converter in s.config.nodeConverters.items():
-            if node.matchesKey(key):
-                node = converter(
-                    node,
-                    ParseFragment(s[start:nameEnd], s, start),
-                )
-                if node == NotImplemented:
-                    continue
-                else:
-                    break
         return Result(node, i)
 
 
-def parseNodeChildren(s: Stream, start: int) -> Result[list[types.Node] | None]:
-    sd, i = parseSlashDash(s, start).vi
-    if sd is None:
-        sd = False
-
-    if s[i] != "{":
+def parseNodeChildren(s: Stream, start: int) -> Result[list[types.Node]]:
+    if s[start] != "{":
         return Result.fail(start)
-    i += 1
+    i = start + 1
     nodes = []
     while True:
         i = parseLinespace(s, i).i
-        node, i = parseNode(s, i).vi
-        if node is None:
+        node, i, err = parseBaseNode(s, i).vie
+        if err:
             break
-        nodes.append(node)
-    i = parseLinespace(s, i).i
+        if node:
+            nodes.append(node)
+        term, i = parseNodeTerminator(s, i).vi
+        if term is None:
+            break
     if s.eof(i):
         raise ParseError(s, start, "Hit EOF while searching for end of child list")
     if s[i] != "}":
         raise ParseError(s, i, "Junk between end of child list and closing }")
-    if sd:
-        return Result(None, i + 1)
-    else:
-        return Result(nodes, i + 1)
+    return Result(nodes, i + 1)
 
 
 def parseTag(s: Stream, start: int) -> Result[str]:
     if s[start] != "(":
         return Result.fail(start)
-    val, end = parseString(s, start + 1).vi
+    i = start + 1
+    i = parseNodespace(s, i).i
+    val, i = parseString(s, i).vi
     if val is None:
         return Result.fail(start)
     tag = val.value
-    if s[end] != ")":
-        raise ParseError(s, end, "Junk between tag ident and closing paren.")
-    return Result(tag, end + 1)
+    i = parseNodespace(s, i).i
+    if s[i] != ")":
+        raise ParseError(s, i, "Junk between tag ident and closing paren.")
+    return Result(tag, i + 1)
 
 
 def parseBareIdent(s: Stream, start: int) -> Result[str]:
@@ -147,34 +193,28 @@ def parseIdentStart(s: Stream, start: int) -> Result[str]:
 
 
 def parseNodeTerminator(s: Stream, start: int) -> Result[str | bool]:
-    res = parseNewline(s, start)
+    res = parseSingleLineComment(s, start)
     if res.valid:
         return res
-    res = parseSingleLineComment(s, start)
+    res = parseNewline(s, start)
     if res.valid:
         return res
     if s[start] == ";":
         return Result(";", start + 1)
     if s.eof(start):
         return Result(True, start)
-    raise ParseError(s, start, "Junk after node, before terminator.")
+    return Result.fail(start)
 
 
-def parseEntry(s: Stream, start: int) -> Result[tuple[str | None, t.Any] | None]:
-    sd, i = parseSlashDash(s, start).vi
-    if sd is None:
-        sd = False
-
+def parseEntry(s: Stream, start: int) -> Result[tuple[str | None, t.Any]]:
     ent: tuple[str | None, t.Any] | None
-    ent, i = parseProperty(s, i).vi
-    if ent is None:
-        ent, i = parseAttribute(s, i).vi
-        if ent is None:
-            return Result.fail(start)
-    if sd:
-        return Result(None, i)
-    else:
+    ent, i = parseProperty(s, start).vi
+    if ent:
         return Result(ent, i)
+    ent, i = parseAttribute(s, start).vi
+    if ent:
+        return Result(ent, i)
+    return Result.fail(start)
 
 
 def parseProperty(s: Stream, start: int) -> Result[tuple[str, t.Any]]:
@@ -182,9 +222,13 @@ def parseProperty(s: Stream, start: int) -> Result[tuple[str, t.Any]]:
     if val is None:
         return Result.fail(start)
     key = val.value
+    i = parseNodespace(s, i).i
     if s[i] != "=":
         return Result.fail(start)
-    v, i, err = parseValue(s, i + 1).vie
+    else:
+        i += 1
+    i = parseNodespace(s, i).i
+    v, i, err = parseValue(s, i).vie
     if err:
         raise ParseError(s, i, "Expected value after prop=.")
     return Result((key, v), i)
@@ -198,7 +242,9 @@ def parseAttribute(s: Stream, start: int) -> Result[tuple[None, t.Any]]:
 
 
 def parseValue(s: Stream, start: int) -> Result[t.Any]:
-    tag, i = parseTag(s, start).vi
+    tag, i, err = parseTag(s, start).vie
+    if not err:
+        i = parseNodespace(s, i).i
 
     valueStart = i
     val: t.Any
@@ -758,7 +804,7 @@ def isLinespaceChar(ch: str) -> bool:
 
 def parseSlashDash(s: Stream, start: int) -> Result[bool]:
     if s[start] == "/" and s[start + 1] == "-":
-        i = parseNodespace(s, start + 2).i
+        i = parseLinespace(s, start + 2).i
         return Result(True, i)
     return Result.fail(start)
 
