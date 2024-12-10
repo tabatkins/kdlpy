@@ -185,9 +185,15 @@ def parseBareIdent(s: Stream, start: int) -> Result[str]:
 
 
 def parseIdentStart(s: Stream, start: int) -> Result[str]:
-    if isDigit(s[start]) or (isSign(s[start]) and isDigit(s[start + 1])):
-        return Result.fail(start)
     if not isIdentChar(s[start]):
+        return Result.fail(start)
+    if isDigit(s[start]):
+        return Result.fail(start)
+    if isSign(s[start]) and isDigit(s[start + 1]):
+        return Result.fail(start)
+    if isSign(s[start]) and s[start+1] == "." and isDigit(s[start+2]):
+        return Result.fail(start)
+    if s[start] == "." and isDigit(s[start+1]):
         return Result.fail(start)
     return Result(s[start], start + 1)
 
@@ -386,7 +392,9 @@ def parseDecimalNumber(s: Stream, start: int) -> Result[types.Decimal]:
     i = parseSign(s, i).i
 
     # integer part
-    i = parseDigits(s, i).i
+    integer, i = parseDigits(s, i).vi
+    if integer is None:
+        return Result.fail(start)
 
     if s[i] == ".":
         result, i = parseDigits(s, i + 1).vi
