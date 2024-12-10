@@ -433,38 +433,88 @@ def parseKeyword(s: Stream, start: int) -> Result[types.Bool | types.Null | type
 
 
 def parseString(s: Stream, start: int) -> Result[types.Stringish]:
-    if s[start] == '"':
-        return parseEscapedString(s, start)
-    if s[start] == "r" and s[start + 1] in ("#", '"'):
-        return parseRawString(s, start)
-    return Result.fail(start)
-
-
-def parseEscapedString(s: Stream, start: int) -> Result[types.String]:
-    if s[start] != '"':
+    if s[start] in '#"':
+        res = parseMultilineString(s, start)
+        if res.valid:
+            return res
+        res = parseQuotedString(s, start)
+        if res.valid:
+            return res
         return Result.fail(start)
-    i = start + 1
+    return parseIdentString(s, start)
+
+
+def parseQuotedString(s: Stream, start: int) -> Result[types.String]:
+    hashCount, i = parseInitialHashes(s, start).vi
+    if hashCount is None:
+        # Didn't see the starting quote
+        return Result.fail(start)
+
+    # Skip the initial quote
+    i += 1
+
+    # If there's a second quote,
+    # double-check we're not in a multi-line string.
+    if s[i] == '"':
+        if s[i + 1] == '"':
+            return Result.fail(start)
+        else:
+            return Result(types.String(""), i + 1)
 
     rawChars = ""
     while True:
-        if s[i] not in ("\\", '"', ""):
+        if s[i] not in ("\\", '"', "", "\n"):
             rawChars += s[i]
             i += 1
             continue
-        if s[i] == '"':
-            break
-        if s[i] == "":
-            raise ParseError(
-                s,
-                start,
-                "Hit EOF while looking for the end of the string",
-            )
-        ch, i = parseEscape(s, i).vi
-        if ch is None:
-            raise ParseError(s, i, "Invalid escape sequence in string")
-        rawChars += ch
+        elif s[i] == '"' and hashCount == 0:
+            i += 1
+            if s[i] == "#":
+                raise ParseError(s, start, "Saw # characters at the end of a non-raw string.")
+            elif s[i] == '"':
+                raise ParseError(s, start, "Single-quote string was ended with multiple quote chars.")
+            else:
+                return Result(types.String(rawChars), i)
+        elif s[i] == '"' and hashCount > 0:
+            # Cheap exit for a lone literal "
+            if s[i + 1] != "#":
+                rawChars += '"'
+                i += 1
+                continue
 
-    return Result(types.String(rawChars), i + 1)
+            # Otherwise count the hashes
+            endingHashCount, hashEnd = parseFinalHashes(s, i + 1).vi
+            assert endingHashCount is not None
+            if endingHashCount < hashCount:
+                # Allowed, this is string content.
+                rawChars += s[i:hashEnd]
+                i = hashEnd
+                continue
+            elif endingHashCount > hashCount:
+                # Parse error to include *more* hashes than it starts with.
+                raise ParseError(
+                    s,
+                    start,
+                    f"Expected {hashCount} # chars at end of raw string; got {endingHashCount}.",
+                )
+            else:
+                # Just right, string has ended.
+                i = hashEnd
+                return Result(types.String(rawChars), i)
+        elif s[i] == "":
+            raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+        elif s[i] == "\n":
+            # Non-escaped newlines are not allowed in single-line strings.
+            raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
+        else:  # s[i] == "\\"
+            if hashCount > 0:
+                ch, i = parseEscape(s, i).vi
+                if ch is None:
+                    raise ParseError(s, i, "Invalid escape sequence in string")
+                rawChars += ch
+            else:
+                rawChars += "\\"
+                i += 1
 
 
 def parseEscape(s: Stream, start: int) -> Result[str]:
@@ -479,14 +529,14 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
         return Result("\t", start + 2)
     if ch == "\\":
         return Result("\\", start + 2)
-    if ch == "/":
-        return Result("/", start + 2)
     if ch == '"':
         return Result('"', start + 2)
     if ch == "b":
         return Result("\b", start + 2)
     if ch == "f":
         return Result("\f", start + 2)
+    if ch == "s":
+        return Result(" ", start + 2)
     if ch == "u":
         if s[start + 2] != "{":
             raise ParseError(
@@ -517,37 +567,21 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
                 "Maximum codepoint in a unicode escape is 0x10ffff",
             )
         return Result(chr(hexValue), i + 1)
+    if isWSChar(ch):
+        # Escaped whitespace is simply discarded.
+        i = start + 2
+        while isWSChar(s[i]):
+            i += 1
+        return Result("", i)
     raise ParseError(s, start, "Invalid character escape")
 
 
-def parseRawString(s: Stream, start: int) -> Result[types.RawString]:
-    if s[start] != "r":
-        return Result.fail(start)
-    i = start + 1
+def parseMultilineString(s: Stream, start: int) -> Result[types.String]:
+    return Result.fail(start)
 
-    # count hashes
-    hashCount, i = parseInitialHashes(s, i).vi
-    assert hashCount is not None
 
-    if s[i] != '"':
-        return Result.fail(start)
-    i = i + 1
-
-    stringStart = i
-    while True:
-        while s[i] not in ('"', ""):
-            i += 1
-        if s[i] == "":
-            raise ParseError(
-                s,
-                start,
-                "Hit EOF while looking for the end of the raw string.",
-            )
-        stringEnd = i
-        i += 1
-        result, i = parseFinalHashes(s, i, expectedCount=hashCount).vi
-        if result is not None:
-            return Result(types.RawString(s[stringStart:stringEnd]), i)
+def parseIdentString(s: Stream, start: int) -> Result[types.String]:
+    return Result.fail(start)
 
 
 def parseInitialHashes(s: Stream, start: int) -> Result[int]:
@@ -559,20 +593,12 @@ def parseInitialHashes(s: Stream, start: int) -> Result[int]:
     return Result.fail(start)
 
 
-def parseFinalHashes(s: Stream, start: int, expectedCount: int) -> Result[bool]:
+def parseFinalHashes(s: Stream, start: int) -> Result[int]:
     i = start
     while s[i] == "#":
         i += 1
     count = i - start
-    if count < expectedCount:
-        return Result.fail(start)
-    if count > expectedCount:
-        raise ParseError(
-            s,
-            start,
-            f"Expected {expectedCount} hashes at end of raw string; got {count}.",
-        )
-    return Result(True, i)
+    return Result(count, i)
 
 
 def parseNewline(s: Stream, start: int) -> Result[bool]:
