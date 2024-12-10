@@ -64,7 +64,7 @@ def main() -> None:
         try:
             outputText = parser.parse(inputText).print()
         except kdl.ParseError as e:
-            if not goldenText:
+            if goldenText is None:
                 # SUCCESS: expected parse failure
                 good.append(filename)
             else:
@@ -91,7 +91,7 @@ def main() -> None:
                 print("================")
             continue
         # Successful parse!
-        if not goldenText:
+        if goldenText is None:
             # FAILURE: successful parse, but should be a parse failure
             bad.append(filename)
             if options.verbose == 2:
