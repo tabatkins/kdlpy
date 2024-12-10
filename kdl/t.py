@@ -3,8 +3,7 @@
 # Module for holding types, for easy importing into the rest of the codebase
 from __future__ import annotations
 
-# The only three things that should be available during runtime.
-from typing import TYPE_CHECKING, cast, overload
+from typing import TYPE_CHECKING, cast, Generic, overload, TypeVar
 
 if TYPE_CHECKING:
     import re
@@ -13,11 +12,9 @@ if TYPE_CHECKING:
     from typing import (
         Any,
         Callable,
-        Generic,
         Iterable,
         Literal,
         TypeAlias,
-        TypeVar,
     )
 
     from .types import (

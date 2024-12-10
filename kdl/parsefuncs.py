@@ -141,8 +141,6 @@ def parseBareIdent(s: Stream, start: int) -> Result[str]:
     while isIdentChar(s[i]):
         i += 1
     ident = s[start:i]
-    if isKeyword(ident):
-        return Result.fail(start)
     return Result(ident, i)
 
 
@@ -409,14 +407,29 @@ def parseSign(s: Stream, start: int) -> Result[int]:
     return Result.fail(start)
 
 
-def parseKeyword(s: Stream, start: int) -> Result[types.Bool | types.Null]:
-    if s[start : start + 4] == "true" and not isIdentChar(s[start + 4]):
-        return Result(types.Bool(True), start + 4)
-    if s[start : start + 5] == "false" and not isIdentChar(s[start + 5]):
-        return Result(types.Bool(False), start + 5)
-    if s[start : start + 4] == "null" and not isIdentChar(s[start + 4]):
-        return Result(types.Null(), start + 4)
-    return Result.fail(start)
+def parseKeyword(s: Stream, start: int) -> Result[types.Bool | types.Null | types.Infinity | types.NaN]:
+    if s[start] != "#":
+        return Result.fail(start)
+    i = start + 1
+    ident, i = parseBareIdent(s, i).vi
+    if ident is None:
+        return Result.fail(start)
+    if ident == "true":
+        return Result(types.Bool(True), i)
+    elif ident == "false":
+        return Result(types.Bool(False), i)
+    elif ident == "null":
+        return Result(types.Null(), i)
+    elif ident == "inf":
+        return Result(types.Infinity(float("inf")), i)
+    elif ident == "-inf":
+        return Result(types.Infinity(float("-inf")), i)
+    elif ident == "nan":
+        return Result(types.NaN(float("nan")), i)
+    elif ident.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
+        raise ParseError(s, start, f"KDL keywords must be written in lowercase, got #{ident}")
+    else:
+        raise ParseError(s, start, f"Unknown keyword #{ident}")
 
 
 def parseString(s: Stream, start: int) -> Result[types.Stringish]:

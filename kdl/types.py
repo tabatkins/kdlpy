@@ -266,6 +266,35 @@ class Decimal(Numberish):
 
 
 @dataclass
+class Infinity(Numberish):
+    value: float
+    tag: str | None = None
+
+    def print(self, config: t.PrintConfig | None = None) -> str:
+        if config is None:
+            config = printing.defaults
+        if self.value == float("inf"):
+            return printTag(self.tag) + "#inf"
+        else:
+            return printTag(self.tag) + "#-inf"
+
+    def __str__(self) -> str:
+        return self.print()
+
+
+@dataclass
+class NaN(Numberish):
+    value: float = float("nan")
+    tag: str | None = None
+
+    def print(self, config: t.PrintConfig | None = None) -> str:
+        return printTag(self.tag) + "#nan"
+
+    def __str__(self) -> str:
+        return self.print()
+
+
+@dataclass
 class Hex(Numberish):
     value: int
     tag: str | None = None
@@ -292,7 +321,10 @@ class Bool(Value):
     def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
-        return printTag(self.tag) + ("true" if self.value else "false")
+        if self.value:
+            return printTag(self.tag) + "#true"
+        else:
+            return printTag(self.tag) + "#false"
 
     def __str__(self) -> str:
         return self.print()
@@ -309,7 +341,7 @@ class Null(Value):
     def print(self, config: t.PrintConfig | None = None) -> str:
         if config is None:
             config = printing.defaults
-        return printTag(self.tag) + "null"
+        return printTag(self.tag) + "#null"
 
     def __str__(self) -> str:
         return self.print()
