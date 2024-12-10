@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import pprint
 import sys
 from typing import Set, Tuple
 
@@ -38,7 +39,7 @@ def main() -> None:
         else:
             singleTestName = options.test + ".kdl"
         inputs = set([singleTestName])
-        if options.test.endswith("-fail"):
+        if options.test.endswith("_fail"):
             goldens = set()
         else:
             goldens = set([singleTestName])
@@ -62,7 +63,8 @@ def main() -> None:
             goldenText = None
 
         try:
-            outputText = parser.parse(inputText).print()
+            outputDoc = parser.parse(inputText)
+            outputText = outputDoc.print()
         except kdl.ParseError as e:
             if goldenText is None:
                 # SUCCESS: expected parse failure
@@ -100,6 +102,8 @@ def main() -> None:
                 print(inputText)
                 print("Unexpected output (should be a parse failure)")
                 print(outputText)
+                print("Doc:")
+                print(pprint.pformat(outputDoc))
                 print("================")
             continue
         if outputText == goldenText:
@@ -112,10 +116,12 @@ def main() -> None:
             print(f"Output didn't match golden in {filename}.")
             print("Input:")
             print(inputText)
-            print("Got:")
-            print(outputText)
             print("Expected:")
             print(goldenText)
+            print("Got:")
+            print(outputText)
+            print("Doc:")
+            print(pprint.pformat(outputDoc))
             print("================")
 
     if not bad:
