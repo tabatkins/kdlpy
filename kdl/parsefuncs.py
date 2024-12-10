@@ -35,10 +35,10 @@ def parseNode(s: Stream, start: int) -> Result[types.Node | None]:
         tag = None
 
     # name
-    name, i = parseIdent(s, i).vi
-    if name is None:
+    val, i = parseString(s, i).vi
+    if val is None:
         return Result.fail(start)
-
+    name = val.value
     nameEnd = i
 
     node = types.Node(tag=tag, name=name)
@@ -119,19 +119,13 @@ def parseNodeChildren(s: Stream, start: int) -> Result[list[types.Node] | None]:
 def parseTag(s: Stream, start: int) -> Result[str]:
     if s[start] != "(":
         return Result.fail(start)
-    tag, end = parseIdent(s, start + 1).vi
-    if tag is None:
+    val, end = parseString(s, start + 1).vi
+    if val is None:
         return Result.fail(start)
+    tag = val.value
     if s[end] != ")":
         raise ParseError(s, end, "Junk between tag ident and closing paren.")
     return Result(tag, end + 1)
-
-
-def parseIdent(s: Stream, start: int) -> Result[str]:
-    string, i = parseString(s, start).vi
-    if string is not None:
-        return Result(string.value, i)
-    return parseBareIdent(s, start)
 
 
 def parseBareIdent(s: Stream, start: int) -> Result[str]:
@@ -166,14 +160,15 @@ def parseNodeTerminator(s: Stream, start: int) -> Result[str | bool]:
     raise ParseError(s, start, "Junk after node, before terminator.")
 
 
-def parseEntry(s: Stream, start: int) -> Result[tuple[str | None, types.Value] | None]:
+def parseEntry(s: Stream, start: int) -> Result[tuple[str | None, t.Any] | None]:
     sd, i = parseSlashDash(s, start).vi
     if sd is None:
         sd = False
 
+    ent: tuple[str | None, t.Any] | None
     ent, i = parseProperty(s, i).vi
     if ent is None:
-        ent, i = parseValue(s, i).vi
+        ent, i = parseAttribute(s, i).vi
         if ent is None:
             return Result.fail(start)
     if sd:
@@ -182,21 +177,27 @@ def parseEntry(s: Stream, start: int) -> Result[tuple[str | None, types.Value] |
         return Result(ent, i)
 
 
-def parseProperty(s: Stream, start: int) -> Result[tuple[str | None, types.Value] | None]:
-    key, i = parseIdent(s, start).vi
-    if key is None:
+def parseProperty(s: Stream, start: int) -> Result[tuple[str, t.Any]]:
+    val, i = parseString(s, start).vi
+    if val is None:
         return Result.fail(start)
+    key = val.value
     if s[i] != "=":
-        # property name might be a string,
-        # so this isn't point-of-no-return yet
         return Result.fail(start)
-    entity, i = parseValue(s, i + 1).vi
-    if entity is None:
+    v, i, err = parseValue(s, i + 1).vie
+    if err:
         raise ParseError(s, i, "Expected value after prop=.")
-    return Result((key, entity[1]), i)
+    return Result((key, v), i)
 
 
-def parseValue(s: Stream, start: int) -> Result[tuple[str | None, t.Any] | None]:
+def parseAttribute(s: Stream, start: int) -> Result[tuple[None, t.Any]]:
+    v, i, err = parseValue(s, start).vie
+    if err:
+        return Result.fail(start)
+    return Result((None, v), i)
+
+
+def parseValue(s: Stream, start: int) -> Result[t.Any]:
     tag, i = parseTag(s, start).vi
 
     valueStart = i
@@ -223,7 +224,7 @@ def parseValue(s: Stream, start: int) -> Result[tuple[str | None, t.Any] | None]
                 val = val.value
             if tag is not None and s.config.nativeTaggedValues:
                 val = converters.toNative(val, ParseFragment(s[valueStart:i], s, i))
-        return Result((None, val), i)
+        return Result(val, i)
 
     if s[i] == "'":
         raise ParseError(s, i, "KDL strings use double-quotes.")
