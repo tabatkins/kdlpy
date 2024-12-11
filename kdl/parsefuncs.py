@@ -13,7 +13,7 @@ def parse(input: str, config: t.ParseConfig | None = None) -> t.Document:
     s = Stream(input, config)
     i = 0
     # Skip a single BOM, if present
-    if len(s) and ord(s[i]) == 0xfeff:
+    if len(s) and ord(s[i]) == 0xFEFF:
         i += 1
     while True:
         i = parseLinespace(s, i).i
@@ -195,9 +195,9 @@ def parseIdentStart(s: Stream, start: int) -> Result[str]:
         return Result.fail(start)
     if isSign(s[start]) and isDigit(s[start + 1]):
         return Result.fail(start)
-    if isSign(s[start]) and s[start+1] == "." and isDigit(s[start+2]):
+    if isSign(s[start]) and s[start + 1] == "." and isDigit(s[start + 2]):
         return Result.fail(start)
-    if s[start] == "." and isDigit(s[start+1]):
+    if s[start] == "." and isDigit(s[start + 1]):
         return Result.fail(start)
     return Result(s[start], start + 1)
 
@@ -488,29 +488,36 @@ def parseKeyword(s: Stream, start: int) -> Result[types.Bool | types.Null | type
 
 
 def parseString(s: Stream, start: int) -> Result[types.Stringish]:
-    if s[start] in '#"':
-        res = parseMultilineString(s, start)
-        if res.valid:
-            return res
-        res = parseQuotedString(s, start)
-        if res.valid:
-            return res
-        return Result.fail(start)
-    return parseIdentString(s, start)
+    hashCount, i = parseRepeatedChar(s, start, "#").vi
+    assert hashCount is not None
+    quoteCount, i = parseRepeatedChar(s, i, '"').vi
+    assert quoteCount is not None
+    if quoteCount == 0:
+        if hashCount == 0:
+            return parseIdentString(s, i)
+        else:
+            return Result.fail(start)
+    elif quoteCount == 1:
+        return parseQuotedString(s, i, hashCount)
+    elif quoteCount == 2:
+        return parseQuotedString(s, i-1, hashCount)
+    elif quoteCount == 3:
+        return parseMultilineString(s, i, hashCount)
+    raise ParseError(s, start, f"Encountered {quoteCount} quotes in a row.")
 
 
-def parseQuotedString(s: Stream, start: int) -> Result[types.String]:
-    hashCount, i = parseInitialHashes(s, start).vi
-    if hashCount is None:
-        # Didn't see the starting quote
-        return Result.fail(start)
+def parseRepeatedChar(s: Stream, start: int, ch: str) -> Result[int]:
+    i = start
+    count = 0
+    while s[i] == ch:
+        count += 1
+        i += 1
+    return Result(count, i)
 
-    # Skip the initial quote
-    i += 1
 
-    # Make sure it can't look like a multiline string
-    if s[i] == '"' and s[i+1] == '"':
-        return Result.fail(start)
+def parseQuotedString(s: Stream, start: int, hashCount: int) -> Result[types.String]:
+
+    i = start
 
     rawChars = ""
     while True:
@@ -530,7 +537,7 @@ def parseQuotedString(s: Stream, start: int) -> Result[types.String]:
                 continue
 
             # Otherwise count the hashes
-            endingHashCount, hashEnd = parseFinalHashes(s, i + 1).vi
+            endingHashCount, hashEnd = parseRepeatedChar(s, i + 1, "#").vi
             assert endingHashCount is not None
             if endingHashCount < hashCount:
                 # Allowed, this is string content.
@@ -623,7 +630,7 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
     raise ParseError(s, start, "Invalid character escape")
 
 
-def parseMultilineString(s: Stream, start: int) -> Result[types.String]:
+def parseMultilineString(s: Stream, start: int, hashCount: int) -> Result[types.String]:
     return Result.fail(start)
 
 
