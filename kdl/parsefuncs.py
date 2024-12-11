@@ -12,6 +12,9 @@ def parse(input: str, config: t.ParseConfig | None = None) -> t.Document:
     doc = types.Document()
     s = Stream(input, config)
     i = 0
+    # Skip a single BOM, if present
+    if len(s) and ord(s[i]) == 0xfeff:
+        i += 1
     while True:
         i = parseLinespace(s, i).i
         node, i, err = parseBaseNode(s, i).vie
