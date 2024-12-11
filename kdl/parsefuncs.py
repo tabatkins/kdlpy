@@ -93,11 +93,11 @@ def parseBaseNode(s: Stream, start: int) -> Result[types.Node | None]:
 
     # real children
     tempI = i
-    for _ in [1]:
+    while True:
         space, tempI = parseNodespace(s, tempI).vi
         if space is None:
             break
-        children, tempI = parseNodeChildren(s, i).vi
+        children, tempI = parseNodeChildren(s, tempI).vi
         if children is None:
             break
         node.nodes = children
