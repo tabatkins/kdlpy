@@ -505,13 +505,9 @@ def parseQuotedString(s: Stream, start: int) -> Result[types.String]:
     # Skip the initial quote
     i += 1
 
-    # If there's a second quote,
-    # double-check we're not in a multi-line string.
-    if s[i] == '"':
-        if s[i + 1] == '"':
-            return Result.fail(start)
-        else:
-            return Result(types.String(""), i + 1)
+    # Make sure it can't look like a multiline string
+    if s[i] == '"' and s[i+1] == '"':
+        return Result.fail(start)
 
     rawChars = ""
     while True:
