@@ -142,6 +142,7 @@ def parseNodeChildren(s: Stream, start: int) -> Result[list[types.Node]]:
         return Result.fail(start)
     i = start + 1
     nodes = []
+
     while True:
         i = parseLinespace(s, i).i
         node, i, err = parseBaseNode(s, i).vie
@@ -715,10 +716,10 @@ def parseWhitespace(s: Stream, start: int) -> Result[bool]:
 def parseUnicodeSpace(s: Stream, start: int) -> Result[bool]:
     if not isWSChar(s[start]):
         return Result.fail(start)
-    end = start + 1
-    while isWSChar(s[end]):
-        end += 1
-    return Result(True, end)
+    i = start + 1
+    while isWSChar(s[i]):
+        i += 1
+    return Result(True, i)
 
 
 def isIdentChar(ch: str) -> bool:
