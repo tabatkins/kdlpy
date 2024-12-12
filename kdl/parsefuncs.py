@@ -643,7 +643,7 @@ def parseMultilineString(s: Stream, start: int, hashCount: int) -> Result[types.
     lines: list[MSLine] = []
     line = MSLine(i)
     _, i = parseUnicodeSpace(s, i).vi
-    line.indent = s[line.i:i]
+    line.indent = s[line.i : i]
     while True:
         nl, i = parseNewline(s, i).vi
         if nl is not None:
