@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 from . import converters, parsing, t, types
 from .errors import ParseError, ParseFragment
 from .result import Result
@@ -500,7 +502,7 @@ def parseString(s: Stream, start: int) -> Result[types.Stringish]:
     elif quoteCount == 1:
         return parseQuotedString(s, i, hashCount)
     elif quoteCount == 2:
-        return parseQuotedString(s, i-1, hashCount)
+        return parseQuotedString(s, i - 1, hashCount)
     elif quoteCount == 3:
         return parseMultilineString(s, i, hashCount)
     raise ParseError(s, start, f"Encountered {quoteCount} quotes in a row.")
@@ -557,7 +559,7 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> Result[types.Str
                 return Result(types.String(rawChars), i)
         elif s[i] == "":
             raise ParseError(s, start, "Hit EOF while looking for the end of the string")
-        elif s[i] == "\n":
+        elif parseNewline(s, i).valid:
             # Non-escaped newlines are not allowed in single-line strings.
             raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
         elif s[i] == "\\" and hashCount == 0:
@@ -630,8 +632,103 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
     raise ParseError(s, start, "Invalid character escape")
 
 
+@dataclasses.dataclass
+class MSLine:
+    i: int
+    indent: str = ""
+    text: str = ""
+
+
 def parseMultilineString(s: Stream, start: int, hashCount: int) -> Result[types.String]:
-    return Result.fail(start)
+    nl, i = parseNewline(s, start).vi
+    if nl is None:
+        raise ParseError(s, start, "Multiline strings must have a newline immediately after their opening quotes.")
+    lines: list[MSLine] = []
+    line = MSLine(i)
+    _, i = parseUnicodeSpace(s, i).vi
+    line.indent = s[line.i:i]
+    while True:
+        nl, i = parseNewline(s, i).vi
+        if nl is not None:
+            lines.append(line)
+            line = MSLine(i)
+            afterNl = i
+            _, i = parseUnicodeSpace(s, i).vi
+            line.indent = s[afterNl:i]
+            continue
+
+        if s[i] == '"':
+            quoteStart = i
+            quoteCount, i = parseRepeatedChar(s, i, '"').vi
+            assert quoteCount is not None
+            if quoteCount in (1, 2):
+                line.text += s[quoteStart:i]
+                continue
+            elif quoteCount > 4:
+                raise ParseError(s, quoteStart, f"Saw {quoteCount} consecutive quotes in a multi-line string.")
+
+            assert quoteCount == 3
+            if hashCount == 0:
+                if s[i] == "#":
+                    raise ParseError(s, i, "Saw # characters at the end of a non-raw string.")
+                else:
+                    rawChars = processMultiline(lines, line, s)
+                    return Result(types.String(rawChars), i)
+            else:
+                # Cheap exit for a lone literal """
+                if s[i] != "#":
+                    line.text += '"""'
+                    continue
+
+                # Otherwise count the hashes
+                endingHashCount, hashEnd = parseRepeatedChar(s, i, "#").vi
+                assert endingHashCount is not None
+                if endingHashCount < hashCount:
+                    # Allowed, this is string content.
+                    line.text += s[quoteStart:hashEnd]
+                    i = hashEnd
+                    continue
+                elif endingHashCount > hashCount:
+                    # Parse error to include *more* hashes than it starts with.
+                    raise ParseError(
+                        s,
+                        start,
+                        f"Expected {hashCount} # chars at end of raw multiline string; got {endingHashCount}.",
+                    )
+                else:
+                    rawChars = processMultiline(lines, line, s)
+                    return Result(types.String(rawChars), hashEnd)
+        elif s[i] == "":
+            raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+        elif s[i] == "\\" and hashCount == 0:
+            ch, i = parseEscape(s, i).vi
+            if ch is None:
+                raise ParseError(s, i, "Invalid escape sequence in string")
+            line.text += ch
+        else:
+            line.text += s[i]
+            i += 1
+            continue
+
+
+def processMultiline(lines: list[MSLine], lastLine: MSLine, s: Stream) -> str:
+    # Verify the indent is just whitespace
+    if lastLine.text:
+        raise ParseError(s, lastLine.i, "Multiline string ended with non-whitespace content on last line.")
+    for line in lines:
+        # Only-WS lines don't contribute any characters,
+        # just the presence of their line.
+        if line.text == "":
+            line.indent = ""
+            continue
+        # Otherwise, remove the shared prefix
+        if line.indent.startswith(lastLine.indent):
+            line.indent = line.indent[len(lastLine.indent) :]
+        else:
+            raise ParseError(
+                s, line.i, "Multiline string line doesn't start with the same whitespace prefix as the final line."
+            )
+    return "\n".join(line.indent + line.text for line in lines)
 
 
 def parseIdentString(s: Stream, start: int) -> Result[types.String]:
