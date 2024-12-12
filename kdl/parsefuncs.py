@@ -798,6 +798,8 @@ def parseEscline(s: Stream, start: int) -> Result[bool]:
     sl, i = parseSingleLineComment(s, i).vi
     if sl is not None:
         return Result(True, i)
+    if s[i] == "":
+        return Result(True, i)
     return Result.fail(start)
 
 
