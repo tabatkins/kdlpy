@@ -913,7 +913,12 @@ def isLinespaceChar(ch: str) -> bool:
 
 def parseSlashDash(s: Stream, start: int) -> Result[bool]:
     if s[start] == "/" and s[start + 1] == "-":
-        i = parseLinespace(s, start + 2).i
+        i = start + 2
+        while True:
+            s1, i = parseLinespace(s, i).vi
+            s2, i = parseNodespace(s, i).vi
+            if s1 is None and s2 is None:
+                break
         return Result(True, i)
     return Result.fail(start)
 
