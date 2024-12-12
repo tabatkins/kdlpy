@@ -254,9 +254,8 @@ def parseAttribute(s: Stream, start: int) -> Result[tuple[None, t.Any]]:
 
 
 def parseValue(s: Stream, start: int) -> Result[t.Any]:
-    tag, i, err = parseTag(s, start).vie
-    if not err:
-        i = parseNodespace(s, i).i
+    tag, i = parseTag(s, start).vi
+    i = parseNodespace(s, i).i
 
     valueStart = i
     val: t.Any
