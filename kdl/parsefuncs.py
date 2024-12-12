@@ -42,8 +42,6 @@ def parseBaseNode(s: Stream, start: int) -> Result[types.Node | None]:
 
     # tag?
     tag, i = parseTag(s, i).vi
-    if tag is None:
-        tag = None
 
     i = parseNodespace(s, i).i
 
