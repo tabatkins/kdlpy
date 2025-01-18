@@ -44,12 +44,10 @@ which can canonicalize a KDL document. See [below](#kdlreformat) for options.
 The `kdl.parse(str, parseConfig|None)` function parses, you guessed it, a string of KDL into a KDL document object:
 
 ```py3
-import kdl
-
 >>> import kdl
 >>> doc = kdl.parse('''
-... node_name "arg" {
-...     child_node foo=1 bar=true
+... node_name arg {
+...     child_node foo=1 bar=#true
 ... }
 ... ''')
 >>>
@@ -81,8 +79,8 @@ Either way, you'll get back a `kdl.Document` object, which is fully mutable. By 
 >>> doc.nodes[0].nodes[0].props["foo"] = 2
 >>>
 >>> print(doc)
-node_name "arg" {
-        child_node foo=2 bar=true
+node_name arg {
+        child_node foo=2 bar=#true
 }
 
 ```
