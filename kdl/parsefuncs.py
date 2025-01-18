@@ -768,7 +768,7 @@ def parseLinespace(s: Stream, start: int) -> Result[bool]:
     i = start
     while True:
         nl, i = parseNewline(s, i).vi
-        ws, i = parseWhitespace(s, i).vi
+        ws, i = parseNodespace(s, i).vi
         sc, i = parseSingleLineComment(s, i).vi
         if nl is None and ws is None and sc is None:
             break
