@@ -893,7 +893,7 @@ def isWSChar(ch: str) -> bool:
     if not ch:
         return False
     cp = ord(ch)
-    if cp in (0x9, 0xB, 0x20, 0xA0, 0x1680):
+    if cp in (0x9, 0x20, 0xA0, 0x1680):
         return True
     if 0x2000 <= cp <= 0x200A:
         return True
@@ -906,7 +906,7 @@ def isNewlineChar(ch: str) -> bool:
     if not ch:
         return False
     cp = ord(ch)
-    return cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029)
+    return cp in (0x0A, 0x0D, 0x85, 0x0B, 0x0C, 0x2028, 0x2029)
 
 
 def isLinespaceChar(ch: str) -> bool:
