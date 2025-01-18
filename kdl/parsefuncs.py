@@ -613,6 +613,8 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
                 "Unicode escapes can contain at most six digits",
             )
         hexValue = int(s[hexStart:i], 16)
+        if 0xD800 <= hexValue <= 0xDFFF:
+            raise ParseError(s, hexStart, "Unicode escapes can't encode surrogate codepoints (U+D800-DFFF)")
         if hexValue > 0x10FFFF:
             raise ParseError(
                 s,
