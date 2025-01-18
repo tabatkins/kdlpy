@@ -97,14 +97,19 @@ def main() -> None:
             # FAILURE: successful parse, but should be a parse failure
             bad.append(filename)
             if options.verbose == 2:
-                print(f"Unexpected successful parse in {filename}.")
-                print("Input:")
-                print(inputText)
-                print("Unexpected output (should be a parse failure)")
-                print(outputText)
-                print("Doc:")
-                print(pprint.pformat(outputDoc))
-                print("================")
+                try:
+                    print(f"Unexpected successful parse in {filename}.")
+                    print("Input:")
+                    print(inputText)
+                    print("Unexpected output (should be a parse failure)")
+                    print(outputText)
+                    print("Doc:")
+                    print(pprint.pformat(outputDoc))
+                    print("================")
+                except Exception as e:
+                    print(f"While attempting to report an unexpected successful")
+                    print(f"parse in {filename}, encountered a Python error:")
+                    print(e)
             continue
         if outputText == goldenText:
             # SUCCESS: successful parse, matched golden
