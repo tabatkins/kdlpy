@@ -736,7 +736,7 @@ def parseIdentString(s: Stream, start: int) -> Result[types.String]:
         return Result.fail(start)
     if ident.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
         raise ParseError(
-            s, start, "Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{ident}'."
+            s, start, f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{ident}'."
         )
     return Result(types.String(ident), i)
 
