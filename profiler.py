@@ -1,0 +1,2053 @@
+#!/usr/bin/env python
+from __future__ import annotations
+
+# This file was Gemini-generated.
+import argparse
+import ast
+import contextlib
+import cProfile
+import dataclasses
+import html
+import json
+import os
+import pstats
+import re
+import sys
+import time
+import typing as t
+
+THIS_DIR = os.path.dirname(os.path.realpath(__file__))
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
+
+import kdl  # noqa: E402  # pylint: disable=wrong-import-position
+
+TEST_DIR = os.path.join(THIS_DIR, "upstream_tests", "test_cases", "input")
+
+
+@dataclasses.dataclass
+class PhaseRecord:
+    name: str
+    elapsed: float
+    group: str = ""
+    count: int = 0
+
+
+class PhaseTimer:
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self._records: dict[tuple[str, str], PhaseRecord] = {}
+
+    @property
+    def phases(self) -> list[PhaseRecord]:
+        return list(self._records.values())
+
+    def add(self, name: str, elapsed: float, group: str = "") -> None:
+        if not self.enabled:
+            return
+        key = (name, group)
+        rec = self._records.get(key)
+        if rec is None:
+            self._records[key] = PhaseRecord(name=name, elapsed=elapsed, group=group, count=1)
+        else:
+            rec.elapsed += elapsed
+            rec.count += 1
+
+    @contextlib.contextmanager
+    def phase(self, name: str, group: str = "") -> t.Generator[None, None, None]:
+        if not self.enabled:
+            yield
+            return
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.add(name, time.perf_counter() - start, group=group)
+
+
+@dataclasses.dataclass
+class InputTiming:
+    name: str
+    elapsed: float
+    size_bytes: int
+    runs: int = 1
+
+
+class FunctionKey(t.NamedTuple):
+    filename: str
+    line: int
+    func_name: str
+
+
+@dataclasses.dataclass
+class CallerInfo:
+    key: FunctionKey
+    name: str
+    location: str
+    category: str
+    ncalls: int
+    cumtime: float
+    percent_of_callee: float
+
+
+@dataclasses.dataclass
+class CalleeInfo:
+    key: FunctionKey
+    name: str
+    location: str
+    category: str
+    ncalls: int
+    cumtime: float
+    percent_of_caller: float
+
+
+@dataclasses.dataclass
+class FunctionStat:
+    key: FunctionKey
+    name: str
+    filename: str
+    line: int
+    location: str
+    category: str  # "kdl", "dependency", "stdlib", "built-in", "harness"
+    ncalls: int
+    pcalls: int  # primitive calls
+    tottime: float
+    cumtime: float
+    tottime_percent: float
+    cumtime_percent: float
+    percall_tot: float
+    percall_cum: float
+    callers: list[CallerInfo] = dataclasses.field(default_factory=list)
+    callees: list[CalleeInfo] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class CallTreeNode:
+    name: str
+    location: str
+    category: str
+    cumtime: float
+    tottime: float
+    ncalls: int
+    percent: float
+    children: list[CallTreeNode] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict[str, t.Any]:
+        return {
+            "name": self.name,
+            "location": self.location,
+            "category": self.category,
+            "cumtime": self.cumtime,
+            "tottime": self.tottime,
+            "ncalls": self.ncalls,
+            "percent": self.percent,
+            "children": [c.to_dict() for c in self.children],
+        }
+
+
+@dataclasses.dataclass
+class ProfileAnalysis:
+    target_name: str
+    mode: str
+    repeat: int
+    total_bytes: int
+    total_docs: int
+    total_wall_time: float
+    total_cpu_time: float
+    total_calls: int
+    primitive_calls: int
+    phases: list[PhaseRecord]
+    input_timings: list[InputTiming]
+    functions: dict[FunctionKey, FunctionStat]
+    kdl_functions: list[FunctionStat]
+    top_overall_functions: list[FunctionStat]
+    stats: pstats.Stats
+    call_tree: CallTreeNode | None = None
+
+
+@dataclasses.dataclass
+class InputDoc:
+    name: str
+    text: str
+    expect_fail: bool = False
+
+
+_BUILTIN_METHOD_RE = re.compile(r"^<built-in method (.+)>$")
+_TYPE_METHOD_RE = re.compile(r"^<method '([^']+)' of '([^']+)' objects>$")
+
+
+def clean_func_name(func_name: str) -> str:
+    m1 = _BUILTIN_METHOD_RE.match(func_name)
+    if m1:
+        return m1.group(1)
+    m2 = _TYPE_METHOD_RE.match(func_name)
+    if m2:
+        return f"{m2.group(2)}.{m2.group(1)}"
+    return func_name
+
+
+def get_kdl_root() -> str:
+    return os.path.join(THIS_DIR, "kdl")
+
+
+def build_qualname_index(root_dir: str) -> dict[tuple[str, int, str], str]:
+    """Maps (norm_filename, lineno, func_name) -> 'ClassName.func_name' for methods in kdl."""
+    index: dict[tuple[str, int, str], str] = {}
+    if not os.path.isdir(root_dir):
+        return index
+
+    def visit_scope(nodes: list[ast.stmt], prefix: str, filepath: str) -> None:
+        for stmt in nodes:
+            if isinstance(stmt, ast.ClassDef):
+                cls_prefix = f"{prefix}.{stmt.name}" if prefix else stmt.name
+                visit_scope(stmt.body, cls_prefix, filepath)
+            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if prefix:
+                    qual = f"{prefix}.{stmt.name}"
+                    index[(filepath, stmt.lineno, stmt.name)] = qual
+                    if stmt.decorator_list:
+                        index[(filepath, stmt.decorator_list[0].lineno, stmt.name)] = qual
+                visit_scope(stmt.body, f"{prefix}.{stmt.name}" if prefix else stmt.name, filepath)
+
+    for dirpath, _, filenames in os.walk(root_dir):
+        for fname in filenames:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.normpath(os.path.join(dirpath, fname))
+            try:
+                with open(fpath, encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read(), filename=fpath)
+                visit_scope(tree.body, "", fpath)
+            except OSError:
+                continue
+            except SyntaxError:
+                continue
+    return index
+
+
+def categorize_function(filename: str, kdl_root: str, profiler_path: str) -> tuple[str, str]:
+    """Returns (category, display_location)."""
+    if filename.startswith("<") or filename == "~":
+        return "built-in", filename
+
+    norm_path = os.path.normpath(filename)
+    if norm_path == profiler_path:
+        return "harness", os.path.basename(norm_path)
+
+    if norm_path == kdl_root or norm_path.startswith(kdl_root + os.sep):
+        rel = os.path.relpath(norm_path, kdl_root)
+        return "kdl", rel
+
+    if "site-packages" in norm_path or "dist-packages" in norm_path:
+        parts = norm_path.replace("\\", "/").split("/")
+        if "site-packages" in parts:
+            idx = parts.index("site-packages")
+            return "dependency", "/".join(parts[idx + 1 :])
+        if "dist-packages" in parts:
+            idx = parts.index("dist-packages")
+            return "dependency", "/".join(parts[idx + 1 :])
+        return "dependency", os.path.basename(norm_path)
+
+    if "/lib/python" in norm_path or "\\lib\\python" in norm_path:
+        parts = re.split(r"[/\\]lib[/\\]python\d+\.\d+[/\\]?", norm_path)
+        if len(parts) > 1:
+            return "stdlib", parts[-1]
+        return "stdlib", os.path.basename(norm_path)
+
+    return "stdlib", os.path.basename(norm_path)
+
+
+def format_duration(seconds: float) -> str:
+    if seconds >= 1.0:
+        return f"{seconds:6.2f}s"
+    if seconds >= 0.001:
+        return f"{seconds * 1000:6.1f}ms"
+    return f"{seconds * 1000000:6.1f}µs"
+
+
+def format_bytes(num_bytes: int) -> str:
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.2f} MB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes} B"
+
+
+def format_throughput(num_bytes: int, seconds: float) -> str:
+    if seconds <= 0 or num_bytes <= 0:
+        return "N/A"
+    bps = num_bytes / seconds
+    if bps >= 1024 * 1024:
+        return f"{bps / (1024 * 1024):.2f} MB/s"
+    if bps >= 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps:.0f} B/s"
+
+
+def format_bar(fraction: float, width: int = 12, ascii_only: bool = False) -> str:
+    clamped = max(0.0, min(1.0, fraction))
+    if ascii_only:
+        bar_len = round(clamped * width)
+        return "[" + "=" * bar_len + " " * (width - bar_len) + "]"
+    blocks = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"]
+    total_eighths = round(clamped * width * 8)
+    full_blocks = total_eighths // 8
+    remainder = total_eighths % 8
+    res = "█" * full_blocks
+    if full_blocks < width and remainder > 0:
+        res += blocks[remainder]
+        full_blocks += 1
+    res += " " * (width - full_blocks)
+    return res
+
+
+def analyze_profile(
+    pr: cProfile.Profile,
+    wall_time: float,
+    phases: list[PhaseRecord],
+    input_timings: list[InputTiming],
+    target_name: str,
+    *,
+    mode: str,
+    repeat: int,
+    total_bytes: int,
+    total_docs: int,
+    root_filter: str | None = None,
+    leaf_filter: str | None = None,
+) -> ProfileAnalysis:
+    ps = pstats.Stats(pr)
+    ps_any = t.cast("t.Any", ps)
+    kdl_root = os.path.normpath(get_kdl_root())
+    profiler_path = os.path.normpath(os.path.realpath(__file__))
+    qualnames = build_qualname_index(kdl_root)
+
+    total_cpu_time = float(ps_any.total_tt)
+    total_calls = int(ps_any.total_calls)
+    primitive_calls = int(ps_any.prim_calls)
+
+    effective_total_time = max(wall_time, total_cpu_time, 0.000001)
+    raw_stats = dict(ps_any.stats)
+
+    # First pass: categorize and build initial FunctionStat objects
+    fn_stats: dict[FunctionKey, FunctionStat] = {}
+    for raw_key, (pcalls, ncalls, tt, ct, _) in raw_stats.items():
+        key = FunctionKey(*raw_key)
+        category, loc = categorize_function(key.filename, kdl_root, profiler_path)
+        display_loc = f"{loc}:{key.line}" if key.line > 0 else loc
+        norm_file = os.path.normpath(key.filename) if not key.filename.startswith("<") else key.filename
+        display_name = qualnames.get((norm_file, key.line, key.func_name), clean_func_name(key.func_name))
+
+        tot_pct = (tt / effective_total_time) * 100.0
+        cum_pct = (ct / effective_total_time) * 100.0
+        percall_tot = tt / max(1, ncalls)
+        percall_cum = ct / max(1, pcalls)
+        fn_stats[key] = FunctionStat(
+            key=key,
+            name=display_name,
+            filename=key.filename,
+            line=key.line,
+            location=display_loc,
+            category=category,
+            ncalls=ncalls,
+            pcalls=pcalls,
+            tottime=tt,
+            cumtime=ct,
+            tottime_percent=tot_pct,
+            cumtime_percent=cum_pct,
+            percall_tot=percall_tot,
+            percall_cum=percall_cum,
+        )
+
+    # Second pass: compute callers and callees
+    for raw_callee_key, (_, _, _, callee_ct, callers_dict) in raw_stats.items():
+        callee_key = FunctionKey(*raw_callee_key)
+        callee_stat = fn_stats[callee_key]
+        for raw_caller_key, caller_info in callers_dict.items():
+            caller_key = FunctionKey(*raw_caller_key)
+            if caller_key not in fn_stats:
+                continue
+            caller_stat = fn_stats[caller_key]
+            caller_cc, _, _, caller_cumtime = caller_info
+            pct_of_callee = (caller_cumtime / max(callee_ct, 0.000001)) * 100.0
+            pct_of_caller = (caller_cumtime / max(caller_stat.cumtime, 0.000001)) * 100.0
+
+            if caller_stat.category != "harness":
+                callee_stat.callers.append(
+                    CallerInfo(
+                        key=caller_key,
+                        name=caller_stat.name,
+                        location=caller_stat.location,
+                        category=caller_stat.category,
+                        ncalls=caller_cc,
+                        cumtime=caller_cumtime,
+                        percent_of_callee=pct_of_callee,
+                    ),
+                )
+
+            caller_stat.callees.append(
+                CalleeInfo(
+                    key=callee_key,
+                    name=callee_stat.name,
+                    location=callee_stat.location,
+                    category=callee_stat.category,
+                    ncalls=caller_cc,
+                    cumtime=caller_cumtime,
+                    percent_of_caller=pct_of_caller,
+                ),
+            )
+
+    for stat in fn_stats.values():
+        stat.callers.sort(key=lambda c: c.cumtime, reverse=True)
+        stat.callees.sort(key=lambda c: c.cumtime, reverse=True)
+
+    kdl_list = [s for s in fn_stats.values() if s.category == "kdl"]
+    kdl_list.sort(key=lambda s: s.cumtime, reverse=True)
+
+    all_list = [s for s in fn_stats.values() if s.category != "harness"]
+    all_list.sort(key=lambda s: s.cumtime, reverse=True)
+
+    call_tree = build_call_tree(
+        fn_stats=fn_stats,
+        total_time=effective_total_time,
+        root_filter=root_filter,
+        leaf_filter=leaf_filter,
+    )
+
+    return ProfileAnalysis(
+        target_name=target_name,
+        mode=mode,
+        repeat=repeat,
+        total_bytes=total_bytes,
+        total_docs=total_docs,
+        total_wall_time=wall_time,
+        total_cpu_time=total_cpu_time,
+        total_calls=total_calls,
+        primitive_calls=primitive_calls,
+        phases=phases,
+        input_timings=input_timings,
+        functions=fn_stats,
+        kdl_functions=kdl_list,
+        top_overall_functions=all_list,
+        stats=ps,
+        call_tree=call_tree,
+    )
+
+
+def build_call_tree(
+    fn_stats: dict[FunctionKey, FunctionStat],
+    total_time: float,
+    root_filter: str | None = None,
+    leaf_filter: str | None = None,
+) -> CallTreeNode:
+    min_time_threshold = total_time * 0.002  # ignore branches < 0.2% of total
+
+    roots: list[FunctionKey] = []
+    if root_filter:
+        for k, stat in fn_stats.items():
+            if stat.category == "harness":
+                continue
+            if root_filter in stat.name or root_filter in stat.location:
+                roots.append(k)
+    else:
+        for k, stat in fn_stats.items():
+            if not stat.callers and stat.cumtime >= min_time_threshold:
+                roots.append(k)
+
+    if not roots and fn_stats:
+        non_harness = [s for s in fn_stats.values() if s.category != "harness"]
+        top = max(non_harness or list(fn_stats.values()), key=lambda s: s.cumtime)
+        roots = [top.key]
+
+    def expand_node(
+        key: FunctionKey,
+        current_cumtime: float,
+        ancestors: frozenset[FunctionKey],
+        depth: int,
+    ) -> CallTreeNode:
+        stat = fn_stats[key]
+        pct = (current_cumtime / max(total_time, 0.000001)) * 100.0
+        scale = (current_cumtime / stat.cumtime) if stat.cumtime > 0 else 1.0
+        scale = min(1.0, max(0.0, scale))
+        node = CallTreeNode(
+            name=stat.name,
+            location=stat.location,
+            category=stat.category,
+            cumtime=current_cumtime,
+            tottime=stat.tottime * scale,
+            ncalls=max(1, round(stat.ncalls * scale)),
+            percent=pct,
+        )
+
+        if depth > 35:
+            return node
+
+        new_ancestors = ancestors | {key}
+        for callee in stat.callees:
+            scaled_cumtime = callee.cumtime * scale
+            if scaled_cumtime < min_time_threshold:
+                continue
+            if callee.key in ancestors:
+                callee_stat = fn_stats.get(callee.key)
+                if callee_stat:
+                    node.children.append(
+                        CallTreeNode(
+                            name=f"{callee_stat.name} (recursive)",
+                            location=callee_stat.location,
+                            category=callee_stat.category,
+                            cumtime=scaled_cumtime,
+                            tottime=callee_stat.tottime * scale,
+                            ncalls=max(1, round(callee.ncalls * scale)),
+                            percent=(scaled_cumtime / max(total_time, 0.000001)) * 100.0,
+                        ),
+                    )
+            else:
+                child_node = expand_node(callee.key, scaled_cumtime, new_ancestors, depth + 1)
+                node.children.append(child_node)
+
+        return node
+
+    def unwrap_harness(nodes: list[CallTreeNode]) -> list[CallTreeNode]:
+        out: list[CallTreeNode] = []
+        for n in nodes:
+            if n.category == "harness":
+                out.extend(unwrap_harness(n.children))
+            else:
+                n.children = unwrap_harness(n.children)
+                out.append(n)
+        return out
+
+    root_children: list[CallTreeNode] = []
+    for r in roots:
+        stat = fn_stats[r]
+        root_children.append(expand_node(r, stat.cumtime, frozenset(), 0))
+
+    if not root_filter:
+        root_children = unwrap_harness(root_children)
+
+    if leaf_filter:
+
+        def prune_leaves(n: CallTreeNode) -> CallTreeNode | None:
+            matches = leaf_filter in n.name or leaf_filter in n.location
+            new_children = []
+            for c in n.children:
+                pruned = prune_leaves(c)
+                if pruned:
+                    new_children.append(pruned)
+            if matches or new_children:
+                n.children = new_children
+                return n
+            return None
+
+        filtered_children = []
+        for rc in root_children:
+            pruned = prune_leaves(rc)
+            if pruned:
+                filtered_children.append(pruned)
+        root_children = filtered_children
+
+    return CallTreeNode(
+        name="total",
+        location="kdl",
+        category="kdl",
+        cumtime=total_time,
+        tottime=0.0,
+        ncalls=1,
+        percent=100.0,
+        children=root_children,
+    )
+
+
+def say(text: str = "") -> None:
+    print(text)  # noqa: T201
+
+
+def print_terminal_report(
+    analysis: ProfileAnalysis,
+    *,
+    sort_by: str = "cumtime",
+    limit: int = 20,
+    show_all: bool = False,
+    callers_func: str | None = None,
+    callees_func: str | None = None,
+    ascii_only: bool = False,
+) -> None:
+    divider_char = "=" if ascii_only else "━"
+    sub_divider = "-" if ascii_only else "─"
+
+    say(divider_char * 86)
+    say(f"  KDL PERFORMANCE PROFILE: {analysis.target_name} (mode={analysis.mode}, repeat={analysis.repeat})")
+    dur_info = (
+        f"  Wall Time: {format_duration(analysis.total_wall_time)}  |  "
+        + f"CPU Time: {format_duration(analysis.total_cpu_time)}  |  "
+        + f"Calls: {analysis.total_calls:,}  |  "
+        + f"Throughput: {format_throughput(analysis.total_bytes, analysis.total_wall_time)} "
+        + f"({format_bytes(analysis.total_bytes)})"
+    )
+    say(dur_info)
+    say(divider_char * 86)
+
+    # 1. Pipeline Phases
+    if analysis.phases:
+        say("")
+        phase_title = f"Pipeline Phases ({len(analysis.phases)} recorded)"
+        say(f"{sub_divider * 2} {phase_title} " + (sub_divider * max(4, 82 - len(phase_title))))
+        header = f"  {'Phase':<34} {'Runs':>8} {'Duration':>10} {'% Total':>9}  {'Proportion':<12}"
+        say(header)
+        say("  " + (sub_divider * 82))
+
+        total_time = max(analysis.total_wall_time, sum(p.elapsed for p in analysis.phases), 0.000001)
+        visible_phases = sorted(analysis.phases, key=lambda p: p.elapsed, reverse=True)
+        for p in visible_phases:
+            pct = (p.elapsed / total_time) * 100.0
+            p_bar = format_bar(p.elapsed / total_time, width=12, ascii_only=ascii_only)
+            dur_str = format_duration(p.elapsed)
+            name_str = p.name if len(p.name) <= 34 else (p.name[:31] + "...")
+            say(f"  {name_str:<34} {p.count:>8,} {dur_str:>10} {pct:>8.1f}%  {p_bar}")
+
+    # 2. Slowest Individual Inputs (when multiple inputs were run)
+    if len(analysis.input_timings) > 1:
+        say("")
+        slow_title = f"Slowest Inputs (Top 10 of {len(analysis.input_timings)})"
+        say(f"{sub_divider * 2} {slow_title} " + (sub_divider * max(4, 82 - len(slow_title))))
+        say(f"  {'Input':<44} {'Size':>10} {'Total':>10} {'% Wall':>8}  {'Per Run':>10}")
+        say("  " + (sub_divider * 86))
+        sorted_inputs = sorted(analysis.input_timings, key=lambda it: it.elapsed, reverse=True)
+        wall_denom = max(analysis.total_wall_time, 0.000001)
+        for it in sorted_inputs[:10]:
+            iname = it.name if len(it.name) <= 44 else ("..." + it.name[-41:])
+            pct = (it.elapsed / wall_denom) * 100.0
+            per_run = format_duration(it.elapsed / max(1, it.runs))
+            say(
+                f"  {iname:<44} {format_bytes(it.size_bytes):>10} "
+                + f"{format_duration(it.elapsed):>10} {pct:>7.1f}%  {per_run:>10}",
+            )
+
+    # 3. Top Functions
+    fn_list = analysis.top_overall_functions if show_all else analysis.kdl_functions
+    title_kind = "All Functions" if show_all else "KDL Code"
+
+    if sort_by == "tottime":
+        sorted_fns = sorted(fn_list, key=lambda s: s.tottime, reverse=True)
+    elif sort_by == "calls":
+        sorted_fns = sorted(fn_list, key=lambda s: s.ncalls, reverse=True)
+    elif sort_by == "name":
+        sorted_fns = sorted(fn_list, key=lambda s: s.name.lower())
+    else:
+        sorted_fns = sorted(fn_list, key=lambda s: s.cumtime, reverse=True)
+
+    say("")
+    fn_title = f"Top {title_kind} Bottlenecks (Sorted by {sort_by})"
+    say(f"{sub_divider * 2} {fn_title} " + (sub_divider * max(4, 96 - len(fn_title))))
+    header = (
+        f"  {'Function':<28} {'Location':<24} {'Calls':>8} "
+        + f"{'Self':>9} {'%Tot':>6} {'Cumul':>9} {'%Cum':>6} {'PerCall':>9}"
+    )
+    say(header)
+    say("  " + (sub_divider * 99))
+
+    for s in sorted_fns[:limit]:
+        fname = s.name if len(s.name) <= 28 else (s.name[:25] + "...")
+        floc = s.location if len(s.location) <= 24 else ("..." + s.location[-21:])
+        calls_str = f"{s.ncalls:,}" if s.ncalls < 1000000 else f"{s.ncalls / 1000000:.1f}M"
+        tot_str = format_duration(s.tottime)
+        cum_str = format_duration(s.cumtime)
+        per_call_str = format_duration(s.percall_cum)
+        row = (
+            f"  {fname:<28} {floc:<24} {calls_str:>8} {tot_str:>9} {s.tottime_percent:>5.1f}% "
+            + f"{cum_str:>9} {s.cumtime_percent:>5.1f}% {per_call_str:>9}"
+        )
+        say(row)
+
+    # 4. Top non-KDL runtime / stdlib / built-in hotspots
+    if not show_all:
+        non_kdl = [
+            s
+            for s in analysis.top_overall_functions
+            if s.category != "kdl" and (s.cumtime_percent >= 0.5 or s.cumtime >= 0.001)
+        ]
+        if non_kdl:
+            say("")
+            ext_title = "Top External & Runtime Bottlenecks"
+            say(f"{sub_divider * 2} {ext_title} " + (sub_divider * max(4, 86 - len(ext_title))))
+            say(f"  {'Function':<30} {'Category':<12} {'Location':<20} {'Calls':>8} {'Cumul':>9} {'%Cum':>6}")
+            say("  " + (sub_divider * 89))
+            for s in non_kdl[:8]:
+                fname = s.name if len(s.name) <= 30 else (s.name[:27] + "...")
+                floc = s.location if len(s.location) <= 20 else ("..." + s.location[-17:])
+                calls_str = f"{s.ncalls:,}" if s.ncalls < 1000000 else f"{s.ncalls / 1000000:.1f}M"
+                cum_str = format_duration(s.cumtime)
+                say(
+                    f"  {fname:<30} {s.category:<12} {floc:<20} {calls_str:>8} {cum_str:>9} {s.cumtime_percent:>5.1f}%",
+                )
+
+    # 5. Callers for top bottlenecks or requested function
+    targets_for_callers: list[FunctionStat] = []
+    if callers_func is not None:
+        if callers_func == "":
+            targets_for_callers = sorted_fns[:5]
+        else:
+            targets_for_callers = [
+                s
+                for s in analysis.functions.values()
+                if s.category != "harness" and (callers_func.lower() in s.name.lower() or callers_func in s.location)
+            ][:5]
+    else:
+        targets_for_callers = [s for s in sorted_fns if s.callers][:3]
+
+    if targets_for_callers:
+        say("")
+        callers_title = "Callers of Key Bottlenecks"
+        say(f"{sub_divider * 2} {callers_title} " + (sub_divider * max(4, 86 - len(callers_title))))
+        arrow = "->" if ascii_only else "↳"
+        bullet = "*" if ascii_only else "•"
+        for stat in targets_for_callers:
+            cum_str = format_duration(stat.cumtime)
+            say(f"  {bullet} {stat.location} ({stat.name}) [cumtime: {cum_str}, calls: {stat.ncalls:,}]")
+            for caller in stat.callers[:4]:
+                caller_cum = format_duration(caller.cumtime)
+                pct = caller.percent_of_callee
+                say(
+                    f"      {arrow} {caller.ncalls:,} calls ({caller_cum}, {pct:4.1f}%) "
+                    + f"from {caller.location} ({caller.name})",
+                )
+
+    # 6. Callees details if requested
+    if callees_func is not None:
+        targets_for_callees = (
+            sorted_fns[:3]
+            if callees_func == ""
+            else [
+                s
+                for s in analysis.functions.values()
+                if s.category != "harness" and (callees_func.lower() in s.name.lower() or callees_func in s.location)
+            ][:5]
+        )
+        if targets_for_callees:
+            say("")
+            callees_title = "Callees of Functions"
+            say(f"{sub_divider * 2} {callees_title} " + (sub_divider * max(4, 86 - len(callees_title))))
+            arrow = "->" if ascii_only else "⮡"
+            bullet = "*" if ascii_only else "•"
+            for stat in targets_for_callees:
+                cum_str = format_duration(stat.cumtime)
+                say(f"  {bullet} {stat.location} ({stat.name}) [cumtime: {cum_str}] calls:")
+                for callee in stat.callees[:6]:
+                    callee_cum = format_duration(callee.cumtime)
+                    pct = callee.percent_of_caller
+                    say(
+                        f"      {arrow} {callee.ncalls:,} calls ({callee_cum}, {pct:4.1f}%) "
+                        + f"to {callee.location} ({callee.name})",
+                    )
+
+    say("")
+    say("Profile hints:")
+    say("  • Interactive HTML dashboard: python profiler.py --html report.html")
+    say("  • Interactive SVG flamegraph: python profiler.py --svg flame.svg")
+    say("  • Synthetic large benchmark:  python profiler.py --synthetic [--parse-only | --print-only]")
+    say("  • Export JSON / callers:      python profiler.py --json [report.json] / --callers [func]")
+
+
+def export_json(analysis: ProfileAnalysis) -> dict[str, t.Any]:
+    total_time = max(analysis.total_wall_time, 0.000001)
+
+    phases_data = [
+        {
+            "name": p.name,
+            "group": p.group,
+            "runs": p.count,
+            "duration": round(p.elapsed, 6),
+            "percent": round((p.elapsed / total_time) * 100.0, 2),
+        }
+        for p in analysis.phases
+    ]
+
+    inputs_data = [
+        {
+            "name": it.name,
+            "size_bytes": it.size_bytes,
+            "runs": it.runs,
+            "duration": round(it.elapsed, 6),
+            "percent": round((it.elapsed / total_time) * 100.0, 2),
+        }
+        for it in sorted(analysis.input_timings, key=lambda x: x.elapsed, reverse=True)[:50]
+    ]
+
+    def serialize_fn(s: FunctionStat) -> dict[str, t.Any]:
+        return {
+            "name": s.name,
+            "location": s.location,
+            "filename": s.filename,
+            "line": s.line,
+            "category": s.category,
+            "calls": s.ncalls,
+            "primitive_calls": s.pcalls,
+            "tottime": round(s.tottime, 6),
+            "cumtime": round(s.cumtime, 6),
+            "tottime_percent": round(s.tottime_percent, 2),
+            "cumtime_percent": round(s.cumtime_percent, 2),
+            "percall_tot": round(s.percall_tot, 6),
+            "percall_cum": round(s.percall_cum, 6),
+            "callers": [
+                {
+                    "name": c.name,
+                    "location": c.location,
+                    "category": c.category,
+                    "calls": c.ncalls,
+                    "cumtime": round(c.cumtime, 6),
+                    "percent_of_callee": round(c.percent_of_callee, 1),
+                }
+                for c in s.callers[:10]
+            ],
+            "callees": [
+                {
+                    "name": c.name,
+                    "location": c.location,
+                    "category": c.category,
+                    "calls": c.ncalls,
+                    "cumtime": round(c.cumtime, 6),
+                    "percent_of_caller": round(c.percent_of_caller, 1),
+                }
+                for c in s.callees[:10]
+            ],
+        }
+
+    bps = analysis.total_bytes / total_time if analysis.total_bytes > 0 else 0.0
+    return {
+        "target": analysis.target_name,
+        "mode": analysis.mode,
+        "repeat": analysis.repeat,
+        "total_bytes": analysis.total_bytes,
+        "total_docs": analysis.total_docs,
+        "throughput_bytes_per_sec": round(bps, 2),
+        "total_wall_time": round(analysis.total_wall_time, 6),
+        "total_cpu_time": round(analysis.total_cpu_time, 6),
+        "total_calls": analysis.total_calls,
+        "primitive_calls": analysis.primitive_calls,
+        "phases": phases_data,
+        "slowest_inputs": inputs_data,
+        "kdl_bottlenecks": [serialize_fn(s) for s in analysis.kdl_functions[:200]],
+        "top_overall": [serialize_fn(s) for s in analysis.top_overall_functions[:200]],
+        "call_tree": analysis.call_tree.to_dict() if analysis.call_tree else None,
+    }
+
+
+def generate_svg_flamegraph(
+    analysis: ProfileAnalysis,
+    width: int = 1200,
+    row_height: int = 20,
+) -> str:
+    """Generates a self-contained, interactive SVG flamegraph."""
+    tree = analysis.call_tree
+    if not tree or not tree.children:
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="100">'
+            + '<text x="20" y="50" font-family="sans-serif">No profiling frames recorded.</text></svg>'
+        )
+
+    nodes_layout: list[dict[str, t.Any]] = []
+    max_depth = 0
+
+    def layout_node(node: CallTreeNode, depth: int, x_frac: float, w_frac: float) -> None:
+        nonlocal max_depth
+        max_depth = max(max_depth, depth)
+
+        nodes_layout.append(
+            {
+                "node": node,
+                "depth": depth,
+                "x_frac": x_frac,
+                "w_frac": w_frac,
+            },
+        )
+
+        curr_x = x_frac
+        sum_child_time = sum(c.cumtime for c in node.children)
+        for child in node.children:
+            child_w = (child.cumtime / max(node.cumtime, sum_child_time, 0.000001)) * w_frac
+            if child_w < 0.0005:
+                continue
+            layout_node(child, depth + 1, curr_x, child_w)
+            curr_x += child_w
+
+    layout_node(tree, 0, 0.0, 1.0)
+
+    header_height = 60
+    chart_height = (max_depth + 2) * row_height
+    total_height = header_height + chart_height
+
+    def pick_color(category: str, name: str) -> str:
+        h_val = sum(ord(c) for c in name) % 5
+        if category == "kdl":
+            colors = ["#e67e22", "#d35400", "#e74c3c", "#f39c12", "#c0392b"]
+            return colors[h_val]
+        if category == "dependency":
+            colors = ["#8e44ad", "#9b59b6", "#5c6bc0", "#3f51b5", "#673ab7"]
+            return colors[h_val]
+        if category == "stdlib":
+            colors = ["#0097a7", "#00838f", "#0288d1", "#0277bd", "#00695c"]
+            return colors[h_val]
+        colors = ["#78909c", "#607d8b", "#90a4ae", "#546e7a", "#b0bec5"]
+        return colors[h_val]
+
+    def fit_label(label: str, px_width: float) -> str:
+        max_chars = int((px_width - 8) / 6.8)
+        if max_chars < 3:
+            return ""
+        if len(label) <= max_chars:
+            return label
+        return label[: max_chars - 1] + "…"
+
+    elements: list[str] = []
+    for item in nodes_layout:
+        node: CallTreeNode = item["node"]
+        depth: int = item["depth"]
+        x_frac: float = item["x_frac"]
+        w_frac: float = item["w_frac"]
+
+        y = total_height - ((depth + 1) * row_height) - 10
+        fill = pick_color(node.category, node.name)
+        dur_str = format_duration(node.cumtime).strip()
+        tip = f"{node.name} | {node.location} | {dur_str} ({node.percent:.1f}%) | {node.ncalls:,} calls"
+        safe_name = html.escape(node.name)
+        safe_tip = html.escape(tip)
+        px_w = max(0.5, w_frac * width)
+        txt = html.escape(fit_label(node.name, px_w))
+
+        elem = (
+            f'<g class="frame" data-name="{safe_name}" data-tip="{safe_tip}" '
+            + f'data-xf="{x_frac:.6f}" data-wf="{w_frac:.6f}" data-depth="{depth}">'
+            + f'<rect x="{x_frac * width:.2f}" y="{y}" width="{px_w:.2f}" '
+            + f'height="{row_height - 1}" fill="{fill}" rx="2" ry="2"/>'
+            + f'<text x="{x_frac * width + 4:.2f}" y="{y + row_height - 6}" font-size="11" '
+            + f'font-family="monospace" fill="#ffffff">{txt}</text></g>'
+        )
+        elements.append(elem)
+
+    frames_xml = "\n".join(elements)
+    throughput_str = format_throughput(analysis.total_bytes, analysis.total_wall_time)
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {total_height}" width="100%" height="100%" style="background:#1e1e1e; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <style>
+    .frame {{ cursor: pointer; transition: opacity 0.15s ease; }}
+    .frame:hover rect {{ filter: brightness(1.25); stroke: #ffffff; stroke-width: 1; }}
+    text {{ pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.8); user-select: none; }}
+    .btn {{ cursor: pointer; fill: #333; rx: 4; ry: 4; }}
+    .btn:hover {{ fill: #444; }}
+    .btn-text {{ fill: #eee; font-size: 12px; user-select: none; }}
+  </style>
+
+  <rect width="{width}" height="{total_height}" fill="#181824"/>
+
+  <!-- Header -->
+  <text x="20" y="30" font-size="16" font-weight="bold" fill="#ffffff">KDL Flamegraph: {html.escape(analysis.target_name)}</text>
+  <text x="20" y="48" font-size="12" fill="#aaaaaa">Total: {format_duration(analysis.total_wall_time).strip()} | CPU: {format_duration(analysis.total_cpu_time).strip()} | Throughput: {throughput_str} | Calls: {analysis.total_calls:,} (Click frame to zoom)</text>
+
+  <!-- Legend -->
+  <g transform="translate({width - 410}, 20)">
+    <rect x="0" y="0" width="12" height="12" fill="#e67e22" rx="2"/>
+    <text x="18" y="10" font-size="11" fill="#ddd">KDL</text>
+    <rect x="70" y="0" width="12" height="12" fill="#8e44ad" rx="2"/>
+    <text x="88" y="10" font-size="11" fill="#ddd">Dependency</text>
+    <rect x="180" y="0" width="12" height="12" fill="#0097a7" rx="2"/>
+    <text x="198" y="10" font-size="11" fill="#ddd">Stdlib</text>
+    <rect x="255" y="0" width="12" height="12" fill="#78909c" rx="2"/>
+    <text x="273" y="10" font-size="11" fill="#ddd">Built-in</text>
+  </g>
+
+  <!-- Reset Button -->
+  <g id="reset-btn" transform="translate({width - 80}, 20)">
+    <rect width="60" height="22" class="btn"/>
+    <text x="12" y="15" class="btn-text">Reset</text>
+  </g>
+
+  <!-- Frames -->
+  <g id="frames-group">
+    {frames_xml}
+  </g>
+
+  <!-- Status / Info text bar -->
+  <text id="status-bar" x="20" y="{total_height - 4}" font-size="11" fill="#888888">Hover over a box for details; click to zoom in; click Reset to zoom out.</text>
+
+  <script><![CDATA[
+    (function() {{
+      const width = {width};
+      const frames = Array.from(document.querySelectorAll('.frame'));
+      const statusBar = document.getElementById('status-bar');
+      const resetBtn = document.getElementById('reset-btn');
+
+      let zoomX = 0.0;
+      let zoomW = 1.0;
+
+      function fitText(name, pw) {{
+        const maxChars = Math.floor((pw - 8) / 6.8);
+        if (maxChars < 3) return '';
+        if (name.length <= maxChars) return name;
+        return name.slice(0, maxChars - 1) + '…';
+      }}
+
+      function updateZoom(newX, newW) {{
+        zoomX = newX;
+        zoomW = newW;
+        frames.forEach(g => {{
+          const xf = parseFloat(g.getAttribute('data-xf'));
+          const wf = parseFloat(g.getAttribute('data-wf'));
+          const name = g.getAttribute('data-name');
+          const rect = g.querySelector('rect');
+          const text = g.querySelector('text');
+
+          const newXf = (xf - zoomX) / zoomW;
+          const newWf = wf / zoomW;
+
+          if (newXf + newWf < -0.001 || newXf > 1.001) {{
+            g.style.display = 'none';
+          }} else {{
+            g.style.display = '';
+            const clampedStart = Math.max(0, newXf);
+            const clampedEnd = Math.min(1, newXf + newWf);
+            const px = clampedStart * width;
+            const pw = Math.max(0.5, (clampedEnd - clampedStart) * width);
+            rect.setAttribute('x', px.toFixed(2));
+            rect.setAttribute('width', pw.toFixed(2));
+            text.setAttribute('x', (px + 4).toFixed(2));
+            text.textContent = fitText(name, pw);
+          }}
+        }});
+      }}
+
+      frames.forEach(g => {{
+        g.addEventListener('click', e => {{
+          e.stopPropagation();
+          const xf = parseFloat(g.getAttribute('data-xf'));
+          const wf = parseFloat(g.getAttribute('data-wf'));
+          updateZoom(xf, wf);
+          statusBar.textContent = 'Zoomed into: ' + g.getAttribute('data-tip');
+        }});
+        g.addEventListener('mouseenter', () => {{
+          statusBar.textContent = g.getAttribute('data-tip');
+        }});
+        g.addEventListener('mouseleave', () => {{
+          statusBar.textContent = 'Hover over a box for details; click to zoom in; click Reset to zoom out.';
+        }});
+      }});
+
+      if (resetBtn) {{
+        resetBtn.addEventListener('click', () => {{
+          updateZoom(0.0, 1.0);
+          statusBar.textContent = 'Zoom reset to full view.';
+        }});
+      }}
+    }})();
+  ]]></script>
+</svg>"""
+    return svg
+
+
+def generate_html_report(analysis: ProfileAnalysis) -> str:
+    """Generates an all-in-one standalone HTML profile report."""
+    svg_flamegraph = generate_svg_flamegraph(analysis)
+    json_data = json.dumps(export_json(analysis))
+
+    target_name = html.escape(analysis.target_name)
+    wall_time_str = format_duration(analysis.total_wall_time).strip()
+    cpu_time_str = format_duration(analysis.total_cpu_time).strip()
+    throughput_str = format_throughput(analysis.total_bytes, analysis.total_wall_time)
+    calls_str = f"{analysis.total_calls:,}"
+
+    total_time = max(analysis.total_wall_time, 0.000001)
+    phases_html = []
+    for p in sorted(analysis.phases, key=lambda x: x.elapsed, reverse=True):
+        pct = (p.elapsed / total_time) * 100.0
+        dur_str = format_duration(p.elapsed).strip()
+        row = (
+            f"<tr><td>{html.escape(p.name)}</td><td>{html.escape(p.group or '-')}</td>"
+            + f'<td style="text-align:right;">{p.count:,}</td>'
+            + f'<td style="text-align:right;">{dur_str}</td>'
+            + f'<td style="text-align:right;">{pct:.1f}%</td>'
+            + f'<td><div class="progress-bar"><div class="progress-fill" style="width:{min(100.0, pct):.1f}%;"></div></div></td></tr>'
+        )
+        phases_html.append(row)
+    phases_rows = "\n".join(phases_html) if phases_html else "<tr><td colspan='6'>No phases recorded</td></tr>"
+
+    slowest_section = ""
+    if len(analysis.input_timings) > 1:
+        input_rows = []
+        for it in sorted(analysis.input_timings, key=lambda x: x.elapsed, reverse=True)[:15]:
+            pct = (it.elapsed / total_time) * 100.0
+            input_rows.append(
+                f"<tr><td style='font-family:monospace;'>{html.escape(it.name)}</td>"
+                + f"<td style='text-align:right;'>{format_bytes(it.size_bytes)}</td>"
+                + f"<td style='text-align:right;'>{format_duration(it.elapsed).strip()}</td>"
+                + f"<td style='text-align:right;'>{pct:.1f}%</td>"
+                + f"<td><div class='progress-bar'><div class='progress-fill' style='width:{min(100.0, pct):.1f}%;'></div></div></td></tr>",
+            )
+        slowest_section = f"""
+  <div class="section">
+    <div class="section-title">Slowest Inputs (Top {min(15, len(analysis.input_timings))} of {len(analysis.input_timings)})</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Input</th>
+          <th style="text-align:right;">Size</th>
+          <th style="text-align:right;">Duration</th>
+          <th style="text-align:right;">% Total</th>
+          <th>Proportion</th>
+        </tr>
+      </thead>
+      <tbody>
+        {"".join(input_rows)}
+      </tbody>
+    </table>
+  </div>"""
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>KDL Profile: {target_name}</title>
+  <style>
+    :root {{
+      --bg: #12121e;
+      --card-bg: #1a1a2e;
+      --card-border: #282846;
+      --text: #e0e0ea;
+      --text-muted: #8c8ca0;
+      --primary: #4e8cff;
+      --primary-hover: #6ea1ff;
+    }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }}
+    header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--card-border);
+    }}
+    h1 {{ font-size: 24px; font-weight: 700; color: #fff; }}
+    .subtitle {{ color: var(--text-muted); font-size: 14px; margin-top: 4px; }}
+    .stat-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }}
+    .stat-card {{
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    .stat-title {{ font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }}
+    .stat-value {{ font-size: 24px; font-weight: 700; color: #fff; margin-top: 6px; }}
+    .section {{
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }}
+    .section-title {{
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--card-border); }}
+    th {{ color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 11px; cursor: pointer; user-select: none; }}
+    th:hover {{ color: #fff; }}
+    tr:hover td {{ background: rgba(255,255,255,0.02); }}
+    .progress-bar {{ background: rgba(255,255,255,0.08); height: 8px; border-radius: 4px; overflow: hidden; width: 120px; }}
+    .progress-fill {{ background: var(--primary); height: 100%; border-radius: 4px; }}
+    .badge {{
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }}
+    .badge-kdl {{ background: rgba(230, 126, 34, 0.2); color: #f39c12; }}
+    .badge-dependency {{ background: rgba(155, 89, 182, 0.2); color: #9b59b6; }}
+    .badge-stdlib {{ background: rgba(0, 151, 167, 0.2); color: #00bcd4; }}
+    .badge-built-in {{ background: rgba(120, 144, 156, 0.2); color: #90a4ae; }}
+    .search-box {{
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      width: 280px;
+    }}
+    .search-box:focus {{ outline: none; border-color: var(--primary); }}
+    .tab-group {{ display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }}
+    .tab-btn {{
+      background: var(--bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .tab-btn.active {{
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }}
+    .tab-btn:hover:not(.active) {{ color: #fff; }}
+    .flamegraph-container {{
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      overflow: hidden;
+      margin-top: 12px;
+    }}
+    .drawer {{
+      background: rgba(0,0,0,0.25);
+      border-left: 3px solid var(--primary);
+      padding: 12px 16px;
+      margin: 8px 0;
+      border-radius: 4px;
+      font-size: 12px;
+    }}
+    .drawer h4 {{ color: #fff; margin-bottom: 6px; font-size: 13px; }}
+    .drawer table {{ font-size: 12px; }}
+    .jump-link {{ color: var(--primary); cursor: pointer; text-decoration: underline; }}
+    .jump-link:hover {{ color: var(--primary-hover); }}
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <h1>KDL Performance Profile</h1>
+      <div class="subtitle">Target: <strong>{target_name}</strong> &bull; Mode: <strong>{html.escape(analysis.mode)}</strong> &bull; Repeat: <strong>{analysis.repeat}</strong> &bull; Data: <strong>{format_bytes(analysis.total_bytes)}</strong></div>
+    </div>
+    <div>
+      <button class="tab-btn" onclick="downloadJSON()">Export JSON</button>
+    </div>
+  </header>
+
+  <div class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-title">Total Wall Time</div>
+      <div class="stat-value">{wall_time_str}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Total CPU Time</div>
+      <div class="stat-value">{cpu_time_str}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Throughput</div>
+      <div class="stat-value">{throughput_str}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Function Calls</div>
+      <div class="stat-value">{calls_str}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Top KDL Bottleneck</div>
+      <div class="stat-value" style="font-size: 18px; color: #f39c12;">
+        {html.escape(analysis.kdl_functions[0].name if analysis.kdl_functions else "N/A")}
+      </div>
+    </div>
+  </div>
+
+  <!-- Flamegraph Section -->
+  <div class="section">
+    <div class="section-title">
+      <span>Interactive Flamegraph</span>
+      <span style="font-size: 12px; color: var(--text-muted); font-weight: normal;">Click any rectangle to zoom into that call stack; click Reset in the SVG to zoom out.</span>
+    </div>
+    <div class="flamegraph-container">
+      {svg_flamegraph}
+    </div>
+  </div>
+
+  <!-- Pipeline Phases Section -->
+  <div class="section">
+    <div class="section-title">Pipeline Phases Breakdown</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Phase</th>
+          <th>Group</th>
+          <th style="text-align:right;">Runs</th>
+          <th style="text-align:right;">Duration</th>
+          <th style="text-align:right;">% Total</th>
+          <th>Proportion</th>
+        </tr>
+      </thead>
+      <tbody>
+        {phases_rows}
+      </tbody>
+    </table>
+  </div>
+{slowest_section}
+  <!-- Function Bottlenecks Explorer Section -->
+  <div class="section">
+    <div class="section-title">
+      <span>Function Hotspots &amp; Call Explorer</span>
+      <input type="text" id="fn-search" class="search-box" placeholder="Filter functions or files..." oninput="filterTable()">
+    </div>
+
+    <div class="tab-group">
+      <button class="tab-btn active" id="tab-kdl" onclick="setCategory('kdl')">KDL Code</button>
+      <button class="tab-btn" id="tab-all" onclick="setCategory('all')">All Functions</button>
+      <button class="tab-btn" id="tab-bi" onclick="setCategory('built-in')">Built-ins</button>
+      <button class="tab-btn" id="tab-std" onclick="setCategory('stdlib')">Standard Library</button>
+    </div>
+
+    <table id="fn-table">
+      <thead>
+        <tr>
+          <th onclick="sortTable('name')">Function</th>
+          <th onclick="sortTable('category')">Category</th>
+          <th onclick="sortTable('location')">Location</th>
+          <th onclick="sortTable('calls')" style="text-align:right;">Calls</th>
+          <th onclick="sortTable('tottime')" style="text-align:right;">Self Time</th>
+          <th onclick="sortTable('tottime_percent')" style="text-align:right;">% Self</th>
+          <th onclick="sortTable('cumtime')" style="text-align:right;">Cumul Time</th>
+          <th onclick="sortTable('cumtime_percent')" style="text-align:right;">% Cumul</th>
+          <th onclick="sortTable('percall_cum')" style="text-align:right;">Per Call</th>
+        </tr>
+      </thead>
+      <tbody id="fn-tbody">
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const profileData = {json_data};
+    let currentCategory = 'kdl';
+    let sortColumn = 'cumtime';
+    let sortAsc = false;
+
+    function formatDur(sec) {{
+      if (sec >= 1.0) return sec.toFixed(2) + 's';
+      if (sec >= 0.001) return (sec * 1000).toFixed(1) + 'ms';
+      return (sec * 1000000).toFixed(1) + 'µs';
+    }}
+
+    function escapeHtml(s) {{
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }}
+
+    function setCategory(cat) {{
+      currentCategory = cat;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      const tabMap = {{ 'kdl': 'tab-kdl', 'all': 'tab-all', 'built-in': 'tab-bi', 'stdlib': 'tab-std' }};
+      const activeBtn = document.getElementById(tabMap[cat] || 'tab-all');
+      if (activeBtn) activeBtn.classList.add('active');
+      renderTable();
+    }}
+
+    function sortTable(col) {{
+      if (sortColumn === col) {{
+        sortAsc = !sortAsc;
+      }} else {{
+        sortColumn = col;
+        sortAsc = (col === 'name' || col === 'location' || col === 'category');
+      }}
+      renderTable();
+    }}
+
+    function filterTable() {{
+      renderTable();
+    }}
+
+    function renderTable() {{
+      const query = document.getElementById('fn-search').value.toLowerCase();
+      let list = profileData.top_overall.slice();
+      if (currentCategory === 'kdl') {{
+        list = profileData.kdl_bottlenecks.slice();
+      }} else if (currentCategory !== 'all') {{
+        list = list.filter(fn => fn.category === currentCategory);
+      }}
+
+      if (query) {{
+        list = list.filter(fn => fn.name.toLowerCase().includes(query) || fn.location.toLowerCase().includes(query));
+      }}
+
+      list.sort((a, b) => {{
+        const v1 = a[sortColumn];
+        const v2 = b[sortColumn];
+        if (typeof v1 === 'string') return sortAsc ? v1.localeCompare(v2) : v2.localeCompare(v1);
+        return sortAsc ? (v1 - v2) : (v2 - v1);
+      }});
+
+      const tbody = document.getElementById('fn-tbody');
+      tbody.innerHTML = '';
+
+      list.slice(0, 100).forEach((fn, idx) => {{
+        const tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
+        tr.onclick = () => toggleDetails(idx, fn, tr);
+
+        const badgeClass = 'badge-' + (fn.category || 'stdlib');
+        tr.innerHTML = `
+          <td><strong>${{escapeHtml(fn.name)}}</strong></td>
+          <td><span class="badge ${{escapeHtml(badgeClass)}}">${{escapeHtml(fn.category)}}</span></td>
+          <td style="color:var(--text-muted); font-family:monospace;">${{escapeHtml(fn.location)}}</td>
+          <td style="text-align:right;">${{fn.calls.toLocaleString()}}</td>
+          <td style="text-align:right;">${{formatDur(fn.tottime)}}</td>
+          <td style="text-align:right;">${{fn.tottime_percent.toFixed(1)}}%</td>
+          <td style="text-align:right; font-weight:600;">${{formatDur(fn.cumtime)}}</td>
+          <td style="text-align:right; font-weight:600;">${{fn.cumtime_percent.toFixed(1)}}%</td>
+          <td style="text-align:right; color:var(--text-muted);">${{formatDur(fn.percall_cum)}}</td>
+        `;
+        tbody.appendChild(tr);
+      }});
+    }}
+
+    function toggleDetails(idx, fn, tr) {{
+      const next = tr.nextElementSibling;
+      if (next && next.classList.contains('details-row')) {{
+        next.remove();
+        return;
+      }}
+      document.querySelectorAll('.details-row').forEach(r => r.remove());
+
+      const detailsTr = document.createElement('tr');
+      detailsTr.className = 'details-row';
+      const td = document.createElement('td');
+      td.colSpan = 9;
+
+      let callersHtml = '<em>No callers recorded</em>';
+      if (fn.callers && fn.callers.length > 0) {{
+        callersHtml = '<table><thead><tr><th>Caller</th><th>Calls</th><th>Cumul Time</th><th>% of Callee</th></tr></thead><tbody>';
+        fn.callers.forEach(c => {{
+          callersHtml += `<tr>
+            <td><span class="jump-link" data-jump="${{escapeHtml(c.name)}}">${{escapeHtml(c.name)}}</span> <span style="color:var(--text-muted); font-size:11px;">(${{escapeHtml(c.location)}})</span></td>
+            <td>${{c.calls.toLocaleString()}}</td>
+            <td>${{formatDur(c.cumtime)}}</td>
+            <td>${{c.percent_of_callee.toFixed(1)}}%</td>
+          </tr>`;
+        }});
+        callersHtml += '</tbody></table>';
+      }}
+
+      let calleesHtml = '<em>No callees recorded</em>';
+      if (fn.callees && fn.callees.length > 0) {{
+        calleesHtml = '<table><thead><tr><th>Callee</th><th>Calls</th><th>Cumul Time</th><th>% of Caller</th></tr></thead><tbody>';
+        fn.callees.forEach(c => {{
+          calleesHtml += `<tr>
+            <td><span class="jump-link" data-jump="${{escapeHtml(c.name)}}">${{escapeHtml(c.name)}}</span> <span style="color:var(--text-muted); font-size:11px;">(${{escapeHtml(c.location)}})</span></td>
+            <td>${{c.calls.toLocaleString()}}</td>
+            <td>${{formatDur(c.cumtime)}}</td>
+            <td>${{c.percent_of_caller.toFixed(1)}}%</td>
+          </tr>`;
+        }});
+        calleesHtml += '</tbody></table>';
+      }}
+
+      td.innerHTML = `
+        <div class="drawer">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div>
+              <h4>Called by (Callers):</h4>
+              ${{callersHtml}}
+            </div>
+            <div>
+              <h4>Calls (Callees):</h4>
+              ${{calleesHtml}}
+            </div>
+          </div>
+        </div>
+      `;
+      td.querySelectorAll('.jump-link').forEach(el => {{
+        el.addEventListener('click', ev => {{
+          ev.stopPropagation();
+          searchFor(el.getAttribute('data-jump'));
+        }});
+      }});
+      detailsTr.appendChild(td);
+      tr.parentNode.insertBefore(detailsTr, tr.nextSibling);
+    }}
+
+    function searchFor(name) {{
+      document.getElementById('fn-search').value = name;
+      setCategory('all');
+    }}
+
+    function downloadJSON() {{
+      const blob = new Blob([JSON.stringify(profileData, null, 2)], {{ type: 'application/json' }});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'kdl_profile_' + (profileData.target.replace(/[^a-zA-Z0-9]/g, '_')) + '.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    }}
+
+    renderTable();
+  </script>
+</body>
+</html>"""
+    return html_content
+
+
+def _build_descendant_tree(section_idx: int, max_depth: int) -> str:
+    """Iteratively builds a descendant subtree of depth `max_depth` with siblings and side branches."""
+    if max_depth <= 0:
+        return ""
+    leaf_indent = "    " * (max_depth + 1)
+    inner = (
+        f'{leaf_indent}leaf "node-{section_idx}-{max_depth}" weight={max_depth * 1.25} active=#true\n'
+        + f"{leaf_indent}(metric)sample (i32){section_idx * 10 + max_depth} 0x{max_depth:x} status=#null\n"
+    )
+    for depth in range(max_depth - 1, 0, -1):
+        ind = "    " * (depth + 1)
+        child_ind = "    " * (depth + 2)
+        bool_str = "#true" if (section_idx + depth) % 2 == 0 else "#false"
+        parts = [
+            f'{ind}sibling-{depth} "k-{section_idx}-{depth}" step={depth} enabled={bool_str}\n',
+        ]
+        if depth % 3 == 0:
+            parts.append(
+                f"{ind}branch-{depth} mode=0o{depth + 8:o} {{\n"
+                + f'{child_ind}item "sub-{depth}" #true; item "alt-{depth}" {depth * 10}\n'
+                + f"{ind}}}\n",
+            )
+        if depth % 5 == 0:
+            parts.append(
+                f'{ind}/- skipped-{depth} "ignored" {{\n' + f"{child_ind}dead-leaf 0\n" + f"{ind}}}\n",
+            )
+        parts.append(
+            f'{ind}(layer)scope-{depth} "lvl-{depth}" depth={depth} {{\n' + inner + f"{ind}}}\n",
+        )
+        inner = "".join(parts)
+    return "    hierarchy {\n" + inner + "    }\n"
+
+
+def generate_synthetic_kdl(section_count: int = 25) -> str:
+    """Generates a realistic KDL 2.0 document with progressively deeper descendant trees."""
+    chunks: list[str] = [
+        "/* Synthetic KDL 2.0 benchmark document\n   /* with nested block comments */ */\n",
+        "// Top-level configuration metadata\n",
+    ]
+    for idx in range(section_count):
+        hex_val = f"0x{idx * 37 + 0x1A4:x}"
+        oct_val = f"0o{idx + 0o755:o}"
+        bin_val = f"0b{(idx % 64) + 0b10101:b}"
+        bool_lit = "#true" if idx % 2 == 0 else "#false"
+        descendant_tree = _build_descendant_tree(idx, min(idx, 120))
+        chunks.append(
+            f'service "svc-{idx}" (u16){8000 + (idx % 1000)} enabled={bool_lit} '
+            + f"mask={hex_val} mode={oct_val} flags={bin_val} ratio=1.{idx % 99:02d}e-2 {{\n"
+            + f"    // Endpoint definitions for service {idx}\n"
+            + f'    endpoint "/api/v2/items/{idx}" method="POST" timeout=30_000 retries=3 null_prop=#null\n'
+            + f'    pattern ##"^[a-z0-9_-]{{{1 + (idx % 8)},32}}$"## #"C:\\data\\shard_{idx}"#\n'
+            + '    escaped "line1\\nline2\\t\\"quoted\\"\\u{00e9}\\s  end"\n'
+            + '    description """\n'
+            + f"        Multi-line description for service #{idx}.\n"
+            + '        Contains "quotes" and preserved indentation.\n'
+            + '        """\n'
+            + "    limits max-conn=1_024_000 burst=256.5 inf-val=#inf nan-val=#nan \\\n"
+            + '        override="first" override="second"\n'
+            + '    /- disabled-child "ignored" foo=123 {\n'
+            + "        nested #false\n"
+            + "    }\n"
+            + f'    (meta)audit (date)"2026-11-17" (ipv4)"10.0.{(idx // 256) % 256}.{idx % 256}" '
+            + f'(url)"https://example.com/svc/{idx}" {{\n'
+            + f"        tag-{idx % 10} /- #null 10 20 30\n"
+            + "    }\n"
+            + descendant_tree
+            + "}\n\n",
+        )
+    return "".join(chunks)
+
+
+def load_upstream_inputs(filters: list[str] | None = None) -> list[InputDoc]:
+    docs: list[InputDoc] = []
+    if not os.path.isdir(TEST_DIR):
+        raise FileNotFoundError(f"Upstream test directory not found: {TEST_DIR}")
+    for root, _, filenames in os.walk(TEST_DIR):
+        for filename in sorted(filenames):
+            if os.path.splitext(filename)[1] != ".kdl":
+                continue
+            if filters and not any(f in filename for f in filters):
+                continue
+            path = os.path.join(root, filename)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            expect_fail = filename.endswith("_fail.kdl")
+            docs.append(InputDoc(name=filename, text=text, expect_fail=expect_fail))
+    docs.sort(key=lambda d: d.name)
+    return docs
+
+
+def load_file_inputs(paths: list[str], filters: list[str] | None = None) -> list[InputDoc]:
+    docs: list[InputDoc] = []
+    for p in paths:
+        if p == "-":
+            docs.append(InputDoc(name="<stdin>", text=sys.stdin.read()))
+        elif os.path.isdir(p):
+            for root, _, filenames in os.walk(p):
+                for filename in sorted(filenames):
+                    if os.path.splitext(filename)[1] != ".kdl":
+                        continue
+                    if filters and not any(f in filename for f in filters):
+                        continue
+                    full_path = os.path.join(root, filename)
+                    rel_name = os.path.relpath(full_path, p)
+                    with open(full_path, encoding="utf-8") as fh:
+                        docs.append(
+                            InputDoc(
+                                name=rel_name,
+                                text=fh.read(),
+                                expect_fail=filename.endswith("_fail.kdl"),
+                            ),
+                        )
+        else:
+            with open(p, encoding="utf-8") as fh:
+                docs.append(
+                    InputDoc(
+                        name=p,
+                        text=fh.read(),
+                        expect_fail=p.endswith("_fail.kdl"),
+                    ),
+                )
+    return docs
+
+
+def run_profile_workload(
+    docs: list[InputDoc],
+    *,
+    target_name: str,
+    mode: str,
+    repeat: int,
+    parse_config: kdl.ParseConfig,
+    print_config: kdl.PrintConfig,
+    is_test_suite: bool = False,
+    root_filter: str | None = None,
+    leaf_filter: str | None = None,
+) -> ProfileAnalysis:
+    parser = kdl.Parser(parse_config, print_config)
+    timer = PhaseTimer(enabled=True)
+    per_input_elapsed: dict[str, float] = {d.name: 0.0 for d in docs}
+    per_input_sizes: dict[str, int] = {d.name: len(d.text.encode("utf-8")) for d in docs}
+
+    # For print-only mode, pre-parse valid documents outside the profiler
+    preparsed: list[tuple[InputDoc, kdl.Document]] = []
+    if mode == "print":
+        for d in docs:
+            try:
+                parsed_doc = parser.parse(d.text)
+                preparsed.append((d, parsed_doc))
+            except (kdl.ParseError, OverflowError):
+                if not d.expect_fail and not is_test_suite:
+                    raise
+
+    pr = cProfile.Profile()
+    start_wall = time.perf_counter()
+
+    if mode == "print":
+        total_bytes = sum(per_input_sizes[d.name] for d, _ in preparsed) * repeat
+        total_docs = len(preparsed) * repeat
+        pr.enable()
+        for _ in range(repeat):
+            for d, parsed_doc in preparsed:
+                t0 = time.perf_counter()
+                parsed_doc.print(print_config)
+                dt = time.perf_counter() - t0
+                timer.add("Print", dt, group="print")
+                per_input_elapsed[d.name] += dt
+        pr.disable()
+    elif mode == "parse":
+        total_bytes = sum(per_input_sizes.values()) * repeat
+        total_docs = len(docs) * repeat
+        pr.enable()
+        for _ in range(repeat):
+            for d in docs:
+                t0 = time.perf_counter()
+                try:
+                    parser.parse(d.text)
+                except (kdl.ParseError, OverflowError):
+                    if not d.expect_fail and not is_test_suite:
+                        pr.disable()
+                        raise
+                    dt = time.perf_counter() - t0
+                    phase_name = "Parse (expected fail)" if is_test_suite else "Parse"
+                    timer.add(phase_name, dt, group="parse")
+                    per_input_elapsed[d.name] += dt
+                    continue
+                dt = time.perf_counter() - t0
+                phase_name = "Parse (valid docs)" if is_test_suite else "Parse"
+                timer.add(phase_name, dt, group="parse")
+                per_input_elapsed[d.name] += dt
+        pr.disable()
+    else:
+        total_bytes = sum(per_input_sizes.values()) * repeat
+        total_docs = len(docs) * repeat
+        pr.enable()
+        for _ in range(repeat):
+            for d in docs:
+                t0 = time.perf_counter()
+                try:
+                    parsed_doc = parser.parse(d.text)
+                except (kdl.ParseError, OverflowError):
+                    if not d.expect_fail and not is_test_suite:
+                        pr.disable()
+                        raise
+                    dt_parse = time.perf_counter() - t0
+                    phase_name = "Parse (expected fail)" if is_test_suite else "Parse"
+                    timer.add(phase_name, dt_parse, group="parse")
+                    per_input_elapsed[d.name] += dt_parse
+                    continue
+                dt_parse = time.perf_counter() - t0
+                phase_name = "Parse (valid docs)" if is_test_suite else "Parse"
+                timer.add(phase_name, dt_parse, group="parse")
+
+                t1 = time.perf_counter()
+                parsed_doc.print(print_config)
+                dt_print = time.perf_counter() - t1
+                timer.add("Print", dt_print, group="print")
+                per_input_elapsed[d.name] += dt_parse + dt_print
+        pr.disable()
+
+    elapsed_wall = time.perf_counter() - start_wall
+
+    active_names = {d.name for d, _ in preparsed} if mode == "print" else set(per_input_elapsed.keys())
+    input_timings = [
+        InputTiming(
+            name=name,
+            elapsed=per_input_elapsed[name],
+            size_bytes=per_input_sizes[name] * repeat,
+            runs=repeat,
+        )
+        for name in active_names
+    ]
+
+    return analyze_profile(
+        pr=pr,
+        wall_time=elapsed_wall,
+        phases=timer.phases,
+        input_timings=input_timings,
+        target_name=target_name,
+        mode=mode,
+        repeat=repeat,
+        total_bytes=total_bytes,
+        total_docs=total_docs,
+        root_filter=root_filter,
+        leaf_filter=leaf_filter,
+    )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Profile kdl-py performance: parse/print phases, function bottlenecks, and interactive flamegraphs.",
+    )
+    parser.add_argument(
+        "infiles",
+        nargs="*",
+        help="Path(s) to .kdl files or directories to profile ('-' for stdin). Defaults to upstream test suite.",
+    )
+    parser.add_argument(
+        "--tests",
+        dest="profileTests",
+        action="store_true",
+        default=False,
+        help="Profile the upstream KDL test suite (default if no input files or --synthetic are specified).",
+    )
+    parser.add_argument(
+        "--filter",
+        dest="filters",
+        nargs="+",
+        default=None,
+        metavar="SUBSTR",
+        help="When profiling --tests or directories, only include files matching any of these substrings.",
+    )
+    parser.add_argument(
+        "--synthetic",
+        dest="synthetic",
+        action="store_true",
+        default=False,
+        help="Profile a generated realistic large KDL 2.0 benchmark document.",
+    )
+    parser.add_argument(
+        "--synthetic-nodes",
+        dest="syntheticNodes",
+        type=int,
+        default=25,
+        metavar="N",
+        help="Number of top-level service blocks (with progressively deeper trees) for --synthetic (default: 25).",
+    )
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--mode",
+        dest="mode",
+        choices=["both", "parse", "print"],
+        default="both",
+        help="Which part of kdl-py to profile: 'both' (parse + print), 'parse', or 'print' (default: both).",
+    )
+    mode_group.add_argument(
+        "--parse-only",
+        dest="mode",
+        action="store_const",
+        const="parse",
+        help="Shorthand for --mode parse (only profile kdl.parse).",
+    )
+    mode_group.add_argument(
+        "--print-only",
+        dest="mode",
+        action="store_const",
+        const="print",
+        help="Shorthand for --mode print (pre-parse outside profiler, then only profile doc.print).",
+    )
+
+    parser.add_argument(
+        "-r",
+        "--repeat",
+        dest="repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of iterations to repeat the profiled workload (default: 1).",
+    )
+
+    val_group = parser.add_mutually_exclusive_group()
+    val_group.add_argument(
+        "--raw-values",
+        dest="valueMode",
+        action="store_const",
+        const="raw",
+        help="Keep kdl.Value wrapper objects (nativeUntaggedValues=False, nativeTaggedValues=False).",
+    )
+    val_group.add_argument(
+        "--native",
+        dest="valueMode",
+        action="store_const",
+        const="native",
+        help="Convert values to native Python types (nativeUntaggedValues=True, nativeTaggedValues=True).",
+    )
+    val_group.set_defaults(valueMode=None)
+
+    parser.add_argument(
+        "--html",
+        dest="htmlFile",
+        default=None,
+        metavar="PATH",
+        help="Generate a self-contained interactive HTML profile report with flamegraph and function explorer.",
+    )
+    parser.add_argument(
+        "--svg",
+        dest="svgFile",
+        default=None,
+        metavar="PATH",
+        help="Save a standalone interactive SVG flamegraph to the specified file.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="jsonFile",
+        nargs="?",
+        const="-",
+        default=None,
+        metavar="PATH",
+        help="Output profile statistics as JSON. Outputs to stdout if no path is given.",
+    )
+    parser.add_argument(
+        "--pstats",
+        dest="pstatsFile",
+        default=None,
+        metavar="PATH",
+        help="Save raw Python pstats data to the specified file for inspection with snakeviz/tuna.",
+    )
+    parser.add_argument(
+        "--sort",
+        dest="sortBy",
+        choices=["cumtime", "tottime", "calls", "name"],
+        default="cumtime",
+        help="Sort key for function tables in terminal output (default: cumtime).",
+    )
+    parser.add_argument(
+        "-n",
+        "--limit",
+        dest="limit",
+        type=int,
+        default=20,
+        help="Maximum number of functions to display in terminal tables (default: 20).",
+    )
+    parser.add_argument(
+        "--all",
+        dest="showAll",
+        action="store_true",
+        default=False,
+        help="Show all functions in tables, not just internal KDL code and top hotspots.",
+    )
+    parser.add_argument(
+        "--callers",
+        dest="callersFunc",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="FUNC",
+        help="Show callers for slowest functions (or specify a function name/location filter).",
+    )
+    parser.add_argument(
+        "--callees",
+        dest="calleesFunc",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="FUNC",
+        help="Show callees for slowest functions (or specify a function name/location filter).",
+    )
+    parser.add_argument(
+        "--root",
+        dest="root",
+        default=None,
+        metavar="ROOTFUNC",
+        help="Prune the flamegraph/call tree to start with the specified root node.",
+    )
+    parser.add_argument(
+        "--leaf",
+        dest="leaf",
+        default=None,
+        metavar="LEAFFUNC",
+        help="Prune the flamegraph/call tree to only show ancestors of the specified leaf node.",
+    )
+    parser.add_argument(
+        "-a",
+        "--ascii-only",
+        dest="asciiOnly",
+        action="store_true",
+        default=False,
+        help="Use ASCII-only characters in terminal tables and progress bars.",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        default=False,
+        help="Suppress terminal report output.",
+    )
+    return parser
+
+
+def main() -> None:
+    options = build_arg_parser().parse_args()
+    repeat = max(1, options.repeat)
+
+    is_test_suite = False
+    if options.synthetic:
+        num_blocks = max(1, options.syntheticNodes)
+        max_depth = 3 if num_blocks <= 1 else min(num_blocks - 1, 120) + 2
+        synth_text = generate_synthetic_kdl(num_blocks)
+        target_name = f"synthetic ({num_blocks} blocks, max depth {max_depth})"
+        docs = [InputDoc(name=target_name, text=synth_text)]
+    elif options.infiles and not options.profileTests:
+        docs = load_file_inputs(options.infiles, filters=options.filters)
+        if not docs:
+            say("No matching .kdl files found.")
+            sys.exit(1)
+        target_name = docs[0].name if len(docs) == 1 else f"{len(docs)} files"
+    else:
+        is_test_suite = True
+        docs = load_upstream_inputs(filters=options.filters)
+        if not docs:
+            say("No matching upstream tests found.")
+            sys.exit(1)
+        filter_desc = f", filter={options.filters}" if options.filters else ""
+        target_name = f"upstream_tests ({len(docs)} tests{filter_desc})"
+
+    # Configure ParseConfig and PrintConfig
+    if options.valueMode == "raw":
+        parse_config = kdl.ParseConfig(nativeUntaggedValues=False, nativeTaggedValues=False)
+    elif options.valueMode == "native":
+        parse_config = kdl.ParseConfig(nativeUntaggedValues=True, nativeTaggedValues=True)
+    elif is_test_suite:
+        parse_config = kdl.ParseConfig(nativeUntaggedValues=False)
+    else:
+        parse_config = kdl.ParseConfig()
+
+    if is_test_suite:
+        print_config = kdl.PrintConfig(
+            indent="    ",
+            respectRadix=False,
+            respectStringType=False,
+            exponent="E",
+            sortEntries=True,
+        )
+    else:
+        print_config = kdl.PrintConfig()
+
+    try:
+        analysis = run_profile_workload(
+            docs,
+            target_name=target_name,
+            mode=options.mode,
+            repeat=repeat,
+            parse_config=parse_config,
+            print_config=print_config,
+            is_test_suite=is_test_suite,
+            root_filter=options.root,
+            leaf_filter=options.leaf,
+        )
+    except kdl.ParseError as err:
+        print(f"ParseError while profiling {target_name}:\n{err}", file=sys.stderr)  # noqa: T201
+        sys.exit(1)
+
+    if options.pstatsFile:
+        analysis.stats.dump_stats(options.pstatsFile)
+        if not options.quiet and options.jsonFile != "-":
+            say(f"Saved raw pstats to {options.pstatsFile}")
+
+    if options.svgFile:
+        svg_content = generate_svg_flamegraph(analysis)
+        with open(options.svgFile, "w", encoding="utf-8") as fh:
+            fh.write(svg_content)
+        if not options.quiet and options.jsonFile != "-":
+            say(f"Saved interactive SVG flamegraph to {options.svgFile}")
+
+    if options.htmlFile:
+        html_content = generate_html_report(analysis)
+        with open(options.htmlFile, "w", encoding="utf-8") as fh:
+            fh.write(html_content)
+        if not options.quiet and options.jsonFile != "-":
+            say(f"Saved interactive HTML profile report to {options.htmlFile}")
+
+    if options.jsonFile:
+        json_str = json.dumps(export_json(analysis), indent=2)
+        if options.jsonFile == "-":
+            with contextlib.suppress(BrokenPipeError):
+                print(json_str)  # noqa: T201
+            return
+        with open(options.jsonFile, "w", encoding="utf-8") as fh:
+            fh.write(json_str)
+        if not options.quiet:
+            say(f"Saved profile JSON to {options.jsonFile}")
+        return
+
+    if not options.quiet:
+        print_terminal_report(
+            analysis=analysis,
+            sort_by=options.sortBy,
+            limit=options.limit,
+            show_all=options.showAll,
+            callers_func=options.callersFunc,
+            callees_func=options.calleesFunc,
+            ascii_only=options.asciiOnly,
+        )
+
+
+if __name__ == "__main__":
+    main()

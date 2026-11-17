@@ -1,0 +1,1 @@
+python profiler.py --synthetic --synthetic-nodes=50 --html=profile.html
