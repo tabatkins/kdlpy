@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast, Generic, overload, TypeVar
 
+from .unset import UNSET as UNSET
+
 if TYPE_CHECKING:
     import re
     import sys
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
         Callable,
         Iterable,
         Literal,
+        NoReturn,
         TypeAlias,
     )
 
@@ -24,6 +27,8 @@ if TYPE_CHECKING:
         Document,
         ExactValue,
         Hex,
+        Infinity,
+        NaN,
         Node,
         Null,
         Numberish,
@@ -37,6 +42,10 @@ if TYPE_CHECKING:
     from .parsing import ParseConfig
     from .printing import PrintConfig
     from .stream import Stream
+    from .unset import UnsetT as UnsetT
+
+    _ParseT = TypeVar("_ParseT")
+    ParseResult: TypeAlias = tuple[_ParseT | None, int]
 
     TagKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
     NameKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
@@ -51,7 +60,20 @@ if TYPE_CHECKING:
 
     KDLAny: TypeAlias = Document | Node | "KDLValue"
     KDLValue: TypeAlias = (
-        Value | Binary | Bool | Decimal | ExactValue | Hex | Null | Numberish | Octal | RawString | String | Stringish
+        Value
+        | Binary
+        | Bool
+        | Decimal
+        | ExactValue
+        | Hex
+        | Infinity
+        | NaN
+        | Null
+        | Numberish
+        | Octal
+        | RawString
+        | String
+        | Stringish
     )
 
     import datetime

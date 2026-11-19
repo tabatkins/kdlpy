@@ -9,200 +9,155 @@ import urllib.parse
 import uuid
 
 from . import t, types
+from .errors import ParseError
 
 if t.TYPE_CHECKING:
-    from .errors import ParseFragment
+    _NumConverter: t.TypeAlias = t.Callable[[t.Numberish, t.Stream, int, int], t.KDLishValue]
+    _StrConverter: t.TypeAlias = t.Callable[[t.Stringish, t.Stream, int, int], t.KDLishValue]
 
 
-def toNative(val: t.Value, pf: ParseFragment) -> t.KDLishValue:
+def toNative(val: t.Value, s: t.Stream, start: int, end: int) -> t.KDLishValue:
+    # Takes (s, start, end) instead of a ParseFragment to avoid slicing and allocating on valid values.
+    tag = val.tag
+    if tag is None:
+        return val
     if isinstance(val, types.Numberish):
-        if val.tag == "i8":
-            return i8(val, pf)
-        if val.tag == "i16":
-            return i16(val, pf)
-        if val.tag == "i32":
-            return i32(val, pf)
-        if val.tag == "i64":
-            return i64(val, pf)
-        if val.tag == "u8":
-            return u8(val, pf)
-        if val.tag == "u16":
-            return u16(val, pf)
-        if val.tag == "u32":
-            return u32(val, pf)
-        if val.tag == "u64":
-            return u64(val, pf)
-        if val.tag in ("f32", "f64"):
-            return int(val.value)
-        if val.tag in ("decimal64", "decimal128"):
-            return decim(val, pf)
-    if isinstance(val, types.Stringish):
-        if val.tag == "date-time":
-            return dateTime(val, pf)
-        if val.tag == "time":
-            return time(val, pf)
-        if val.tag == "date":
-            return date(val, pf)
-        if val.tag == "decimal":
-            return decim(val, pf)
-        if val.tag == "ipv4":
-            return ipv4(val, pf)
-        if val.tag == "ipv6":
-            return ipv6(val, pf)
-        if val.tag == "url":
-            return url(val, pf)
-        if val.tag == "uuid":
-            return _uuid(val, pf)
-        if val.tag == "regex":
-            return regex(val, pf)
-        if val.tag == "base64":
-            return b64(val, pf)
+        numConv = _NUMBER_CONVERTERS.get(tag)
+        if numConv is not None:
+            return numConv(val, s, start, end)
+    elif isinstance(val, types.Stringish):
+        strConv = _STRING_CONVERTERS.get(tag)
+        if strConv is not None:
+            return strConv(val, s, start, end)
     return val
 
 
-def i8(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**7
-    if not (-limit <= val.value < limit):
-        msg = f"{val.value} doesn't fit in an i8."
-        raise pf.error(msg)
-    return int(val.value)
+def _asFloat(val: t.Numberish, _s: t.Stream, _start: int, _end: int) -> float:
+    return float(val.value)
 
 
-def i16(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**15
-    if not (-limit <= val.value < limit):
-        msg = f"{val.value} doesn't fit in an i16."
-        raise pf.error(msg)
-    return int(val.value)
+def _makeIntConverter(low: int, high: int, label: str) -> _NumConverter:
+    def convert(val: t.Numberish, s: t.Stream, _start: int, end: int) -> int:
+        # Read once since Decimal.value is a computed property.
+        v = val.value
+        if not (low <= v < high):
+            raise ParseError(s, end, f"{v} doesn't fit in {label}.")
+        return int(v)
+
+    return convert
 
 
-def i32(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**31
-    if not (-limit <= val.value < limit):
-        msg = f"{val.value} doesn't fit in an i32."
-        raise pf.error(msg)
-    return int(val.value)
+_i8 = _makeIntConverter(-(2**7), 2**7, "an i8")
+_i16 = _makeIntConverter(-(2**15), 2**15, "an i16")
+_i32 = _makeIntConverter(-(2**31), 2**31, "an i32")
+_i64 = _makeIntConverter(-(2**63), 2**63, "an i64")
+_u8 = _makeIntConverter(0, 2**8, "a u8")
+_u16 = _makeIntConverter(0, 2**16, "a u16")
+_u32 = _makeIntConverter(0, 2**32, "a u32")
+_u64 = _makeIntConverter(0, 2**64, "a u64")
 
 
-def i64(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**63
-    if not (-limit <= val.value < limit):
-        msg = f"{val.value} doesn't fit in an i64."
-        raise pf.error(msg)
-    return int(val.value)
-
-
-def u8(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**8
-    if not (0 <= val.value < limit):
-        msg = f"{val.value} doesn't fit in a u8."
-        raise pf.error(msg)
-    return int(val.value)
-
-
-def u16(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**16
-    if not (0 <= val.value < limit):
-        msg = f"{val.value} doesn't fit in a u16."
-        raise pf.error(msg)
-    return int(val.value)
-
-
-def u32(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**32
-    if not (0 <= val.value < limit):
-        msg = f"{val.value} doesn't fit in a u32."
-        raise pf.error(msg)
-    return int(val.value)
-
-
-def u64(val: t.Numberish, pf: ParseFragment) -> int:
-    limit = 2**64
-    if not (0 <= val.value < limit):
-        msg = f"{val.value} doesn't fit in a u64."
-        raise pf.error(msg)
-    return int(val.value)
-
-
-def decim(val: t.Value, pf: ParseFragment) -> decimal.Decimal:
+def _decim(val: t.Value, s: t.Stream, start: int, end: int) -> decimal.Decimal:
     if isinstance(val, types.Numberish):
-        chars = pf.fragment.replace("_", "")
+        raw = s.chars[start:end]
+        chars = raw.replace("_", "") if "_" in raw else raw
     else:
         chars = val.value
     try:
         return decimal.Decimal(chars)
     except decimal.InvalidOperation as exc:
-        msg = f"Couldn't parse a decimal from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a decimal from {s.chars[start:end]}.") from exc
 
 
-def dateTime(val: t.Stringish, pf: ParseFragment) -> datetime.datetime:
+def _dateTime(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.datetime:
     try:
         return datetime.datetime.fromisoformat(val.value)
     except ValueError as exc:
-        msg = f"Couldn't parse a date-time from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a date-time from {s.chars[start:end]}.") from exc
 
 
-def time(val: t.Stringish, pf: ParseFragment) -> datetime.time:
+def _time(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.time:
     try:
         return datetime.time.fromisoformat(val.value)
     except ValueError as exc:
-        msg = f"Couldn't parse a date-time from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a time from {s.chars[start:end]}.") from exc
 
 
-def date(val: t.Stringish, pf: ParseFragment) -> datetime.date:
+def _date(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.date:
     try:
         return datetime.date.fromisoformat(val.value)
     except ValueError as exc:
-        msg = f"Couldn't parse a date from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a date from {s.chars[start:end]}.") from exc
 
 
-def ipv4(val: t.Stringish, pf: ParseFragment) -> ipaddress.IPv4Address:
+def _ipv4(val: t.Stringish, s: t.Stream, start: int, end: int) -> ipaddress.IPv4Address:
     try:
         return ipaddress.IPv4Address(val.value)
     except ipaddress.AddressValueError as exc:
-        msg = f"Couldn't parse an IPv4 address from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse an IPv4 address from {s.chars[start:end]}.") from exc
 
 
-def ipv6(val: t.Stringish, pf: ParseFragment) -> ipaddress.IPv6Address:
+def _ipv6(val: t.Stringish, s: t.Stream, start: int, end: int) -> ipaddress.IPv6Address:
     try:
         return ipaddress.IPv6Address(val.value)
     except ipaddress.AddressValueError as exc:
-        msg = f"Couldn't parse an IPv6 address from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse an IPv6 address from {s.chars[start:end]}.") from exc
 
 
-def url(val: t.Stringish, pf: ParseFragment) -> urllib.parse.ParseResult:
+def _url(val: t.Stringish, s: t.Stream, start: int, end: int) -> urllib.parse.ParseResult:
     try:
         return t.cast("urllib.parse.ParseResult", urllib.parse.urlparse(val.value))
     except ValueError as exc:
-        msg = f"Couldn't parse a url from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a url from {s.chars[start:end]}.") from exc
 
 
-def _uuid(val: t.Stringish, pf: ParseFragment) -> uuid.UUID:
+def _uuid(val: t.Stringish, s: t.Stream, start: int, end: int) -> uuid.UUID:
     try:
         return uuid.UUID(val.value)
     except Exception as exc:
-        msg = f"Couldn't parse a UUID from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a UUID from {s.chars[start:end]}.") from exc
 
 
-def regex(val: t.Stringish, pf: ParseFragment) -> re.Pattern:
+def _regex(val: t.Stringish, s: t.Stream, start: int, end: int) -> re.Pattern[str]:
     try:
         return re.compile(val.value)
     except Exception as exc:
-        msg = f"Couldn't parse a regex from {pf.fragment}."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, f"Couldn't parse a regex from {s.chars[start:end]}.") from exc
 
 
-def b64(val: t.Stringish, pf: ParseFragment) -> bytes:
+def _b64(val: t.Stringish, s: t.Stream, _start: int, end: int) -> bytes:
     try:
         return base64.b64decode(val.value.encode("utf-8"), validate=True)
     except Exception as exc:
-        msg = "Couldn't parse base64."
-        raise pf.error(msg) from exc
+        raise ParseError(s, end, "Couldn't parse base64.") from exc
+
+
+_NUMBER_CONVERTERS: dict[str, _NumConverter] = {
+    "i8": _i8,
+    "i16": _i16,
+    "i32": _i32,
+    "i64": _i64,
+    "u8": _u8,
+    "u16": _u16,
+    "u32": _u32,
+    "u64": _u64,
+    "f32": _asFloat,
+    "f64": _asFloat,
+    "decimal64": _decim,
+    "decimal128": _decim,
+}
+
+_STRING_CONVERTERS: dict[str, _StrConverter] = {
+    "date-time": _dateTime,
+    "time": _time,
+    "date": _date,
+    "decimal": _decim,
+    "ipv4": _ipv4,
+    "ipv6": _ipv6,
+    "url": _url,
+    "uuid": _uuid,
+    "regex": _regex,
+    "base64": _b64,
+}
+
+NATIVE_TAGS: frozenset[str] = frozenset(_NUMBER_CONVERTERS) | frozenset(_STRING_CONVERTERS)

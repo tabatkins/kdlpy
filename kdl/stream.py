@@ -1,92 +1,56 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import bisect
-import re
 
 from . import t
-
-if t.TYPE_CHECKING:
-    from .result import Result
 
 
 @dataclass
 class Stream:
-    _chars: str
-    _len: int
-    _lineBreaks: list[int]
+    chars: str
+    length: int
     startLine: int
     config: t.ParseConfig
+    fastUntagged: bool
 
     def __init__(self, chars: str, config: t.ParseConfig, startLine: int = 1) -> None:
-        self._chars = chars
-        self._len = len(chars)
-        self._lineBreaks = []
+        self.chars = chars
+        self.length = len(chars)
         self.startLine = startLine
         self.config = config
-        for i, char in enumerate(chars):
-            if char == "\n":
-                self._lineBreaks.append(i)
+        # When true, untagged values can return Python natives directly without allocating Value wrappers.
+        self.fastUntagged = not config.valueConverters and config.nativeUntaggedValues
 
     def __getitem__(self, key: int | slice) -> str:
         if isinstance(key, int):
-            if key < 0:
-                return ""
-        else:
-            if key.start < 0:
-                key = slice(0, key.stop, key.step)
-            if key.stop < 0:
-                key = slice(key.start, 0, key.step)
-        try:
-            return self._chars[key]
-        except IndexError:
+            if 0 <= key < self.length:
+                return self.chars[key]
             return ""
+        start = key.start
+        stop = key.stop
+        if start is not None and start < 0:
+            start = 0
+        if stop is not None and stop < 0:
+            stop = 0
+        return self.chars[start : stop : key.step]
 
     def eof(self, index: int) -> bool:
-        return index >= self._len
+        return index >= self.length
 
     def __len__(self) -> int:
-        return self._len
+        return self.length
+
+    def loc(self, index: int) -> tuple[int, int]:
+        # Computed lazily on error via C-level str methods instead of indexing all newlines up front.
+        if index <= 0:
+            return (self.startLine, index + 1)
+        line = self.chars.count("\n", 0, index) + self.startLine
+        # rfind returns -1 on line 1, giving `index - (-1) == index + 1` (1-indexed column).
+        col = index - self.chars.rfind("\n", 0, index)
+        return (line, col)
 
     def line(self, index: int) -> int:
-        # Zero-based line index
-        lineIndex = bisect.bisect_left(self._lineBreaks, index)
-        return lineIndex + self.startLine
+        return self.loc(index)[0]
 
     def col(self, index: int) -> int:
-        lineIndex = bisect.bisect_left(self._lineBreaks, index)
-        if lineIndex == 0:
-            return index + 1
-        startOfCol = self._lineBreaks[lineIndex - 1]
-        return index - startOfCol
-
-    def loc(self, index: int) -> str:
-        return f"{self.line(index)}:{self.col(index)}"
-
-    def skipTo(self, start: int, text: str) -> Result[str]:
-        # Skip forward until encountering `text`.
-        # Produces the text encountered before this point.
-        i = start
-        textLen = len(text)
-        while not self.eof(i):
-            if self[i : i + textLen] == text:
-                break
-            i += 1
-        if self[i : i + textLen] == text:
-            return Result(self[start:i], i)
-        else:
-            return Result.fail(start)
-
-    def matchRe(self, start: int, pattern: re.Pattern) -> Result[re.Match]:
-        match = pattern.match(self._chars, start)
-        if match:
-            return Result(match, match.end())
-        else:
-            return Result.fail(start)
-
-    def searchRe(self, start: int, pattern: re.Pattern) -> Result[re.Match]:
-        match = pattern.search(self._chars, start)
-        if match:
-            return Result(match, match.end())
-        else:
-            return Result.fail(start)
+        return self.loc(index)[1]

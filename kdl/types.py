@@ -1,15 +1,44 @@
 from __future__ import annotations
 
+import base64
 import dataclasses
-import re
-from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
+import datetime
+import decimal
+import ipaddress
+import math
+import re
+import urllib.parse
+import uuid
 
 from . import printing, t
+from .chars import NL_SET, isBareIdent
 
 if t.TYPE_CHECKING:
     VT = t.TypeVar("VT")
     LooseEntry = tuple[str | None, t.Any]
+
+
+def _entrySortKey(entry: tuple[str | None, t.Any]) -> str:
+    return entry[0] or ""
+
+
+# Precomputed indentation strings per indent unit, grown lazily for deep trees.
+_INITIAL_INDENT_DEPTH = 16
+_INDENTS: dict[str, list[str]] = {
+    unit: [unit * i for i in range(_INITIAL_INDENT_DEPTH)] for unit in ("\t", "    ", "  ", "")
+}
+
+
+def _getIndents(unit: str, minLevel: int = 0) -> list[str]:
+    indents = _INDENTS.get(unit)
+    if indents is None:
+        depth = max(_INITIAL_INDENT_DEPTH, minLevel + 1)
+        indents = [unit * i for i in range(depth)]
+        _INDENTS[unit] = indents
+    elif minLevel >= len(indents):
+        indents.extend(unit * i for i in range(len(indents), minLevel + _INITIAL_INDENT_DEPTH))
+    return indents
 
 
 @dataclass
@@ -18,15 +47,18 @@ class Document:
     printConfig: t.PrintConfig | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        config = config or self.printConfig or printing.defaults
-        s = ""
-        for node in self.nodes:
-            node = toKdlNode(node)
-            s += node.print(config, 0)
-        if s == "":
+        cfg = config or self.printConfig or printing.defaults
+        if not self.nodes:
             # always end a kdl doc with a newline
-            s = "\n"
-        return s
+            return "\n"
+        out: list[str] = []
+        indents = _getIndents(cfg.indent)
+        for node in self.nodes:
+            childNode = node if isinstance(node, Node) else toKdlNode(node)
+            _printNodeInto(childNode, out, cfg, 0, indents)
+        if not out:
+            return "\n"
+        return "".join(out)
 
     @t.overload
     def get(self, key: t.NodeKey) -> Node | None:  # noqa: F811
@@ -76,44 +108,12 @@ class Node:
         config: t.PrintConfig | None = None,
         indentLevel: int = 0,
     ) -> str:
-        if config is None:
-            config = printing.defaults
-
-        s = config.indent * indentLevel
-
-        if self.tag is not None:
-            s += f"({printIdent(self.tag)})"
-
-        s += printIdent(self.name)
-
-        entries: t.Iterable[tuple[str | None, t.Any]]
-        if config.sortEntries:
-            entries = sorted(self.entries, key=lambda x: x[0] or "")
-        else:
-            entries = self.entries
-        for name, value in entries:
-            value = toKdlValue(value)
-            if not config.printNulls and isinstance(value, Null):
-                continue
-            if name is None:
-                s += f" {value.print(config)}"
-            else:
-                s += f" {printIdent(name)}={value.print(config)}"
-
-        if self.nodes:
-            childrenText = ""
-            for child in self.nodes:
-                child = toKdlNode(child)
-                childrenText += child.print(config=config, indentLevel=indentLevel + 1)
-            if childrenText:
-                s += " {\n"
-                s += childrenText
-                s += config.indent * indentLevel + "}"
-        if config.semicolons:
-            s += ";\n"
-        else:
-            s += "\n"
-        return s
+        cfg = config if config is not None else printing.defaults
+        level = max(0, indentLevel)
+        out: list[str] = []
+        indents = _getIndents(cfg.indent, level)
+        _printNodeInto(self, out, cfg, level, indents)
+        return "".join(out)
 
     @t.overload
     def get(self, key: t.NodeKey) -> Node | None:  # noqa: F811
@@ -169,13 +169,96 @@ class Node:
         return self.print()
 
 
-class Value(metaclass=ABCMeta):
+def _printNodeInto(
+    node: Node,
+    out: list[str],
+    config: t.PrintConfig,
+    indentLevel: int,
+    indents: list[str],
+) -> None:
+    # Appends chunks into a single shared list to avoid O(N^2) string concatenation across subtrees.
+    append = out.append
+    identCache = _IDENT_CACHE
+    indentStr = indents[indentLevel]
+
+    # Inline cache lookup is safe with `or` because printIdent() never returns "".
+    nameStr = identCache.get(node.name) or printIdent(node.name)
+    if node.tag is not None:
+        tagStr = identCache.get(node.tag) or printIdent(node.tag)
+        append(f"{indentStr}({tagStr}){nameStr}")
+    else:
+        append(f"{indentStr}{nameStr}" if indentStr else nameStr)
+
+    entries: t.Iterable[tuple[str | None, t.Any]]
+    if config.sortEntries:
+        entries = sorted(node.entries, key=_entrySortKey)
+    else:
+        entries = node.entries
+
+    printNulls = config.printNulls
+    for name, value in entries:
+        # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives;
+        # subclasses (e.g. IntEnum) still fall through to toKdlValue().
+        valType = type(value)
+        if valType is str:
+            valStr = identCache.get(value) or printIdent(value)
+        elif value is True:
+            valStr = "#true"
+        elif value is False:
+            valStr = "#false"
+        elif valType is float:
+            if math.isfinite(value):
+                valStr = str(value)
+            elif math.isnan(value):
+                valStr = "#nan"
+            else:
+                valStr = "#inf" if value > 0 else "#-inf"
+        elif valType is int:
+            valStr = str(value)
+        elif value is None:
+            if not printNulls:
+                continue
+            valStr = "#null"
+        elif isinstance(value, Value):
+            if not printNulls and isinstance(value, Null):
+                continue
+            valStr = value.print(config)
+        else:
+            kdlVal = toKdlValue(value)
+            if not printNulls and isinstance(kdlVal, Null):
+                continue
+            valStr = kdlVal.print(config)
+
+        if name is None:
+            append(f" {valStr}")
+        else:
+            keyStr = identCache.get(name) or printIdent(name)
+            append(f" {keyStr}={valStr}")
+
+    if node.nodes:
+        append(" {\n")
+        childLevel = indentLevel + 1
+        if childLevel >= len(indents):
+            unit = config.indent
+            indents.extend(unit * i for i in range(len(indents), childLevel + _INITIAL_INDENT_DEPTH))
+        for child in node.nodes:
+            childNode = child if isinstance(child, Node) else toKdlNode(child)
+            _printNodeInto(childNode, out, config, childLevel, indents)
+        if config.semicolons:
+            append(f"{indentStr}}};\n" if indentStr else "};\n")
+        else:
+            append(f"{indentStr}}}\n" if indentStr else "}\n")
+    else:
+        append(";\n" if config.semicolons else "\n")
+
+
+class Value:
+    # Plain base class (not ABCMeta) so isinstance(x, Value/Numberish/Stringish) uses C's fast MRO check.
     value: t.Any
     tag: str | None
 
-    @abstractmethod
     def print(self, config: t.PrintConfig | None = None) -> str:
-        pass
+        raise NotImplementedError
 
     def matchesKey(self, key: t.ValueKey) -> bool:
         return valueMatchesKey(self, key)
@@ -192,13 +275,15 @@ class ExactValue(Value):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        return printTag(self.tag) + self.chars
+        if self.tag is None:
+            return self.chars
+        return f"({printIdent(self.tag)}){self.chars}"
 
     def __str__(self) -> str:
         return self.print()
 
 
-class Numberish(Value, metaclass=ABCMeta):
+class Numberish(Value):  # pylint: disable=abstract-method
     pass
 
 
@@ -208,14 +293,11 @@ class Binary(Numberish):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        s = printTag(self.tag)
-        if config.respectRadix:
-            s += bin(self.value)
-        else:
-            s += str(self.value)
-        return s
+        cfg = config if config is not None else printing.defaults
+        numStr = bin(self.value) if cfg.respectRadix else str(self.value)
+        if self.tag is None:
+            return numStr
+        return f"({printIdent(self.tag)}){numStr}"
 
     def __str__(self) -> str:
         return self.print()
@@ -227,14 +309,11 @@ class Octal(Numberish):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        s = printTag(self.tag)
-        if config.respectRadix:
-            s += oct(self.value)
-        else:
-            s += str(self.value)
-        return s
+        cfg = config if config is not None else printing.defaults
+        numStr = oct(self.value) if cfg.respectRadix else str(self.value)
+        if self.tag is None:
+            return numStr
+        return f"({printIdent(self.tag)}){numStr}"
 
     def __str__(self) -> str:
         return self.print()
@@ -248,18 +327,20 @@ class Decimal(Numberish):
 
     @property
     def value(self) -> float:
-        return self.mantissa * (10.0**self.exponent)
+        if self.exponent == 0:
+            return float(self.mantissa)
+        # Parse via strtod rather than `mantissa * 10.0**exponent` to avoid OverflowError and double-rounding.
+        return float(f"{self.mantissa}e{self.exponent}")
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        s = printTag(self.tag) + str(self.mantissa)
+        cfg = config if config is not None else printing.defaults
+        s = str(self.mantissa)
         if self.exponent != 0:
-            s += config.exponent
-            if self.exponent > 0:
-                s += "+"
-            s += str(self.exponent)
-        return s
+            sign = "+" if self.exponent > 0 else ""
+            s = f"{s}{cfg.exponent}{sign}{self.exponent}"
+        if self.tag is None:
+            return s
+        return f"({printIdent(self.tag)}){s}"
 
     def __str__(self) -> str:
         return self.print()
@@ -271,12 +352,10 @@ class Infinity(Numberish):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        if self.value == float("inf"):
-            return printTag(self.tag) + "#inf"
-        else:
-            return printTag(self.tag) + "#-inf"
+        kw = "#inf" if self.value > 0 else "#-inf"
+        if self.tag is None:
+            return kw
+        return f"({printIdent(self.tag)}){kw}"
 
     def __str__(self) -> str:
         return self.print()
@@ -288,7 +367,9 @@ class NaN(Numberish):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        return printTag(self.tag) + "#nan"
+        if self.tag is None:
+            return "#nan"
+        return f"({printIdent(self.tag)})#nan"
 
     def __str__(self) -> str:
         return self.print()
@@ -300,14 +381,11 @@ class Hex(Numberish):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        s = printTag(self.tag)
-        if config.respectRadix:
-            s += hex(self.value)
-        else:
-            s += str(self.value)
-        return s
+        cfg = config if config is not None else printing.defaults
+        numStr = hex(self.value) if cfg.respectRadix else str(self.value)
+        if self.tag is None:
+            return numStr
+        return f"({printIdent(self.tag)}){numStr}"
 
     def __str__(self) -> str:
         return self.print()
@@ -319,12 +397,10 @@ class Bool(Value):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        if self.value:
-            return printTag(self.tag) + "#true"
-        else:
-            return printTag(self.tag) + "#false"
+        kw = "#true" if self.value else "#false"
+        if self.tag is None:
+            return kw
+        return f"({printIdent(self.tag)}){kw}"
 
     def __str__(self) -> str:
         return self.print()
@@ -339,15 +415,15 @@ class Null(Value):
         return None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        return printTag(self.tag) + "#null"
+        if self.tag is None:
+            return "#null"
+        return f"({printIdent(self.tag)})#null"
 
     def __str__(self) -> str:
         return self.print()
 
 
-class Stringish(Value, metaclass=ABCMeta):
+class Stringish(Value):  # pylint: disable=abstract-method
     pass
 
 
@@ -357,24 +433,26 @@ class RawString(Stringish):
     tag: str | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
-        if config.respectStringType:
+        cfg = config if config is not None else printing.defaults
+        tagStr = f"({printIdent(self.tag)})" if self.tag is not None else ""
+        if cfg.respectStringType and not any(ch in NL_SET for ch in self.value):
             hashes = "#" * findRequiredHashCount(self.value)
-            return f'{printTag(self.tag)}r{hashes}"{self.value}"{hashes}'
-        else:
-            return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+            return f'{tagStr}{hashes}"{self.value}"{hashes}'
+        return f'{tagStr}"{escapedFromRaw(self.value)}"'
 
     def __str__(self) -> str:
         return self.print()
 
 
 def findRequiredHashCount(chars: str) -> int:
-    for i in range(0, 100):
+    if '"' not in chars:
+        return 1
+    for i in range(1, 100):
         ender = '"' + ("#" * i)
         if ender not in chars:
             return i
-    assert False, "A raw string requires more than 100 hashes???"
+    msg = "A raw string requires more than 100 hashes???"
+    raise ValueError(msg)
 
 
 @dataclass
@@ -384,28 +462,45 @@ class String(Stringish):
     multiline: bool = False
 
     def print(self, config: t.PrintConfig | None = None) -> str:
-        if config is None:
-            config = printing.defaults
         if self.multiline:
             return ""
-        elif isBareIdent(self.value):
-            return printTag(self.tag) + self.value
-        else:
-            return f'{printTag(self.tag)}"{escapedFromRaw(self.value)}"'
+        body = _IDENT_CACHE.get(self.value) or printIdent(self.value)
+        if self.tag is None:
+            return body
+        tagStr = _IDENT_CACHE.get(self.tag) or printIdent(self.tag)
+        return f"({tagStr}){body}"
 
     def __str__(self) -> str:
         return self.print()
 
 
+_KDLISH_TYPES = (
+    str,
+    int,
+    float,
+    bool,
+    decimal.Decimal,
+    datetime.time,
+    datetime.date,
+    datetime.datetime,
+    ipaddress.IPv4Address,
+    ipaddress.IPv6Address,
+    urllib.parse.ParseResult,
+    uuid.UUID,
+    re.Pattern,
+    bytes,
+    Value,
+)
+
+
 def toKdlNode(val: t.Any) -> Node:
     if isinstance(val, Node):
         return val
-    if not callable(getattr(val, "to_kdl", None)):
+    toKdl = getattr(val, "to_kdl", None)
+    if not callable(toKdl):
         msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
-        raise Exception(
-            msg,
-        )
-    node = val.to_kdl()
+        raise Exception(msg)
+    node = toKdl()
     if not isinstance(node, Node):
         msg = f"Expected object to convert to KDL Node. Got:\n{val!r}"
         raise Exception(msg)
@@ -419,13 +514,6 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
     or an object with .to_kdl() that returns one of the above)
     into a KDLValue
     """
-    import base64
-    import datetime
-    import decimal
-    import ipaddress
-    import urllib
-    import uuid
-
     if isinstance(val, Value):
         return val
     if val is None:
@@ -434,8 +522,14 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
         return Bool(val)
     if isinstance(val, str):
         return String(val)
-    if isinstance(val, (int, float)):
+    if isinstance(val, int):
         return Decimal(val)
+    if isinstance(val, float):
+        if math.isfinite(val):
+            return Decimal(val)
+        if math.isnan(val):
+            return NaN(val)
+        return Infinity(val)
     if isinstance(val, decimal.Decimal):
         return String(str(val), "decimal")
     if isinstance(val, datetime.datetime):
@@ -455,58 +549,30 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
     if isinstance(val, re.Pattern):
         return RawString(val.pattern, "regex")
     if isinstance(val, bytes):
-        return String(base64.b64encode(val).decode("utf-8"), "base-64")
+        return String(base64.b64encode(val).decode("utf-8"), "base64")
 
-    if not callable(getattr(val, "to_kdl", None)):
+    toKdl = getattr(val, "to_kdl", None)
+    if not callable(toKdl):
         msg = f"Can't convert object to KDL for serialization. Got:\n{val!r}"
-        raise Exception(
-            msg,
-        )
+        raise Exception(msg)
 
-    convertedVal = val.to_kdl()
+    convertedVal = toKdl()
     if isKdlishValue(convertedVal):
         return toKdlValue(convertedVal)
-    else:
-        msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
-        raise Exception(msg)
+    msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
+    raise Exception(msg)
 
 
 def isKdlishValue(val: t.Any) -> bool:
-    import datetime
-    import decimal
-    import ipaddress
-    import urllib
-    import uuid
-
     if val is None:
         return True
-    return isinstance(
-        val,
-        (
-            str,
-            int,
-            float,
-            bool,
-            decimal.Decimal,
-            datetime.time,
-            datetime.date,
-            datetime.datetime,
-            ipaddress.IPv4Address,
-            ipaddress.IPv6Address,
-            urllib.parse.ParseResult,
-            uuid.UUID,
-            re.Pattern,
-            bytes,
-            Value,
-        ),
-    )
+    return isinstance(val, _KDLISH_TYPES)
 
 
 def printTag(tag: str | None) -> str:
     if tag is not None:
         return f"({printIdent(tag)})"
-    else:
-        return ""
+    return ""
 
 
 def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
@@ -515,58 +581,53 @@ def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
     if isinstance(key, tuple):
         tagKey, nameKey = key
         return tagMatchesKey(node.tag, tagKey) and nameMatchesKey(node.name, nameKey)
-    else:
-        return nameMatchesKey(node.name, key)
+    return nameMatchesKey(node.name, key)
 
 
 def valueMatchesKey(value: t.Any, key: t.ValueKey) -> bool:
     # Need to allow for both Value and values that were converted to other types
     # non-Value objects are untagged, by definition
-    if isinstance(value, Value):
-        tag = value.tag
-    else:
-        tag = None
+    tag = value.tag if isinstance(value, Value) else None
     if isinstance(key, tuple):
         tagKey, typeKey = key
         return tagMatchesKey(tag, tagKey) and typeMatchesKey(value, typeKey)
-    else:
-        return tagMatchesKey(tag, key)
+    return tagMatchesKey(tag, key)
 
 
 def tagMatchesKey(val: str | None, key: t.TagKey) -> bool:
-    if key == Ellipsis:
+    if key is Ellipsis:
         return True
-    elif key is None:
+    if key is None:
         return val is None
-    elif isinstance(key, str):
+    if isinstance(key, str):
         return val == key
-    elif isinstance(key, re.Pattern):
+    if isinstance(key, re.Pattern):
         if val is None:
             return False
         return bool(key.match(val))
-    elif callable(key):
+    if callable(key):
         return bool(key(val))
     msg = f"Invalid TagKey {key!r}"
     raise Exception(msg)
 
 
-def nameMatchesKey(val: str, key: t.NameKey) -> bool:
-    if key == Ellipsis:
+def nameMatchesKey(val: str | None, key: t.NameKey) -> bool:
+    if key is Ellipsis or key is None:
         return True
-    elif key is None:
-        return True
-    elif isinstance(key, str):
+    if isinstance(key, str):
         return val == key
-    elif isinstance(key, re.Pattern):
+    if isinstance(key, re.Pattern):
+        if val is None:
+            return False
         return bool(key.match(val))
-    elif callable(key):
+    if callable(key):
         return bool(key(val))
     msg = f"Invalid NameKey {key!r}"
     raise Exception(msg)
 
 
-def typeMatchesKey(val: Value, key: t.TypeKey) -> bool:
-    if key == Ellipsis:
+def typeMatchesKey(val: t.Any, key: t.TypeKey) -> bool:
+    if key is Ellipsis:
         return True
     try:
         return isinstance(val, t.cast("t._ClassInfo", key))
@@ -588,82 +649,18 @@ def escapedFromRaw(chars: str) -> str:
     )
 
 
+# Bounded cache of formatted idents (always non-empty strings, so callers can use `cache.get(s) or printIdent(s)`).
+_IDENT_CACHE: dict[str, str] = {}
+
+
 def printIdent(chars: str) -> str:
-    if isBareIdent(chars):
-        return chars
-    return f'"{escapedFromRaw(chars)}"'
-
-
-def isBareIdent(chars: str) -> bool:
-    if not chars:
-        return False
-    if any(not isIdentChar(x) for x in chars):
-        return False
-    if chars[0] in "0123456789":
-        return False
-    if len(chars) > 1 and chars[0] in "+-" and chars[1] in "0123456789":
-        return False
-    if chars.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
-        return False
-    return True
-
-
-def isIdentChar(ch: str) -> bool:
-    if not ch:
-        return False
-    # reserved characters
-    if ch in r"(){}[]/\"#;=":
-        return False
-    if isWSChar(ch):
-        return False
-    if isNewline(ch):
-        return False
-    if isDisallowedLiteral(ch):
-        return False
-    return True
-
-
-def isDisallowedLiteral(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    if 0x0 <= cp <= 0x08:
-        return True
-    if 0xE <= cp <= 0x1F:
-        return True
-    if cp == 0x7F:
-        return True
-    if 0xD800 <= cp <= 0xDFFF:
-        return True
-    if 0x200E <= cp <= 0x200F:
-        return True
-    if 0x202A <= cp <= 0x202E:
-        return True
-    if 0x2066 <= cp <= 0x2069:
-        return True
-    if cp == 0xFEFF:
-        return True
-
-    return False
-
-
-def isWSChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    if cp in (0x9, 0xB, 0x20, 0xA0, 0x1680):
-        return True
-    if 0x2000 <= cp <= 0x200A:
-        return True
-    if cp in (0x202F, 0x205F, 0x3000):
-        return True
-    return False
-
-
-def isNewline(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    if cp in (0xA, 0xD, 0x85, 0xC, 0x2028, 0x2029):
-        return True
-    return False
+    cached = _IDENT_CACHE.get(chars)
+    if cached is not None:
+        return cached
+    res = chars if isBareIdent(chars) else f'"{escapedFromRaw(chars)}"'
+    # Only cache short strings and flush at 4096 entries to cap memory on large/unbounded documents.
+    if len(chars) <= 64:
+        if len(_IDENT_CACHE) >= 4096:
+            _IDENT_CACHE.clear()
+        _IDENT_CACHE[chars] = res
+    return res
