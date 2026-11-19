@@ -15,7 +15,7 @@ TEST_DIR = os.path.join(THIS_DIR, "upstream_tests", "test_cases", "input")
 GOLDEN_DIR = os.path.join(THIS_DIR, "upstream_tests", "test_cases", "expected_kdl")
 
 
-def main() -> None:
+def main() -> bool:
     cli = argparse.ArgumentParser()
     cli.add_argument("-v", dest="verbose", action="count", default=0)
     cli.add_argument("test", nargs="?", default=None, help="Run a single test, and get a diff.")
@@ -155,4 +155,4 @@ def findTestFiles() -> Tuple[Set[str], Set[str]]:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)
