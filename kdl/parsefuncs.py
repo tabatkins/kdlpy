@@ -146,7 +146,7 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
         else:
             spaceEnd = i
             break
-        if spaceEnd == i or spaceEnd >= n:
+        if spaceEnd >= n:
             break
 
         ch = chars[spaceEnd]
@@ -156,6 +156,8 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
         if ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
             sdEnd = skipLinespace(s, spaceEnd + 2)
             entryDiscard = True
+        elif spaceEnd == i:
+            break
         else:
             sdEnd = spaceEnd
             entryDiscard = discard
@@ -183,7 +185,7 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
     # child blocks (optional real children plus any slashdashed child blocks)
     children: list[Node] = []
     hasRealChildren = False
-    while i < spaceEnd < n:
+    while spaceEnd < n:
         ch = chars[spaceEnd]
         if ch == "{":
             if hasRealChildren:
