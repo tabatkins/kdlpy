@@ -13,6 +13,8 @@ from .types import (
     Document as Document,
     ExactValue as ExactValue,
     Hex as Hex,
+    Infinity as Infinity,
+    NaN as NaN,
     Node as Node,
     Null as Null,
     Numberish as Numberish,
@@ -22,7 +24,9 @@ from .types import (
     Stringish as Stringish,
     Value as Value,
     nameMatchesKey as nameMatchesKey,
+    nodeMatchesKey as nodeMatchesKey,
     tagMatchesKey as tagMatchesKey,
+    typeMatchesKey as typeMatchesKey,
     valueMatchesKey as valueMatchesKey,
 )
 

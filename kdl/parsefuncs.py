@@ -1,608 +1,748 @@
 from __future__ import annotations
 
-import dataclasses
+import re
 
-from . import converters, parsing, t, types
+from . import converters, parsing, t
+from .chars import (
+    BARE_IDENT_PATTERN,
+    CONFUSABLE_KEYWORDS,
+    DIGITS,
+    LINESPACE_CHAR_SET,
+    NAN,
+    NATIVE_KEYWORDS,
+    NEG_INF,
+    NL_CHARS,
+    NL_RE,
+    NL_SET,
+    POS_INF,
+    WS_CHARS,
+    WS_RE,
+)
 from .errors import ParseError, ParseFragment
-from .result import Result
 from .stream import Stream
+from .types import (
+    Binary,
+    Bool,
+    Decimal,
+    Document,
+    Hex,
+    Infinity,
+    NaN,
+    Node,
+    Null,
+    Octal,
+    String,
+    Value,
+)
+
+if t.TYPE_CHECKING:
+    from .t import ParseResult
+    from .types import LooseEntry
+
+    # (lineStartPos, indent, text)
+    MultilineLine: t.TypeAlias = tuple[int, str, str]
+
+# 1-char lookahead sets used to skip unnecessary scanner calls (and dispatch bare idents in parseEntry).
+_NODESPACE_START = frozenset(WS_CHARS + "/\\")
+_LINESPACE_START = frozenset(WS_CHARS + NL_CHARS + "/\\")
+_SPECIAL_ENTRY_START = frozenset('"{};\n\r)/(#0123456789+-')
+
+# Precompiled scanner patterns and bound matchers
+_matchUnicodeSpace = re.compile(rf"[{WS_RE}]+").match
+_matchSingleLineComment = re.compile(rf"//[^{NL_RE}]*(?:\r\n|[{NL_RE}])?").match
+_matchLinespaceChars = re.compile(rf"[{WS_RE}{NL_RE}]+").match
+_searchBlockCommentToken = re.compile(r"/\*|\*/").search
+
+_matchBareIdent = BARE_IDENT_PATTERN.match
+_matchPlainQuoteChunk = re.compile(rf'[^"\\{NL_RE}]*').match
+_matchRawQuoteChunk = re.compile(rf'[^"{NL_RE}]*').match
+
+_matchDecimal = re.compile(r"([+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?)(?:[eE]([+-]?[0-9][0-9_]*))?").match
+_matchDecDigits = re.compile(r"[0-9][0-9_]*").match
+_matchBinDigits = re.compile(r"[01][01_]*").match
+_matchOctDigits = re.compile(r"[0-7][0-7_]*").match
+_matchHexDigits = re.compile(r"[0-9a-fA-F][0-9a-fA-F_]*").match
+_matchHexEscape = re.compile(r"[0-9a-fA-F]*").match
+
+_SIMPLE_ESCAPES: dict[str, str] = {
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "\\": "\\",
+    '"': '"',
+    "b": "\b",
+    "f": "\f",
+    "s": " ",
+}
+
+# ParseResult convention: `(value, nextIndex)` with `index < 0` for no-match,
+# and `(None, index >= 0)` for successfully parsed but discarded (`/-`) items.
+_FAIL: ParseResult[None] = (None, -1)
 
 
-def parse(input: str, config: t.ParseConfig | None = None) -> t.Document:
+def parse(input: str, config: t.ParseConfig | None = None) -> Document:
     if config is None:
         config = parsing.defaults
-    doc = types.Document()
+    doc = Document()
     s = Stream(input, config)
-    i = 0
-    # Skip a single BOM, if present
-    if len(s) and ord(s[i]) == 0xFEFF:
-        i += 1
-    while True:
-        i = parseLinespace(s, i).i
-        node, i, err = parseBaseNode(s, i).vie
-        if err:
+    chars = s.chars
+    n = s.length
+    i = 1 if chars.startswith("\ufeff") else 0
+    if i < n and chars[i] in _LINESPACE_START:
+        i = skipLinespace(s, i)
+
+    while i < n:
+        node, nextI = parseBaseNode(s, i)
+        if nextI < 0:
             break
-        if node:
+        if node is not None:
             doc.nodes.append(node)
-        term, i = parseNodeTerminator(s, i).vi
-        if term is None:
-            raise ParseError(s, i, f"Expected a node terminator (newline, ;, or EOF). Got '{s[i]}'")
-    i = parseLinespace(s, i).i
-    if not s.eof(i):
-        # Something's leftover...
+        termEnd = skipTerminatorAndLinespace(s, nextI)
+        if termEnd < 0:
+            got = chars[nextI] if nextI < n else ""
+            raise ParseError(s, nextI, f"Expected a node terminator (newline, ;, or EOF). Got '{got}'")
+        i = termEnd
+
+    if i < n:
         raise ParseError(s, i, "Unexpected non-node content")
     return doc
 
 
-def parseBaseNode(s: Stream, start: int) -> Result[types.Node | None]:
-    i = start
+def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[Node]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return _FAIL
 
-    sd, i = parseSlashDash(s, i).vi
-    nodeSD = sd is not None
+    if chars[start] == "/" and start + 1 < n and chars[start + 1] == "-":
+        i = skipLinespace(s, start + 2)
+        discard = True
+    else:
+        i = start
 
-    # tag?
-    tag, i = parseTag(s, i).vi
+    tag: str | None = None
+    if i < n and chars[i] == "(":
+        tag, tagEnd = parseTag(s, i)
+        if tagEnd < 0:
+            return _FAIL
+        i = skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in _NODESPACE_START) else tagEnd
 
-    i = parseNodespace(s, i).i
+    name, nameEnd = parseStringText(s, i)
+    if name is None:
+        return _FAIL
+    i = nameEnd
 
-    # name
-    val, i = parseString(s, i).vi
-    if val is None:
-        return Result.fail(start)
-    name = val.value
-    nameEnd = i
-
-    node = types.Node(tag=tag, name=name)
+    entries: list[LooseEntry] = []
+    # Lazily allocated only if properties appear; maps key -> index in `entries` for O(1) duplicate replacement.
+    propIndices: dict[str, int] | None = None
 
     # props and args
-    entryNames: set[str] = set()
-    tempI = i
     while True:
-        space, tempI = parseNodespace(s, tempI).vi
-        if space is None:
-            break
-        sd, tempI = parseSlashDash(s, tempI).vi
-        entry, tempI, err = parseEntry(s, tempI).vie
-        if err:
-            break
-        i = tempI
-        assert entry is not None
-        if sd:
-            continue
-        if entry[0] is not None and entry[0] in entryNames:
-            # repeated property name, replace the existing value
-            for n, existingEntry in enumerate(node.entries):
-                if existingEntry[0] == entry[0]:
-                    node.entries[n] = entry
-                    break
+        # Inline fast path for the common single-space separator to avoid calling skipNodespace().
+        if i < n and chars[i] == " " and (i + 1 >= n or chars[i + 1] not in _NODESPACE_START):
+            spaceEnd = i + 1
+        elif i < n and chars[i] in _NODESPACE_START:
+            spaceEnd = skipNodespace(s, i)
         else:
-            node.entries.append(entry)
-            if entry[0] is not None:
-                entryNames.add(entry[0])
+            spaceEnd = i
+            break
+        if spaceEnd == i or spaceEnd >= n:
+            break
 
-    # starting slashdashed children
-    tempI = i
-    while True:
-        space, tempI = parseNodespace(s, tempI).vi
-        if space is None:
+        ch = chars[spaceEnd]
+        # Fast exit when nodespace lands on a child block or common node terminator.
+        if ch in "{};\n\r":
             break
-        sd, tempI = parseSlashDash(s, tempI).vi
-        if sd is None:
-            break
-        children, tempI = parseNodeChildren(s, tempI).vi
-        if children is None:
-            break
-        i = tempI
+        if ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
+            sdEnd = skipLinespace(s, spaceEnd + 2)
+            entryDiscard = True
+        else:
+            sdEnd = spaceEnd
+            entryDiscard = discard
 
-    # real children
-    tempI = i
-    while True:
-        space, tempI = parseNodespace(s, tempI).vi
-        if space is None:
+        entry, nextI = parseEntry(s, sdEnd, discard=entryDiscard)
+        if nextI < 0:
             break
-        children, tempI = parseNodeChildren(s, tempI).vi
-        if children is None:
-            break
-        node.nodes = children
-        i = tempI
-        break
-
-    # ending slashdashed children
-    tempI = i
-    while True:
-        space, tempI = parseNodespace(s, tempI).vi
-        if space is None:
-            break
-        sd, tempI = parseSlashDash(s, tempI).vi
-        if sd is None:
-            break
-        children, tempI = parseNodeChildren(s, tempI).vi
-        if children is None:
-            break
-        i = tempI
-
-    i = parseNodespace(s, i).i
-
-    for key, converter in s.config.nodeConverters.items():
-        if node.matchesKey(key):
-            node = converter(
-                node,
-                ParseFragment(s[start:nameEnd], s, start),
-            )
-            if node == NotImplemented:
-                continue
+        i = nextI
+        if not entryDiscard:
+            assert entry is not None
+            propKey = entry[0]
+            if propKey is None:
+                entries.append(entry)
+            elif propIndices is None:
+                propIndices = {propKey: len(entries)}
+                entries.append(entry)
             else:
+                existingIdx = propIndices.get(propKey)
+                if existingIdx is not None:
+                    entries[existingIdx] = entry
+                else:
+                    propIndices[propKey] = len(entries)
+                    entries.append(entry)
+
+    # child blocks (optional real children plus any slashdashed child blocks)
+    children: list[Node] = []
+    hasRealChildren = False
+    while i < spaceEnd < n:
+        ch = chars[spaceEnd]
+        if ch == "{":
+            if hasRealChildren:
+                break
+            parsedChildren, i = parseNodeChildren(s, spaceEnd, discard=discard)
+            assert parsedChildren is not None
+            children = parsedChildren
+            hasRealChildren = True
+        elif ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
+            sdEnd = skipLinespace(s, spaceEnd + 2)
+            sdChildren, childEnd = parseNodeChildren(s, sdEnd, discard=True)
+            if sdChildren is None:
+                break
+            i = childEnd
+        else:
+            break
+        spaceEnd = skipNodespace(s, i) if (i < n and chars[i] in _NODESPACE_START) else i
+
+    i = spaceEnd
+    if discard:
+        return (None, i)
+
+    node: Node = Node(name, tag, entries, children)
+    nodeConverters = s.config.nodeConverters
+    if nodeConverters:
+        pf: ParseFragment | None = None
+        for convKey, converter in nodeConverters.items():
+            if node.matchesKey(convKey):
+                if pf is None:
+                    pf = ParseFragment(chars[start:nameEnd], s, start)
+                converted = converter(node, pf)
+                if converted == NotImplemented:
+                    continue
+                node = converted
                 break
 
-    if nodeSD:
-        return Result(None, i)
-    else:
-        return Result(node, i)
+    return (node, i)
 
 
-def parseNodeChildren(s: Stream, start: int) -> Result[list[types.Node]]:
-    if s[start] != "{":
-        return Result.fail(start)
+def parseNodeChildren(s: Stream, start: int, discard: bool = False) -> ParseResult[list[Node]]:
+    chars = s.chars
+    n = s.length
+    if start >= n or chars[start] != "{":
+        return _FAIL
     i = start + 1
-    nodes = []
+    if i < n and chars[i] in _LINESPACE_START:
+        i = skipLinespace(s, i)
+    nodes: list[Node] = []
 
-    while True:
-        i = parseLinespace(s, i).i
-        node, i, err = parseBaseNode(s, i).vie
-        if err:
+    while i < n and chars[i] != "}":
+        node, nextI = parseBaseNode(s, i, discard=discard)
+        if nextI < 0:
             break
-        if node:
+        i = nextI
+        if node is not None:
             nodes.append(node)
-        term, i = parseNodeTerminator(s, i).vi
-        if term is None:
+        termEnd = skipTerminatorAndLinespace(s, i)
+        if termEnd < 0:
             break
-    if s.eof(i):
+        i = termEnd
+
+    if i >= n:
         raise ParseError(s, start, "Hit EOF while searching for end of child list")
-    if s[i] != "}":
+    if chars[i] != "}":
         raise ParseError(s, i, "Junk between end of child list and closing }")
-    return Result(nodes, i + 1)
+    return (nodes, i + 1)
 
 
-def parseTag(s: Stream, start: int) -> Result[str]:
-    if s[start] != "(":
-        return Result.fail(start)
+def parseTag(s: Stream, start: int) -> ParseResult[str]:
+    chars = s.chars
+    n = s.length
+    if start >= n or chars[start] != "(":
+        return _FAIL
     i = start + 1
-    i = parseNodespace(s, i).i
-    val, i = parseString(s, i).vi
-    if val is None:
-        return Result.fail(start)
-    tag = val.value
-    i = parseNodespace(s, i).i
-    if s[i] != ")":
+    if i < n and chars[i] in _NODESPACE_START:
+        i = skipNodespace(s, i)
+    tag, i = parseStringText(s, i)
+    if tag is None:
+        return _FAIL
+    if i < n and chars[i] in _NODESPACE_START:
+        i = skipNodespace(s, i)
+    if i >= n or chars[i] != ")":
         raise ParseError(s, i, "Junk between tag ident and closing paren.")
-    return Result(tag, i + 1)
+    return (tag, i + 1)
 
 
-def parseBareIdent(s: Stream, start: int) -> Result[str]:
-    res, i = parseIdentStart(s, start).vi
-    if res is None:
-        return Result.fail(start)
-    while isIdentChar(s[i]):
-        i += 1
-    ident = s[start:i]
-    return Result(ident, i)
+def skipTerminatorAndLinespace(s: Stream, start: int) -> int:
+    # Fuses node-terminator check and next-line linespace skipping: on a newline terminator,
+    # `_matchLinespaceChars` eats the newline, blank lines, and next-line indentation in one regex call.
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return start
+    ch = chars[start]
+    if ch in NL_SET:
+        m = _matchLinespaceChars(chars, start)
+        assert m is not None
+        i = m.end()
+        if i < n and chars[i] in ("/", "\\"):
+            return skipLinespace(s, i)
+        return i
+    if ch == ";":
+        i = start + 1
+        return skipLinespace(s, i) if (i < n and chars[i] in _LINESPACE_START) else i
+    if ch == "/" and start + 1 < n and chars[start + 1] == "/":
+        return skipLinespace(s, start)
+    return -1
 
 
-def parseIdentStart(s: Stream, start: int) -> Result[str]:
-    if not isIdentChar(s[start]):
-        return Result.fail(start)
-    if isDigit(s[start]):
-        return Result.fail(start)
-    if isSign(s[start]) and isDigit(s[start + 1]):
-        return Result.fail(start)
-    if isSign(s[start]) and s[start + 1] == "." and isDigit(s[start + 2]):
-        return Result.fail(start)
-    if s[start] == "." and isDigit(s[start + 1]):
-        return Result.fail(start)
-    return Result(s[start], start + 1)
+def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[LooseEntry]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return _FAIL
 
-
-def parseNodeTerminator(s: Stream, start: int) -> Result[str | bool]:
-    res = parseSingleLineComment(s, start)
-    if res.valid:
-        return res
-    res = parseNewline(s, start)
-    if res.valid:
-        return res
-    if s[start] == ";":
-        return Result(";", start + 1)
-    if s.eof(start):
-        return Result(True, start)
-    return Result.fail(start)
-
-
-def parseEntry(s: Stream, start: int) -> Result[tuple[str | None, t.Any]]:
-    ent: tuple[str | None, t.Any] | None
-    ent, i = parseProperty(s, start).vi
-    if ent:
-        return Result(ent, i)
-    ent, i = parseAttribute(s, start).vi
-    if ent:
-        return Result(ent, i)
-    return Result.fail(start)
-
-
-def parseProperty(s: Stream, start: int) -> Result[tuple[str, t.Any]]:
-    val, i = parseString(s, start).vi
-    if val is None:
-        return Result.fail(start)
-    key = val.value
-    i = parseNodespace(s, i).i
-    if s[i] != "=":
-        return Result.fail(start)
-    else:
-        i += 1
-    i = parseNodespace(s, i).i
-    v, i, err = parseValue(s, i).vie
-    if err:
-        raise ParseError(s, i, "Expected value after prop=.")
-    return Result((key, v), i)
-
-
-def parseAttribute(s: Stream, start: int) -> Result[tuple[None, t.Any]]:
-    v, i, err = parseValue(s, start).vie
-    if err:
-        return Result.fail(start)
-    return Result((None, v), i)
-
-
-def parseValue(s: Stream, start: int) -> Result[t.Any]:
-    tag, i = parseTag(s, start).vi
-    i = parseNodespace(s, i).i
-
-    valueStart = i
-    val: t.Any
-    val, i = parseNumber(s, i).vi
-    if val is None:
-        val, i = parseKeyword(s, i).vi
-        if val is None:
-            val, i = parseString(s, i).vi
-    if val is not None:
-        val.tag = tag
-        for key, converter in s.config.valueConverters.items():
-            if val.matchesKey(key):
-                val = converter(
-                    val,
-                    ParseFragment(s[valueStart:i], s, i),
-                )
-                if val == NotImplemented:
-                    continue
-                else:
-                    break
-        else:
-            if tag is None and s.config.nativeUntaggedValues:
-                val = val.value
-            if tag is not None and s.config.nativeTaggedValues:
-                val = converters.toNative(val, ParseFragment(s[valueStart:i], s, i))
-        return Result(val, i)
-
-    if s[i] == "'":
-        raise ParseError(s, i, "KDL strings use double-quotes.")
-
-    # Failed to find a value
-    # But if I found a tag, something's up
-    if tag is not None:
-        raise ParseError(s, i, "Found a tag, but no value following it.")
-    return Result.fail(start)
-
-
-def parseNumber(s: Stream, start: int) -> Result[types.Numberish]:
-    if not isNumberStart(s, start):
-        return Result.fail(start)
-    res: Result[types.Numberish] = parseBinaryNumber(s, start)
-    if res.valid:
-        return res
-    res = parseOctalNumber(s, start)
-    if res.valid:
-        return res
-    res = parseHexNumber(s, start)
-    if res.valid:
-        return res
-    res = parseDecimalNumber(s, start)
-    if res.valid:
-        return res
-    raise ParseError(
-        s,
-        start,
-        "Expected a number, but got junk after the initial digit.",
-    )
-
-
-def parseBinaryNumber(s: Stream, start: int) -> Result[types.Binary]:
-    i = start
-
-    # optional sign
-    sign, i = parseSign(s, i).vi
-    if sign is None:
-        sign = 1
-
-    # prefix
-    if not (s[i] == "0" and s[i + 1] == "b"):
-        return Result.fail(start)
-    i += 2
-
-    # initial digit
-    if not isBinaryDigit(s[i]):
-        raise ParseError(s, i, "Expected binary digit after 0b, got junk.")
-
-    # following digits/underscores
-    end = i + 1
-    while isBinaryDigit(s[end]) or s[end] == "_":
-        end += 1
-    value = int(s[i:end].replace("_", ""), 2) * sign
-    return Result(types.Binary(value), end)
-
-
-def parseOctalNumber(s: Stream, start: int) -> Result[types.Octal]:
-    i = start
-
-    # optional sign
-    sign, i = parseSign(s, i).vi
-    if sign is None:
-        sign = 1
-
-    # prefix
-    if not (s[i] == "0" and s[i + 1] == "o"):
-        return Result.fail(start)
-    i += 2
-
-    # initial digit
-    if not isOctalDigit(s[i]):
-        raise ParseError(s, i, "Expected octal digit after 0o, got junk.")
-
-    # following digits/underscores
-    end = i + 1
-    while isOctalDigit(s[end]) or s[end] == "_":
-        end += 1
-    value = int(s[i:end].replace("_", ""), 8) * sign
-    return Result(types.Octal(value), end)
-
-
-def parseHexNumber(s: Stream, start: int) -> Result[types.Hex]:
-    i = start
-
-    # optional sign
-    sign, i = parseSign(s, i).vi
-    if sign is None:
-        sign = 1
-
-    # prefix
-    if not (s[i] == "0" and s[i + 1] == "x"):
-        return Result.fail(start)
-    i += 2
-
-    # initial digit
-    if not isHexDigit(s[i]):
-        raise ParseError(s, i, "Expected hex digit after 0x, got junk.")
-
-    # following digits/underscores
-    end = i + 1
-    while isHexDigit(s[end]) or s[end] == "_":
-        end += 1
-    value = int(s[i:end].replace("_", ""), 16) * sign
-    return Result(types.Hex(value), end)
-
-
-def parseDecimalNumber(s: Stream, start: int) -> Result[types.Decimal]:
-    i = start
-
-    # optional sign
-    i = parseSign(s, i).i
-
-    # integer part
-    integer, i = parseDigits(s, i).vi
-    if integer is None:
-        return Result.fail(start)
-
-    if s[i] == ".":
-        result, i = parseDigits(s, i + 1).vi
-        if result is None:
-            raise ParseError(s, i, "Expected digit after decimal point.")
-
-    mantissaChars = s[start:i].replace("_", "")
-    mantissa: int | float
-    try:
-        mantissa = int(mantissaChars, 10)
-    except ValueError:
-        try:
-            mantissa = float(mantissaChars)
-        except ValueError as exc:
+    ch = chars[start]
+    if ch not in _SPECIAL_ENTRY_START:
+        # Fast path: bare identifier (either property key `key=val` or bare string arg)
+        m = _matchBareIdent(chars, start)
+        if m is None:
+            return _FAIL
+        strEnd = m.end()
+        text = m.group()
+        if text in CONFUSABLE_KEYWORDS:
             raise ParseError(
                 s,
                 start,
-                "Number-like string didn't actually parse as a number.",
-            ) from exc
-
-    exponent = 0
-    if s[i] in ("e", "E"):
-        exponentStart = i + 1
-        i = parseSign(s, i + 1).i
-        result, i = parseDigits(s, i).vi
-        if result is None:
-            raise ParseError(s, i, "Expected number after exponent.")
-        exponent = int(s[exponentStart:i].replace("_", ""))
-
-    return Result(types.Decimal(mantissa, exponent), i)
-
-
-def parseDigits(s: Stream, start: int) -> Result[bool]:
-    # First digit must be decimal digit
-    # Subsequent can be digit or underscore
-    if not isDigit(s[start]):
-        return Result.fail(start)
-    end = start + 1
-    while isDigit(s[end]) or s[end] == "_":
-        end += 1
-    return Result(True, end)
-
-
-def isNumberStart(s: Stream, start: int) -> bool:
-    # all numbers start with an optional sign
-    # followed by a digit:
-    # either the first digit of the number,
-    # or the 0 of the prefix)
-    if isDigit(s[start]):
-        return True
-    if isSign(s[start]) and isDigit(s[start + 1]):
-        return True
-    return False
-
-
-def parseSign(s: Stream, start: int) -> Result[int]:
-    if s[start] == "+":
-        return Result(1, start + 1)
-    if s[start] == "-":
-        return Result(-1, start + 1)
-    return Result.fail(start)
-
-
-def parseKeyword(s: Stream, start: int) -> Result[types.Bool | types.Null | types.Infinity | types.NaN]:
-    if s[start] != "#":
-        return Result.fail(start)
-    i = start + 1
-    ident, i = parseBareIdent(s, i).vi
-    if ident is None:
-        return Result.fail(start)
-    if ident == "true":
-        return Result(types.Bool(True), i)
-    elif ident == "false":
-        return Result(types.Bool(False), i)
-    elif ident == "null":
-        return Result(types.Null(), i)
-    elif ident == "inf":
-        return Result(types.Infinity(float("inf")), i)
-    elif ident == "-inf":
-        return Result(types.Infinity(float("-inf")), i)
-    elif ident == "nan":
-        return Result(types.NaN(float("nan")), i)
-    elif ident.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
-        raise ParseError(s, start, f"KDL keywords must be written in lowercase, got #{ident}")
+                f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{text}'.",
+            )
+    elif ch == '"':
+        textOrNone, strEnd = parseStringText(s, start)
+        assert textOrNone is not None
+        text = textOrNone
+    elif ch in DIGITS or (ch in "+-" and start + 1 < n and chars[start + 1] in DIGITS):
+        if discard or s.fastUntagged:
+            val, valEnd = parseNumber(s, start, native=True)
+            return (None, valEnd) if discard else ((None, val), valEnd)
+        numVal, valEnd = parseNumber(s, start, native=False)
+        val = _finalizeValue(s, t.cast("Value", numVal), None, start, valEnd)
+        return ((None, val), valEnd)
+    elif ch == "#":
+        if start + 1 < n and chars[start + 1] not in ('"', "#"):
+            rawFast = discard or s.fastUntagged
+            kwVal, kwEnd = parseKeyword(s, start, native=rawFast)
+            if kwEnd < 0:
+                return _FAIL
+            if discard:
+                return (None, kwEnd)
+            if rawFast:
+                return ((None, kwVal), kwEnd)
+            return ((None, _finalizeValue(s, t.cast("Value", kwVal), None, start, kwEnd)), kwEnd)
+        textOrNone, strEnd = parseStringText(s, start)
+        if textOrNone is None:
+            return _FAIL
+        text = textOrNone
+    elif ch == "(":
+        val, valEnd = parseValue(s, start, discard=discard)
+        if valEnd < 0:
+            return _FAIL
+        return (None, valEnd) if discard else ((None, val), valEnd)
+    elif ch in "+-":
+        textOrNone, strEnd = parseStringText(s, start)
+        if textOrNone is None:
+            return _FAIL
+        text = textOrNone
     else:
-        raise ParseError(s, start, f"Unknown keyword #{ident}")
+        return _FAIL
+
+    # Peek past optional nodespace for `=` to distinguish `key=val` properties from string args without backtracking.
+    eqPos = -1
+    if strEnd < n:
+        nextCh = chars[strEnd]
+        if nextCh == "=":
+            eqPos = strEnd
+        elif nextCh == " " and strEnd + 1 < n and chars[strEnd + 1] not in _NODESPACE_START:
+            if chars[strEnd + 1] == "=":
+                eqPos = strEnd + 1
+        elif nextCh in _NODESPACE_START:
+            afterKey = skipNodespace(s, strEnd)
+            if afterKey < n and chars[afterKey] == "=":
+                eqPos = afterKey
+
+    if eqPos >= 0:
+        valStart = eqPos + 1
+        if valStart < n and chars[valStart] in _NODESPACE_START:
+            valStart = skipNodespace(s, valStart)
+        propVal, propEnd = parseValue(s, valStart, discard=discard)
+        if propEnd < 0:
+            raise ParseError(s, valStart, "Expected value after prop=.")
+        return (None, propEnd) if discard else ((text, propVal), propEnd)
+
+    if discard:
+        return (None, strEnd)
+    if s.fastUntagged:
+        return ((None, text), strEnd)
+    return ((None, _finalizeValue(s, String(text), None, start, strEnd)), strEnd)
 
 
-def parseString(s: Stream, start: int) -> Result[types.Stringish]:
-    hashCount, i = parseRepeatedChar(s, start, "#").vi
-    assert hashCount is not None
-    quoteCount, i = parseRepeatedChar(s, i, '"').vi
-    assert quoteCount is not None
-    if quoteCount == 0:
-        if hashCount == 0:
-            return parseIdentString(s, i)
-        else:
-            return Result.fail(start)
-    elif quoteCount == 1:
+def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.Any]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return _FAIL
+
+    tag: str | None = None
+    i = start
+    if chars[i] == "(":
+        tag, tagEnd = parseTag(s, i)
+        if tagEnd >= 0:
+            i = skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in _NODESPACE_START) else tagEnd
+
+    if i >= n:
+        if tag is not None:
+            raise ParseError(s, i, "Found a tag, but no value following it.")
+        return _FAIL
+
+    valueStart = i
+    ch = chars[i]
+    native = discard or (tag is None and s.fastUntagged)
+
+    if ch in DIGITS or (ch in "+-" and i + 1 < n and chars[i + 1] in DIGITS):
+        val, end = parseNumber(s, i, native=native)
+        if discard:
+            return (None, end)
+        return (val, end) if native else (_finalizeValue(s, t.cast("Value", val), tag, valueStart, end), end)
+
+    if ch == "#" and i + 1 < n and chars[i + 1] not in ('"', "#"):
+        val, end = parseKeyword(s, i, native=native)
+        if end < 0:
+            if tag is not None:
+                raise ParseError(s, i, "Found a tag, but no value following it.")
+            return _FAIL
+        if discard:
+            return (None, end)
+        return (val, end) if native else (_finalizeValue(s, t.cast("Value", val), tag, valueStart, end), end)
+
+    text, end = parseStringText(s, i)
+    if text is not None:
+        if discard:
+            return (None, end)
+        return (text, end) if native else (_finalizeValue(s, String(text), tag, valueStart, end), end)
+
+    if tag is not None:
+        raise ParseError(s, i, "Found a tag, but no value following it.")
+    return _FAIL
+
+
+def _finalizeValue(
+    s: Stream,
+    val: Value,
+    tag: str | None,
+    valueStart: int,
+    valueEnd: int,
+) -> t.Any:
+    val.tag = tag
+    config = s.config
+    valueConverters = config.valueConverters
+    if valueConverters:
+        pf: ParseFragment | None = None
+        for key, converter in valueConverters.items():
+            if val.matchesKey(key):
+                if pf is None:
+                    pf = ParseFragment(s.chars[valueStart:valueEnd], s, valueEnd)
+                converted = converter(val, pf)
+                if converted == NotImplemented:
+                    continue
+                return converted
+
+    if tag is None:
+        if config.nativeUntaggedValues:
+            return val.value
+        return val
+
+    if config.nativeTaggedValues and tag in converters.NATIVE_TAGS:
+        return converters.toNative(val, s, valueStart, valueEnd)
+    return val
+
+
+def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.Any]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return _FAIL
+
+    ch = chars[start]
+    if ch in "+-":
+        sign = -1 if ch == "-" else 1
+        i = start + 1
+        if i >= n or chars[i] not in DIGITS:
+            return _FAIL
+    elif ch in DIGITS:
+        sign = 1
+        i = start
+    else:
+        return _FAIL
+
+    if chars[i] == "0" and i + 1 < n:
+        prefix = chars[i + 1]
+        if prefix == "x":
+            m = _matchHexDigits(chars, i + 2)
+            if m is None:
+                raise ParseError(s, i + 2, "Expected hex digit after 0x, got junk.")
+            raw = m.group()
+            intVal = int(raw.replace("_", "") if "_" in raw else raw, 16) * sign
+            return (intVal if native else Hex(intVal), m.end())
+        if prefix == "o":
+            m = _matchOctDigits(chars, i + 2)
+            if m is None:
+                raise ParseError(s, i + 2, "Expected octal digit after 0o, got junk.")
+            raw = m.group()
+            intVal = int(raw.replace("_", "") if "_" in raw else raw, 8) * sign
+            return (intVal if native else Octal(intVal), m.end())
+        if prefix == "b":
+            m = _matchBinDigits(chars, i + 2)
+            if m is None:
+                raise ParseError(s, i + 2, "Expected binary digit after 0b, got junk.")
+            raw = m.group()
+            intVal = int(raw.replace("_", "") if "_" in raw else raw, 2) * sign
+            return (intVal if native else Binary(intVal), m.end())
+
+    mDec = _matchDecimal(chars, start)
+    assert mDec is not None
+    end = mDec.end()
+    # `_matchDecimal` stops before malformed suffixes like `1.` or `1e`; diagnose the exact error lazily.
+    if end < n and chars[end] in ".eE":
+        _raiseDecimalError(s, i)
+
+    if native:
+        raw = mDec.group()
+        if "_" in raw:
+            raw = raw.replace("_", "")
+        fval = float(raw)
+        # Match Decimal(int("-0"), 0).value (+0.0) while preserving negative zero for `-0.0`.
+        if fval == 0.0 and "." not in raw:
+            return (0.0, end)
+        return (fval, end)
+
+    mantStr, expStr = mDec.groups()
+    if "_" in mantStr:
+        mantStr = mantStr.replace("_", "")
+    mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
+
+    if expStr is None:
+        return (Decimal(mantissa, 0), end)
+
+    if "_" in expStr:
+        expStr = expStr.replace("_", "")
+    exponent = int(expStr, 10)
+    return (Decimal(mantissa, exponent), end)
+
+
+def _raiseDecimalError(s: Stream, digitStart: int) -> t.NoReturn:
+    chars = s.chars
+    n = s.length
+    mInt = _matchDecDigits(chars, digitStart)
+    assert mInt is not None
+    i = mInt.end()
+    if i < n and chars[i] == ".":
+        mFrac = _matchDecDigits(chars, i + 1)
+        if mFrac is None:
+            raise ParseError(s, i + 1, "Expected digit after decimal point.")
+        i = mFrac.end()
+    if i < n and chars[i] in "eE":
+        expDigits = i + 2 if (i + 1 < n and chars[i + 1] in "+-") else i + 1
+        raise ParseError(s, expDigits, "Expected number after exponent.")
+    raise ParseError(s, i, "Expected a node terminator (newline, ;, or EOF).")
+
+
+def parseKeyword(s: Stream, start: int, native: bool = False) -> ParseResult[t.Any]:
+    chars = s.chars
+    if start >= s.length or chars[start] != "#":
+        return _FAIL
+    m = _matchBareIdent(chars, start + 1)
+    if m is None:
+        return _FAIL
+    ident = m.group()
+    end = m.end()
+    if native:
+        val = NATIVE_KEYWORDS.get(ident, t.UNSET)
+        if val is not t.UNSET:
+            return (val, end)
+    elif ident == "true":
+        return (Bool(True), end)
+    elif ident == "false":
+        return (Bool(False), end)
+    elif ident == "null":
+        return (Null(), end)
+    elif ident == "inf":
+        return (Infinity(POS_INF), end)
+    elif ident == "-inf":
+        return (Infinity(NEG_INF), end)
+    elif ident == "nan":
+        return (NaN(NAN), end)
+
+    if ident in CONFUSABLE_KEYWORDS:
+        raise ParseError(s, start, f"KDL keywords must be written in lowercase, got #{ident}")
+    raise ParseError(s, start, f"Unknown keyword #{ident}")
+
+
+def parseStringText(s: Stream, start: int) -> ParseResult[str]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return _FAIL
+
+    ch = chars[start]
+    if ch not in ('"', "#"):
+        m = _matchBareIdent(chars, start)
+        if m is None:
+            return _FAIL
+        end = m.end()
+        ident = m.group()
+        if ident in CONFUSABLE_KEYWORDS:
+            raise ParseError(
+                s,
+                start,
+                f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{ident}'.",
+            )
+        return (ident, end)
+
+    if ch == '"':
+        strStart = start + 1
+        if strStart < n and chars[strStart] != '"':
+            # Fast path for short, plain, single-line strings; longer or escaped strings fall through.
+            # isascii() is an O(1) header check that rules out non-ASCII KDL newlines (\x85, \u2028, \u2029).
+            quotePos = chars.find('"', strStart, strStart + 256)
+            if quotePos != -1:
+                end = quotePos + 1
+                if end >= n or chars[end] not in ('"', "#"):
+                    sub = chars[strStart:quotePos]
+                    if (
+                        "\\" not in sub
+                        and "\n" not in sub
+                        and "\r" not in sub
+                        and "\x0b" not in sub
+                        and "\x0c" not in sub
+                    ) and (sub.isascii() or ("\x85" not in sub and "\u2028" not in sub and "\u2029" not in sub)):
+                        return (sub, end)
+            return parseQuotedString(s, strStart, 0)
+        quoteStart = start
+        hashCount = 0
+    else:
+        i = start + 1
+        while i < n and chars[i] == "#":
+            i += 1
+        if i >= n or chars[i] != '"':
+            return _FAIL
+        quoteStart = i
+        hashCount = i - start
+
+    i = quoteStart + 1
+    while i < n and chars[i] == '"':
+        i += 1
+    quoteCount = i - quoteStart
+
+    if quoteCount == 1:
         return parseQuotedString(s, i, hashCount)
-    elif quoteCount == 2:
+    if quoteCount == 2:
+        # Empty single-line string `""` / `#""#`: back up 1 so parseQuotedString sees the closing `"`
+        # and validates any trailing `#` or extra quotes.
         return parseQuotedString(s, i - 1, hashCount)
-    elif quoteCount == 3:
+    if quoteCount == 3:
         return parseMultilineString(s, i, hashCount)
     raise ParseError(s, start, f"Encountered {quoteCount} quotes in a row.")
 
 
-def parseRepeatedChar(s: Stream, start: int, ch: str) -> Result[int]:
+def _checkPlainQuoteEnd(s: Stream, start: int, chars: str, end: int, n: int) -> None:
+    if end < n:
+        nextCh = chars[end]
+        if nextCh == "#":
+            raise ParseError(s, start, "Saw # characters at the end of a non-raw string.")
+        if nextCh == '"':
+            raise ParseError(s, start, "Single-quote string was ended with multiple quote chars.")
+
+
+def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:
+    chars = s.chars
+    n = s.length
+
+    if hashCount == 0:
+        m = _matchPlainQuoteChunk(chars, start)
+        assert m is not None
+        i = m.end()
+        if i < n and chars[i] == '"':
+            end = i + 1
+            _checkPlainQuoteEnd(s, start, chars, end, n)
+            return (chars[start:i], end)
+
+        parts: list[str] = [chars[start:i]] if i > start else []
+        while True:
+            if i >= n:
+                raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+            ch = chars[i]
+            if ch == '"':
+                end = i + 1
+                _checkPlainQuoteEnd(s, start, chars, end, n)
+                return ("".join(parts), end)
+            if ch == "\\":
+                esc, i = parseEscape(s, i)
+                if esc:
+                    parts.append(esc)
+                m = _matchPlainQuoteChunk(chars, i)
+                assert m is not None
+                if m.end() > i:
+                    parts.append(chars[i : m.end()])
+                    i = m.end()
+            else:
+                raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
+
+    # Raw single-line string (`#"..."#`)
     i = start
-    count = 0
-    while s[i] == ch:
-        count += 1
-        i += 1
-    return Result(count, i)
-
-
-def parseQuotedString(s: Stream, start: int, hashCount: int) -> Result[types.String]:
-
-    i = start
-
-    rawChars = ""
     while True:
-        if s[i] == '"' and hashCount == 0:
-            i += 1
-            if s[i] == "#":
-                raise ParseError(s, start, "Saw # characters at the end of a non-raw string.")
-            elif s[i] == '"':
-                raise ParseError(s, start, "Single-quote string was ended with multiple quote chars.")
-            else:
-                return Result(types.String(rawChars), i)
-        elif s[i] == '"' and hashCount > 0:
-            # Cheap exit for a lone literal "
-            if s[i + 1] != "#":
-                rawChars += '"'
-                i += 1
-                continue
-
-            # Otherwise count the hashes
-            endingHashCount, hashEnd = parseRepeatedChar(s, i + 1, "#").vi
-            assert endingHashCount is not None
-            if endingHashCount < hashCount:
-                # Allowed, this is string content.
-                rawChars += s[i:hashEnd]
-                i = hashEnd
-                continue
-            elif endingHashCount > hashCount:
-                # Parse error to include *more* hashes than it starts with.
-                raise ParseError(
-                    s,
-                    start,
-                    f"Expected {hashCount} # chars at end of raw string; got {endingHashCount}.",
-                )
-            else:
-                # Just right, string has ended.
-                i = hashEnd
-                return Result(types.String(rawChars), i)
-        elif s[i] == "":
+        m = _matchRawQuoteChunk(chars, i)
+        assert m is not None
+        i = m.end()
+        if i >= n:
             raise ParseError(s, start, "Hit EOF while looking for the end of the string")
-        elif parseNewline(s, i).valid:
-            # Non-escaped newlines are not allowed in single-line strings.
+        if chars[i] != '"':
             raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
-        elif s[i] == "\\" and hashCount == 0:
-            ch, i = parseEscape(s, i).vi
-            if ch is None:
-                raise ParseError(s, i, "Invalid escape sequence in string")
-            rawChars += ch
-        else:
-            rawChars += s[i]
-            i += 1
+        quotePos = i
+        i += 1
+        hashEnd = i
+        while hashEnd < n and chars[hashEnd] == "#":
+            hashEnd += 1
+        endingHashCount = hashEnd - i
+        if endingHashCount < hashCount:
+            i = hashEnd
             continue
+        if endingHashCount > hashCount:
+            raise ParseError(
+                s,
+                start,
+                f"Expected {hashCount} # chars at end of raw string; got {endingHashCount}.",
+            )
+        return (chars[start:quotePos], hashEnd)
 
 
-def parseEscape(s: Stream, start: int) -> Result[str]:
-    if s[start] != "\\":
-        return Result.fail(start)
-    ch = s[start + 1]
-    if ch == "n":
-        return Result("\n", start + 2)
-    if ch == "r":
-        return Result("\r", start + 2)
-    if ch == "t":
-        return Result("\t", start + 2)
-    if ch == "\\":
-        return Result("\\", start + 2)
-    if ch == '"':
-        return Result('"', start + 2)
-    if ch == "b":
-        return Result("\b", start + 2)
-    if ch == "f":
-        return Result("\f", start + 2)
-    if ch == "s":
-        return Result(" ", start + 2)
+def parseEscape(s: Stream, start: int) -> ParseResult[str]:
+    chars = s.chars
+    n = s.length
+    if start + 1 >= n:
+        raise ParseError(s, start, "Invalid character escape")
+    ch = chars[start + 1]
+    simple = _SIMPLE_ESCAPES.get(ch)
+    if simple is not None:
+        return (simple, start + 2)
     if ch == "u":
-        if s[start + 2] != "{":
+        if start + 2 >= n or chars[start + 2] != "{":
             raise ParseError(
                 s,
                 start,
                 "Unicode escapes must surround their codepoint in {}",
             )
-        i = start + 3
-        hexStart = i
-        while isHexDigit(s[i]):
-            i += 1
+        hexStart = start + 3
+        m = _matchHexEscape(chars, hexStart)
+        assert m is not None
+        i = m.end()
         hexCount = i - hexStart
-        if s[i] != "}":
+        if i >= n or chars[i] != "}":
             raise ParseError(s, hexStart, "Expected } to finish a unicode escape")
         if hexCount < 1:
             raise ParseError(s, hexStart, "Unicode escape doesn't contain a codepoint")
@@ -612,7 +752,7 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
                 hexStart,
                 "Unicode escapes can contain at most six digits",
             )
-        hexValue = int(s[hexStart:i], 16)
+        hexValue = int(chars[hexStart:i], 16)
         if 0xD800 <= hexValue <= 0xDFFF:
             raise ParseError(s, hexStart, "Unicode escapes can't encode surrogate codepoints (U+D800-DFFF)")
         if hexValue > 0x10FFFF:
@@ -621,332 +761,254 @@ def parseEscape(s: Stream, start: int) -> Result[str]:
                 hexStart,
                 "Maximum codepoint in a unicode escape is 0x10ffff",
             )
-        return Result(chr(hexValue), i + 1)
-    if isLinespaceChar(ch):
-        # Escaped whitespace is simply discarded.
-        i = start + 2
-        while isLinespaceChar(s[i]):
-            i += 1
-        return Result("", i)
+        return (chr(hexValue), i + 1)
+    if ch in LINESPACE_CHAR_SET:
+        m = _matchLinespaceChars(chars, start + 1)
+        assert m is not None
+        return ("", m.end())
     raise ParseError(s, start, "Invalid character escape")
 
 
-@dataclasses.dataclass
-class MSLine:
-    i: int
-    indent: str = ""
-    text: str = ""
-
-
-def parseMultilineString(s: Stream, start: int, hashCount: int) -> Result[types.String]:
-    nl, i = parseNewline(s, start).vi
-    if nl is None:
+def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:
+    chars = s.chars
+    n = s.length
+    i = skipNewline(chars, start, n)
+    if i == start:
         raise ParseError(s, start, "Multiline strings must have a newline immediately after their opening quotes.")
-    lines: list[MSLine] = []
-    line = MSLine(i)
-    _, i = parseUnicodeSpace(s, i).vi
-    line.indent = s[line.i : i]
+
+    lines: list[MultilineLine] = []
+    lineStart = i
+    mSpace = _matchUnicodeSpace(chars, i)
+    if mSpace is not None:
+        lineIndent = chars[i : mSpace.end()]
+        i = mSpace.end()
+    else:
+        lineIndent = ""
+    lineParts: list[str] = []
+    matchChunk = _matchPlainQuoteChunk if hashCount == 0 else _matchRawQuoteChunk
+
     while True:
-        nl, i = parseNewline(s, i).vi
-        if nl is not None:
-            lines.append(line)
-            line = MSLine(i)
-            afterNl = i
-            _, i = parseUnicodeSpace(s, i).vi
-            line.indent = s[afterNl:i]
-            continue
+        m = matchChunk(chars, i)
+        assert m is not None
+        if m.end() > i:
+            lineParts.append(chars[i : m.end()])
+            i = m.end()
 
-        if s[i] == '"':
-            quoteStart = i
-            quoteCount, i = parseRepeatedChar(s, i, '"').vi
-            assert quoteCount is not None
-            if quoteCount in (1, 2):
-                line.text += s[quoteStart:i]
-                continue
-            elif quoteCount > 4:
-                raise ParseError(s, quoteStart, f"Saw {quoteCount} consecutive quotes in a multi-line string.")
-
-            assert quoteCount == 3
-            if hashCount == 0:
-                if s[i] == "#":
-                    raise ParseError(s, i, "Saw # characters at the end of a non-raw string.")
-                else:
-                    rawChars = processMultiline(lines, line, s)
-                    return Result(types.String(rawChars), i)
-            else:
-                # Cheap exit for a lone literal """
-                if s[i] != "#":
-                    line.text += '"""'
-                    continue
-
-                # Otherwise count the hashes
-                endingHashCount, hashEnd = parseRepeatedChar(s, i, "#").vi
-                assert endingHashCount is not None
-                if endingHashCount < hashCount:
-                    # Allowed, this is string content.
-                    line.text += s[quoteStart:hashEnd]
-                    i = hashEnd
-                    continue
-                elif endingHashCount > hashCount:
-                    # Parse error to include *more* hashes than it starts with.
-                    raise ParseError(
-                        s,
-                        start,
-                        f"Expected {hashCount} # chars at end of raw multiline string; got {endingHashCount}.",
-                    )
-                else:
-                    rawChars = processMultiline(lines, line, s)
-                    return Result(types.String(rawChars), hashEnd)
-        elif s[i] == "":
+        if i >= n:
             raise ParseError(s, start, "Hit EOF while looking for the end of the string")
-        elif s[i] == "\\" and hashCount == 0:
-            ch, i = parseEscape(s, i).vi
-            if ch is None:
-                raise ParseError(s, i, "Invalid escape sequence in string")
-            line.text += ch
-        else:
-            line.text += s[i]
+
+        ch = chars[i]
+        if ch == '"':
+            quoteStart = i
             i += 1
+            while i < n and chars[i] == '"':
+                i += 1
+            quoteCount = i - quoteStart
+            if quoteCount < 3:
+                lineParts.append(chars[quoteStart:i])
+                continue
+
+            if hashCount == 0:
+                if quoteCount > 3:
+                    raise ParseError(s, quoteStart, f"Saw {quoteCount} consecutive quotes in a multi-line string.")
+                if i < n and chars[i] == "#":
+                    raise ParseError(s, i, "Saw # characters at the end of a non-raw string.")
+                rawChars = processMultiline(lines, lineStart, lineIndent, "".join(lineParts), s)
+                return (rawChars, i)
+
+            if i >= n or chars[i] != "#":
+                lineParts.append(chars[quoteStart:i])
+                continue
+
+            hashEnd = i + 1
+            while hashEnd < n and chars[hashEnd] == "#":
+                hashEnd += 1
+            endingHashCount = hashEnd - i
+            if endingHashCount < hashCount:
+                lineParts.append(chars[quoteStart:hashEnd])
+                i = hashEnd
+                continue
+            if endingHashCount > hashCount:
+                raise ParseError(
+                    s,
+                    start,
+                    f"Expected {hashCount} # chars at end of raw multiline string; got {endingHashCount}.",
+                )
+            if quoteCount > 3:
+                # Extra quotes before the closing `"""#...` are content on the closing line,
+                # which processMultiline() will reject as non-whitespace on the final line.
+                lineParts.append('"' * (quoteCount - 3))
+            rawChars = processMultiline(lines, lineStart, lineIndent, "".join(lineParts), s)
+            return (rawChars, hashEnd)
+
+        if ch == "\\":
+            esc, i = parseEscape(s, i)
+            if esc:
+                lineParts.append(esc)
             continue
 
+        # Must be a newline character
+        nlEnd = skipNewline(chars, i, n)
+        lines.append((lineStart, lineIndent, "".join(lineParts)))
+        i = nlEnd
+        lineStart = i
+        mSpace = _matchUnicodeSpace(chars, i)
+        if mSpace is not None:
+            lineIndent = chars[i : mSpace.end()]
+            i = mSpace.end()
+        else:
+            lineIndent = ""
+        lineParts = []
 
-def processMultiline(lines: list[MSLine], lastLine: MSLine, s: Stream) -> str:
-    # Verify the indent is just whitespace
-    if lastLine.text:
-        raise ParseError(s, lastLine.i, "Multiline string ended with non-whitespace content on last line.")
-    for line in lines:
+
+def processMultiline(
+    lines: list[MultilineLine],
+    lastLinePos: int,
+    lastIndent: str,
+    lastText: str,
+    s: Stream,
+) -> str:
+    if lastText:
+        raise ParseError(s, lastLinePos, "Multiline string ended with non-whitespace content on last line.")
+    prefixLen = len(lastIndent)
+    outLines: list[str] = []
+    for linePos, indent, text in lines:
         # Only-WS lines don't contribute any characters,
         # just the presence of their line.
-        if line.text == "":
-            line.indent = ""
-            continue
-        # Otherwise, remove the shared prefix
-        if line.indent.startswith(lastLine.indent):
-            line.indent = line.indent[len(lastLine.indent) :]
+        if not text:
+            outLines.append("")
+        elif prefixLen == 0:
+            outLines.append(indent + text)
+        elif indent.startswith(lastIndent):
+            outLines.append(indent[prefixLen:] + text)
         else:
             raise ParseError(
-                s, line.i, "Multiline string line doesn't start with the same whitespace prefix as the final line."
+                s,
+                linePos,
+                "Multiline string line doesn't start with the same whitespace prefix as the final line.",
             )
-    return "\n".join(line.indent + line.text for line in lines)
+    return "\n".join(outLines)
 
 
-def parseIdentString(s: Stream, start: int) -> Result[types.String]:
-    ident, i = parseBareIdent(s, start).vi
-    if ident is None:
-        return Result.fail(start)
-    if ident.lower() in ("true", "false", "null", "inf", "-inf", "nan"):
-        raise ParseError(
-            s, start, f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{ident}'."
-        )
-    return Result(types.String(ident), i)
+def skipNewline(chars: str, start: int, n: int) -> int:
+    if start >= n:
+        return start
+    ch = chars[start]
+    if ch == "\n":
+        return start + 1
+    if ch == "\r":
+        if start + 1 < n and chars[start + 1] == "\n":
+            return start + 2
+        return start + 1
+    if ch in NL_SET:
+        return start + 1
+    return start
 
 
-def parseInitialHashes(s: Stream, start: int) -> Result[int]:
+def skipLinespace(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
     i = start
-    while s[i] == "#":
-        i += 1
-    if s[i] == '"':
-        return Result(i - start, i)
-    return Result.fail(start)
-
-
-def parseFinalHashes(s: Stream, start: int) -> Result[int]:
-    i = start
-    while s[i] == "#":
-        i += 1
-    count = i - start
-    return Result(count, i)
-
-
-def parseNewline(s: Stream, start: int) -> Result[bool]:
-    if s[start] == "\x0d" and s[start + 1] == "\x0a":
-        return Result(True, start + 2)
-    if isNewlineChar(s[start]):
-        return Result(True, start + 1)
-    return Result.fail(start)
-
-
-def parseLinespace(s: Stream, start: int) -> Result[bool]:
-    i = start
-    while True:
-        nl, i = parseNewline(s, i).vi
-        ws, i = parseNodespace(s, i).vi
-        sc, i = parseSingleLineComment(s, i).vi
-        if nl is None and ws is None and sc is None:
-            break
-    if i == start:
-        return Result.fail(start)
-    return Result(True, i)
-
-
-def parseNodespace(s: Stream, start: int) -> Result[bool]:
-    i = start
-    while True:
-        i = parseWhitespace(s, i).i
-        escline, i = parseEscline(s, i).vi
-        if escline is None:
-            break
-    if i == start:
-        return Result.fail(start)
-    return Result(True, i)
-
-
-def parseEscline(s: Stream, start: int) -> Result[bool]:
-    if s[start] != "\\":
-        return Result.fail(start)
-    i = parseWhitespace(s, start + 1).i
-    if s[i] == "\n":
-        return Result(True, i + 1)
-    sl, i = parseSingleLineComment(s, i).vi
-    if sl is not None:
-        return Result(True, i)
-    if s[i] == "":
-        return Result(True, i)
-    return Result.fail(start)
-
-
-def parseWhitespace(s: Stream, start: int) -> Result[bool]:
-    i = start
-    while True:
-        sp, i = parseUnicodeSpace(s, i).vi
-        bc, i = parseBlockComment(s, i).vi
-        if sp is None and bc is None:
-            break
-    if i == start:
-        return Result.fail(start)
-    return Result(True, i)
-
-
-def parseUnicodeSpace(s: Stream, start: int) -> Result[bool]:
-    if not isWSChar(s[start]):
-        return Result.fail(start)
-    i = start + 1
-    while isWSChar(s[i]):
-        i += 1
-    return Result(True, i)
-
-
-def isIdentChar(ch: str) -> bool:
-    if not ch:
-        return False
-    # reserved characters
-    if ch in r"(){}[]/\"#;=":
-        return False
-    if isWSChar(ch):
-        return False
-    if isNewlineChar(ch):
-        return False
-    if isDisallowedLiteralChar(ch):
-        return False
-    return True
-
-
-def isKeyword(ident: str) -> bool:
-    return ident in ("null", "true", "false")
-
-
-def isSign(ch: str) -> bool:
-    return ch != "" and ch in "+-"
-
-
-def isDigit(ch: str) -> bool:
-    return ch != "" and ch in "0123456789"
-
-
-def isBinaryDigit(ch: str) -> bool:
-    return ch != "" and ch in "01"
-
-
-def isOctalDigit(ch: str) -> bool:
-    return ch != "" and ch in "01234567"
-
-
-def isHexDigit(ch: str) -> bool:
-    return ch != "" and ch in "0123456789abcdefABCDEF"
-
-
-def isDisallowedLiteralChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    if 0x0 <= cp <= 0x08:
-        return True
-    if 0xE <= cp <= 0x1F:
-        return True
-    if cp == 0x7F:
-        return True
-    if 0xD800 <= cp <= 0xDFFF:
-        return True
-    if 0x200E <= cp <= 0x200F:
-        return True
-    if 0x202A <= cp <= 0x202E:
-        return True
-    if 0x2066 <= cp <= 0x2069:
-        return True
-    if cp == 0xFEFF:
-        return True
-
-    return False
-
-
-def isWSChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    if cp in (0x9, 0x20, 0xA0, 0x1680):
-        return True
-    if 0x2000 <= cp <= 0x200A:
-        return True
-    if cp in (0x202F, 0x205F, 0x3000):
-        return True
-    return False
-
-
-def isNewlineChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    return cp in (0x0A, 0x0D, 0x85, 0x0B, 0x0C, 0x2028, 0x2029)
-
-
-def isLinespaceChar(ch: str) -> bool:
-    if not ch:
-        return False
-    return isWSChar(ch) or isNewlineChar(ch)
-
-
-def parseSlashDash(s: Stream, start: int) -> Result[bool]:
-    if s[start] == "/" and s[start + 1] == "-":
-        i = start + 2
-        while True:
-            s1, i = parseLinespace(s, i).vi
-            s2, i = parseNodespace(s, i).vi
-            if s1 is None and s2 is None:
+    while i < n:
+        m = _matchLinespaceChars(chars, i)
+        if m is not None:
+            i = m.end()
+            if i >= n:
                 break
-        return Result(True, i)
-    return Result.fail(start)
+        ch = chars[i]
+        if ch == "/" and i + 1 < n:
+            nextCh = chars[i + 1]
+            if nextCh == "/":
+                mComment = _matchSingleLineComment(chars, i)
+                assert mComment is not None
+                i = mComment.end()
+                continue
+            if nextCh == "*":
+                i = skipBlockComment(s, i)
+                continue
+            break
+        if ch == "\\":
+            nextI = skipEscline(s, i)
+            if nextI == i:
+                break
+            i = nextI
+        else:
+            break
+    return i
 
 
-def parseSingleLineComment(s: Stream, start: int) -> Result[bool]:
-    if not (s[start] == "/" and s[start + 1] == "/"):
-        return Result.fail(start)
-    i = start + 2
-    while not isNewlineChar(s[i]) and not s.eof(i):
-        i += 1
-    i = parseNewline(s, i).i
-    return Result(True, i)
+def skipNodespace(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return start
+    ch = chars[start]
+    if ch in (" ", "\t"):
+        i = start + 1
+        if i >= n or chars[i] not in _NODESPACE_START:
+            return i
+    elif ch not in _NODESPACE_START:
+        return start
+    else:
+        i = start
 
-
-def parseBlockComment(s: Stream, start: int) -> Result[bool]:
-    if not (s[start] == "/" and s[start + 1] == "*"):
-        return Result.fail(start)
-    i = start + 2
     while True:
-        if s.eof(i):
+        i = skipWhitespace(s, i)
+        nextI = skipEscline(s, i)
+        if nextI == i:
+            return i
+        i = nextI
+
+
+def skipEscline(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
+    if start >= n or chars[start] != "\\":
+        return start
+    i = skipWhitespace(s, start + 1)
+    if i >= n:
+        return i
+    nlEnd = skipNewline(chars, i, n)
+    if nlEnd > i:
+        return nlEnd
+    if chars[i] == "/" and i + 1 < n and chars[i + 1] == "/":
+        m = _matchSingleLineComment(chars, i)
+        assert m is not None
+        return m.end()
+    return start
+
+
+def skipWhitespace(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
+    i = start
+    while i < n:
+        m = _matchUnicodeSpace(chars, i)
+        if m is not None:
+            i = m.end()
+            if i >= n:
+                break
+        if chars[i] == "/" and i + 1 < n and chars[i + 1] == "*":
+            i = skipBlockComment(s, i)
+        else:
+            break
+    return i
+
+
+def skipBlockComment(s: Stream, start: int) -> int:
+    # Iterative depth scan with a single `/*|*/` search regex avoids recursion and scans bodies in C.
+    chars = s.chars
+    if not chars.startswith("/*", start):
+        return start
+    depth = 1
+    i = start + 2
+    while depth > 0:
+        m = _searchBlockCommentToken(chars, i)
+        if m is None:
             raise ParseError(s, start, "Hit EOF while inside a multiline comment")
-        if s[i] == "*" and s[i + 1] == "/":
-            return Result(True, i + 2)
-        if s[i] == "/" and s[i + 1] == "*":
-            i = parseBlockComment(s, i).i
-            continue
-        i += 1
+        if m.group() == "/*":
+            depth += 1
+        else:
+            depth -= 1
+        i = m.end()
+    return i
