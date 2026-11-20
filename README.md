@@ -218,6 +218,19 @@ A `ParseConfig` object has the following properties:
 	the node will be inserted as-is.
 
 
+* `version: Literal[1, 2, "auto"] = "auto"`
+
+	Controls which KDL grammar version to parse with.
+	By default (`"auto"`), the parser parses as KDL 2.0,
+	respecting any leading `/- kdl-version 1` or `/- kdl-version 2` version marker,
+	and opportunistically falls back to KDL 1.0 (via `kdl.kdl1`)
+	if a KDL 2.0 parse error looks like a KDL 1.0 construct
+	(such as unprefixed `true`/`false`/`null` keywords, `r"..."`/`r#"..."#` raw strings,
+	multiline single-quoted strings, `\/` escapes, or KDL 1.0 bare identifiers).
+	If fallback also fails, the original KDL 2.0 `ParseError` is raised.
+	Set `version=2` for strict KDL 2.0 parsing, or `version=1` to parse strictly as KDL 1.0.
+
+
 ### ParseFragment
 
 `kdl.ParseFragment` is passed to your custom converters,

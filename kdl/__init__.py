@@ -37,6 +37,7 @@ if typing.TYPE_CHECKING:
         KDLValue as KDLValue,
         NameKey as NameKey,
         NodeKey as NodeKey,
+        ParseVersion as ParseVersion,
         TagKey as TagKey,
         TypeKey as TypeKey,
         ValueKey as ValueKey,

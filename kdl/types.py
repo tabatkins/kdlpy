@@ -435,7 +435,8 @@ class RawString(Stringish):
     def print(self, config: t.PrintConfig | None = None) -> str:
         cfg = config if config is not None else printing.defaults
         tagStr = f"({printIdent(self.tag)})" if self.tag is not None else ""
-        if cfg.respectStringType and not any(ch in NL_SET for ch in self.value):
+        # Leading quotes (e.g. `"` -> `#"""#`) can form invalid KDL2 multiline/quote runs, so fall back to escaped.
+        if cfg.respectStringType and not any(ch in NL_SET for ch in self.value) and not self.value.startswith('"'):
             hashes = "#" * findRequiredHashCount(self.value)
             return f'{tagStr}{hashes}"{self.value}"{hashes}'
         return f'{tagStr}"{escapedFromRaw(self.value)}"'

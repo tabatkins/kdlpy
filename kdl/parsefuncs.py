@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from . import converters, parsing, t
+from . import converters, kdl1check, parsing, t
 from .chars import (
     BARE_IDENT_PATTERN,
     CONFUSABLE_KEYWORDS,
@@ -83,28 +83,67 @@ _FAIL: ParseResult[None] = (None, -1)
 def parse(input: str, config: t.ParseConfig | None = None) -> Document:
     if config is None:
         config = parsing.defaults
-    doc = Document()
+    version = config.version
+    if version == 1:
+        from . import kdl1
+
+        return kdl1.parse(input, config)
+    if version not in (2, "auto"):
+        msg = f"Invalid KDL version {version!r}; expected 1, 2, or 'auto'."
+        raise ValueError(msg)
+
+    allowFallback = version == "auto"
     s = Stream(input, config)
     chars = s.chars
     n = s.length
     i = 1 if chars.startswith("\ufeff") else 0
-    if i < n and chars[i] in _LINESPACE_START:
-        i = skipLinespace(s, i)
+    if allowFallback and i + 2 <= n and chars[i] == "/" and chars[i + 1] == "-":
+        markerVersion = kdl1check.detectVersionMarker(chars, i)
+        if markerVersion == 1:
+            from . import kdl1
 
-    while i < n:
-        node, nextI = parseBaseNode(s, i)
-        if nextI < 0:
-            break
-        if node is not None:
-            doc.nodes.append(node)
-        termEnd = skipTerminatorAndLinespace(s, nextI)
-        if termEnd < 0:
-            got = chars[nextI] if nextI < n else ""
-            raise ParseError(s, nextI, f"Expected a node terminator (newline, ;, or EOF). Got '{got}'")
-        i = termEnd
+            return kdl1.parse(input, config)
+        if markerVersion == 2:
+            allowFallback = False
 
-    if i < n:
-        raise ParseError(s, i, "Unexpected non-node content")
+    doc = Document()
+    try:
+        if i < n and chars[i] in _LINESPACE_START:
+            i = skipLinespace(s, i)
+
+        while i < n:
+            node, nextI = parseBaseNode(s, i)
+            if nextI < 0:
+                break
+            if node is not None:
+                doc.nodes.append(node)
+            termEnd = skipTerminatorAndLinespace(s, nextI)
+            if termEnd < 0:
+                got = chars[nextI] if nextI < n else ""
+                raise ParseError(
+                    s,
+                    nextI,
+                    f"Expected a node terminator (newline, ;, or EOF). Got '{got}'",
+                    maybeKdl1=kdl1check.looksLikeAfterNode(chars, nextI, n),
+                )
+            i = termEnd
+
+        if i < n:
+            raise ParseError(
+                s,
+                i,
+                "Unexpected non-node content",
+                maybeKdl1=kdl1check.looksLikeNodeStart(chars, i, n),
+            )
+    except ParseError as err:
+        if not allowFallback or not err.maybeKdl1:
+            raise
+        from . import kdl1
+
+        try:
+            return kdl1.parse(input, config)
+        except ParseError:
+            raise err from None
     return doc
 
 
@@ -250,7 +289,12 @@ def parseNodeChildren(s: Stream, start: int, discard: bool = False) -> ParseResu
     if i >= n:
         raise ParseError(s, start, "Hit EOF while searching for end of child list")
     if chars[i] != "}":
-        raise ParseError(s, i, "Junk between end of child list and closing }")
+        raise ParseError(
+            s,
+            i,
+            "Junk between end of child list and closing }",
+            maybeKdl1=kdl1check.looksLikeAfterNode(chars, i, n) or kdl1check.looksLikeNodeStart(chars, i, n),
+        )
     return (nodes, i + 1)
 
 
@@ -268,7 +312,12 @@ def parseTag(s: Stream, start: int) -> ParseResult[str]:
     if i < n and chars[i] in _NODESPACE_START:
         i = skipNodespace(s, i)
     if i >= n or chars[i] != ")":
-        raise ParseError(s, i, "Junk between tag ident and closing paren.")
+        raise ParseError(
+            s,
+            i,
+            "Junk between tag ident and closing paren.",
+            maybeKdl1=kdl1check.looksLikeInTag(chars, i, n),
+        )
     return (tag, i + 1)
 
 
@@ -310,10 +359,12 @@ def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[Loos
         strEnd = m.end()
         text = m.group()
         if text in CONFUSABLE_KEYWORDS:
+            isPropKey = strEnd < n and chars[strEnd] == "="
             raise ParseError(
                 s,
                 start,
                 f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{text}'.",
+                maybeKdl1=(not isPropKey) if text in kdl1check.KDL1_KEYWORDS else isPropKey,
             )
     elif ch == '"':
         textOrNone, strEnd = parseStringText(s, start)
@@ -347,7 +398,7 @@ def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[Loos
             return _FAIL
         return (None, valEnd) if discard else ((None, val), valEnd)
     elif ch in "+-":
-        textOrNone, strEnd = parseStringText(s, start)
+        textOrNone, strEnd = parseStringText(s, start, inEntry=True)
         if textOrNone is None:
             return _FAIL
         text = textOrNone
@@ -374,7 +425,12 @@ def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[Loos
             valStart = skipNodespace(s, valStart)
         propVal, propEnd = parseValue(s, valStart, discard=discard)
         if propEnd < 0:
-            raise ParseError(s, valStart, "Expected value after prop=.")
+            raise ParseError(
+                s,
+                valStart,
+                "Expected value after prop=.",
+                maybeKdl1=kdl1check.isTagStartAt(chars, valStart, n),
+            )
         return (None, propEnd) if discard else ((text, propVal), propEnd)
 
     if discard:
@@ -422,7 +478,7 @@ def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.An
             return (None, end)
         return (val, end) if native else (_finalizeValue(s, t.cast("Value", val), tag, valueStart, end), end)
 
-    text, end = parseStringText(s, i)
+    text, end = parseStringText(s, i, inValue=True)
     if text is not None:
         if discard:
             return (None, end)
@@ -580,12 +636,13 @@ def parseKeyword(s: Stream, start: int, native: bool = False) -> ParseResult[t.A
     elif ident == "nan":
         return (NaN(NAN), end)
 
+    isKdl1PropKey = end < s.length and chars[end] == "="
     if ident in CONFUSABLE_KEYWORDS:
-        raise ParseError(s, start, f"KDL keywords must be written in lowercase, got #{ident}")
-    raise ParseError(s, start, f"Unknown keyword #{ident}")
+        raise ParseError(s, start, f"KDL keywords must be written in lowercase, got #{ident}", maybeKdl1=isKdl1PropKey)
+    raise ParseError(s, start, f"Unknown keyword #{ident}", maybeKdl1=isKdl1PropKey)
 
 
-def parseStringText(s: Stream, start: int) -> ParseResult[str]:
+def parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bool = False) -> ParseResult[str]:
     chars = s.chars
     n = s.length
     if start >= n:
@@ -599,10 +656,17 @@ def parseStringText(s: Stream, start: int) -> ParseResult[str]:
         end = m.end()
         ident = m.group()
         if ident in CONFUSABLE_KEYWORDS:
+            if inValue:
+                maybeKdl1 = ident in kdl1check.KDL1_KEYWORDS
+            elif inEntry:
+                maybeKdl1 = ident not in kdl1check.KDL1_KEYWORDS and end < n and chars[end] == "="
+            else:
+                maybeKdl1 = ident not in kdl1check.KDL1_KEYWORDS
             raise ParseError(
                 s,
                 start,
                 f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{ident}'.",
+                maybeKdl1=maybeKdl1,
             )
         return (ident, end)
 
@@ -693,7 +757,12 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
                     parts.append(chars[i : m.end()])
                     i = m.end()
             else:
-                raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
+                raise ParseError(
+                    s,
+                    start,
+                    "Saw an unescaped newline in a single-quote string.",
+                    maybeKdl1=chars.find('"', i + 1) != -1,
+                )
 
     # Raw single-line string (`#"..."#`)
     i = start
@@ -768,7 +837,7 @@ def parseEscape(s: Stream, start: int) -> ParseResult[str]:
         m = _matchLinespaceChars(chars, start + 1)
         assert m is not None
         return ("", m.end())
-    raise ParseError(s, start, "Invalid character escape")
+    raise ParseError(s, start, "Invalid character escape", maybeKdl1=ch == "/")
 
 
 def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:

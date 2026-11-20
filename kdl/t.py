@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from .stream import Stream
     from .unset import UnsetT as UnsetT
 
+    ParseVersion: TypeAlias = Literal[1, 2, "auto"]
+
     _ParseT = TypeVar("_ParseT")
     ParseResult: TypeAlias = tuple[_ParseT | None, int]
 

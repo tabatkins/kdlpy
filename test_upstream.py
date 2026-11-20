@@ -30,6 +30,7 @@ def main() -> bool:
     )
     parseConfig = kdl.ParseConfig(
         nativeUntaggedValues=False,
+        version=2,
     )
     parser = kdl.Parser(parseConfig, printConfig)
 

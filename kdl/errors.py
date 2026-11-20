@@ -4,8 +4,9 @@ from . import t
 
 
 class ParseError(Exception):
-    def __init__(self, s: t.Stream, i: int, details: str) -> None:
+    def __init__(self, s: t.Stream, i: int, details: str, *, maybeKdl1: bool = False) -> None:
         self.line, self.col = s.loc(i)
+        self.maybeKdl1 = maybeKdl1
         loc = f"{self.line}:{self.col}"
         self.msg = f"{loc} {details}"
         if len(self.msg) > 78:

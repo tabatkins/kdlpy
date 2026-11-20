@@ -35,6 +35,7 @@ class ParseConfig:
     nodeConverters: dict[t.NodeKey, NodeConverterT] = field(
         default_factory=dict,
     )
+    version: t.ParseVersion = "auto"
 
 
 defaults = ParseConfig()
