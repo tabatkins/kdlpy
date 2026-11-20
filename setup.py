@@ -17,6 +17,8 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/tabatkins/kdlpy/",
+    license_expression="MIT",
+    license_files=["LICENSE"],
     packages=find_namespace_packages(include=["kdl*"]),
     package_data={"kdl": ["py.typed"]},
     include_package_data=True,
@@ -24,7 +26,6 @@ setup(
     python_requires=">=3.7",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3.7",
         "Topic :: Software Development :: Documentation",
