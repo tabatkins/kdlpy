@@ -1,1 +1,5 @@
-include kdl/py.typed
+include README.md
+include semver.txt
+include kdlreformat.py
+graft kdl
+global-exclude *.py[cod] __pycache__

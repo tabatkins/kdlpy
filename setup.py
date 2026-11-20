@@ -1,8 +1,8 @@
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
-with open("README.md") as fh:
+with open("README.md", encoding="utf-8") as fh:
     long_description = fh.read()
-with open("semver.txt") as fh:
+with open("semver.txt", encoding="utf-8") as fh:
     semver = fh.read().strip()
 """
 with open("requirements.txt") as fh:
@@ -17,7 +17,8 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/tabatkins/kdlpy/",
-    packages=find_packages(),
+    packages=find_namespace_packages(include=["kdl*"]),
+    package_data={"kdl": ["py.typed"]},
     include_package_data=True,
     install_requires=[],
     python_requires=">=3.7",

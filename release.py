@@ -44,7 +44,7 @@ def parseArgs(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--skip-lint",
         dest="skip_lint",
         action="store_true",
-        help="Skip running ./lint before building.",
+        help="Skip running ./lint before building (still runs check-manifest).",
     )
     parser.add_argument(
         "--no-tag",
@@ -89,13 +89,16 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
 
     buildCmd = findToolCommand("build", "pyproject-build")
     twineCmd = findToolCommand("twine", "twine")
+    checkManifestCmd = findToolCommand("check_manifest", "check-manifest")
     missingTools: list[str] = []
     if buildCmd is None:
         missingTools.append("build")
     if twineCmd is None:
         missingTools.append("twine")
+    if checkManifestCmd is None:
+        missingTools.append("check-manifest")
 
-    if missingTools and (not options.dry_run or buildCmd is None):
+    if missingTools and (not options.dry_run or buildCmd is None or checkManifestCmd is None):
         packages = " ".join(missingTools)
         raise ReleaseError(
             f"Missing required release tool(s): {', '.join(missingTools)}\n"
@@ -124,6 +127,9 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
                 raise ReleaseError(
                     f"./lint modified the working tree. Commit those changes before releasing:\n{dirtySummary}",
                 )
+    else:
+        assert checkManifestCmd is not None
+        runCommand([*checkManifestCmd, "--no-build-isolation"], "Checking MANIFEST.in")
 
     print(f"Bumping {SEMVER_FILE} to {newVersion}...")
     semverPath.write_text(newVersion, encoding="utf-8")

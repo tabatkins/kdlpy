@@ -139,3 +139,20 @@ select = [
 
 [tool.ruff.lint.flake8-implicit-str-concat]
 allow-multiline = false
+
+[tool.check-manifest]
+ignore = [
+    "CONTRIBUTING.md",
+    "check_perf.py",
+    "lint",
+    "mypy.ini",
+    "profile",
+    "profiler.py",
+    "release.py",
+    "requirements-dev.txt",
+    "requirements.txt",
+    "test_kdl1.py",
+    "test_upstream.py",
+    "upstream_tests/**",
+    "upstream_tests_v1/**",
+]
