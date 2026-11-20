@@ -37,10 +37,11 @@ from .types import (
 
 if t.TYPE_CHECKING:
     from .t import ParseResult
-    from .types import LooseEntry
 
     # (lineStartPos, indent, text)
     MultilineLine: t.TypeAlias = tuple[int, str, str]
+    # (propKeyOrNone, value, nextIndex) with nextIndex < 0 for no-match
+    EntryResult: t.TypeAlias = tuple[str | None, t.Any, int]
 
 # 1-char lookahead sets used to skip unnecessary scanner calls (and dispatch bare idents in parseEntry).
 _NODESPACE_START = frozenset(WS_CHARS + "/\\")
@@ -78,6 +79,7 @@ _SIMPLE_ESCAPES: dict[str, str] = {
 # ParseResult convention: `(value, nextIndex)` with `index < 0` for no-match,
 # and `(None, index >= 0)` for successfully parsed but discarded (`/-`) items.
 _FAIL: ParseResult[None] = (None, -1)
+_ENTRY_FAIL: tuple[None, None, int] = (None, None, -1)
 
 
 def parse(input: str, config: t.ParseConfig | None = None) -> Document:
@@ -171,9 +173,8 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
         return _FAIL
     i = nameEnd
 
-    entries: list[LooseEntry] = []
-    # Lazily allocated only if properties appear; maps key -> index in `entries` for O(1) duplicate replacement.
-    propIndices: dict[str, int] | None = None
+    args: list[t.Any] = []
+    props: dict[str, t.Any] = {}
 
     # props and args
     while True:
@@ -201,25 +202,15 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
             sdEnd = spaceEnd
             entryDiscard = discard
 
-        entry, nextI = parseEntry(s, sdEnd, discard=entryDiscard)
+        propKey, propVal, nextI = parseEntry(s, sdEnd, discard=entryDiscard)
         if nextI < 0:
             break
         i = nextI
         if not entryDiscard:
-            assert entry is not None
-            propKey = entry[0]
             if propKey is None:
-                entries.append(entry)
-            elif propIndices is None:
-                propIndices = {propKey: len(entries)}
-                entries.append(entry)
+                args.append(propVal)
             else:
-                existingIdx = propIndices.get(propKey)
-                if existingIdx is not None:
-                    entries[existingIdx] = entry
-                else:
-                    propIndices[propKey] = len(entries)
-                    entries.append(entry)
+                props[propKey] = propVal
 
     # child blocks (optional real children plus any slashdashed child blocks)
     children: list[Node] = []
@@ -247,7 +238,7 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
     if discard:
         return (None, i)
 
-    node: Node = Node(name, tag, entries, children)
+    node: Node = Node(name, tag, args, props, children)
     nodeConverters = s.config.nodeConverters
     if nodeConverters:
         pf: ParseFragment | None = None
@@ -344,18 +335,18 @@ def skipTerminatorAndLinespace(s: Stream, start: int) -> int:
     return -1
 
 
-def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[LooseEntry]:
+def parseEntry(s: Stream, start: int, discard: bool = False) -> EntryResult:
     chars = s.chars
     n = s.length
     if start >= n:
-        return _FAIL
+        return _ENTRY_FAIL
 
     ch = chars[start]
     if ch not in _SPECIAL_ENTRY_START:
         # Fast path: bare identifier (either property key `key=val` or bare string arg)
         m = _matchBareIdent(chars, start)
         if m is None:
-            return _FAIL
+            return _ENTRY_FAIL
         strEnd = m.end()
         text = m.group()
         if text in CONFUSABLE_KEYWORDS:
@@ -373,37 +364,37 @@ def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[Loos
     elif ch in DIGITS or (ch in "+-" and start + 1 < n and chars[start + 1] in DIGITS):
         if discard or s.fastUntagged:
             val, valEnd = parseNumber(s, start, native=True)
-            return (None, valEnd) if discard else ((None, val), valEnd)
+            return (None, None, valEnd) if discard else (None, val, valEnd)
         numVal, valEnd = parseNumber(s, start, native=False)
         val = _finalizeValue(s, t.cast("Value", numVal), None, start, valEnd)
-        return ((None, val), valEnd)
+        return (None, val, valEnd)
     elif ch == "#":
         if start + 1 < n and chars[start + 1] not in ('"', "#"):
             rawFast = discard or s.fastUntagged
             kwVal, kwEnd = parseKeyword(s, start, native=rawFast)
             if kwEnd < 0:
-                return _FAIL
+                return _ENTRY_FAIL
             if discard:
-                return (None, kwEnd)
+                return (None, None, kwEnd)
             if rawFast:
-                return ((None, kwVal), kwEnd)
-            return ((None, _finalizeValue(s, t.cast("Value", kwVal), None, start, kwEnd)), kwEnd)
+                return (None, kwVal, kwEnd)
+            return (None, _finalizeValue(s, t.cast("Value", kwVal), None, start, kwEnd), kwEnd)
         textOrNone, strEnd = parseStringText(s, start)
         if textOrNone is None:
-            return _FAIL
+            return _ENTRY_FAIL
         text = textOrNone
     elif ch == "(":
         val, valEnd = parseValue(s, start, discard=discard)
         if valEnd < 0:
-            return _FAIL
-        return (None, valEnd) if discard else ((None, val), valEnd)
+            return _ENTRY_FAIL
+        return (None, None, valEnd) if discard else (None, val, valEnd)
     elif ch in "+-":
         textOrNone, strEnd = parseStringText(s, start, inEntry=True)
         if textOrNone is None:
-            return _FAIL
+            return _ENTRY_FAIL
         text = textOrNone
     else:
-        return _FAIL
+        return _ENTRY_FAIL
 
     # Peek past optional nodespace for `=` to distinguish `key=val` properties from string args without backtracking.
     eqPos = -1
@@ -431,13 +422,13 @@ def parseEntry(s: Stream, start: int, discard: bool = False) -> ParseResult[Loos
                 "Expected value after prop=.",
                 maybeKdl1=kdl1check.isTagStartAt(chars, valStart, n),
             )
-        return (None, propEnd) if discard else ((text, propVal), propEnd)
+        return (None, None, propEnd) if discard else (text, propVal, propEnd)
 
     if discard:
-        return (None, strEnd)
+        return (None, None, strEnd)
     if s.fastUntagged:
-        return ((None, text), strEnd)
-    return ((None, _finalizeValue(s, String(text), None, start, strEnd)), strEnd)
+        return (None, text, strEnd)
+    return (None, _finalizeValue(s, String(text), None, start, strEnd), strEnd)
 
 
 def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.Any]:

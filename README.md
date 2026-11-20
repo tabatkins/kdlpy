@@ -60,17 +60,17 @@ Document(
         Node(
             name='node_name',
             tag=None,
-            entries=[
-                (None, 'arg')
-            ],
+            args=['arg'],
+            props={},
             nodes=[
                 Node(
                     name='child_node',
                     tag=None,
-                    entries=[
-                        ('foo', 1.0),
-                        ('bar', True)
-                    ],
+                    args=[],
+                    props={
+                        'foo': 1.0,
+                        'bar': True
+                    },
                     nodes=[]
                 )
             ]
@@ -82,15 +82,10 @@ Document(
 
 You can also create a `kdl.Parser()` object and call its `.parse()` method; `Parser` objects can set up parsing and printing options that'll apply by default. See below for how to configure parsing options.
 
-Either way, you'll get back a `kdl.Document` object, which is fully mutable.
-By default, untagged KDL values are represented with native Python objects.
-Each `kdl.Node` stores its arguments and properties together in a single `.entries` list of `(key, value)` tuples,
-preserving their order from the source document:
-positional arguments have `None` as their key (`(None, 'arg')`),
-while properties have a `str` key (`('foo', 1.0)`).
+Either way, you'll get back a `kdl.Document` object, which is fully mutable. By default, untagged KDL values are represented with native Python objects.
 
 ```py3
->>> doc.nodes[0].nodes[0].entries[0] = ("foo", 2)
+>>> doc.nodes[0].nodes[0].props["foo"] = 2
 >>>
 >>> print(doc)
 node_name arg {
@@ -305,13 +300,17 @@ A `PrintConfig` object has the following properties:
 	(The printer always ends nodes with a newline anyway,
 	so this is purely a stylistic choice.)
 
-* `printNulls: bool = True`
+* `printNullArgs: bool = True`
 
-	When `False`, automatically skips over any `#null`/`None` entries
-	(both arguments and properties).
+	When `False`, automatically skips over any `#null`/`None` arguments.
 	This will corrupt documents that use the `#null` keyword intentionally,
 	but can be useful if you'd prefer to use a `None` value
-	as a signal that an entry has been removed.
+	as a signal that the argument has been removed.
+
+* `printNullProps: bool = True`
+
+	Identical to `printNullArgs`,
+	but applies to properties rather than arguments.
 
 * `respectStringType: bool = True`
 
@@ -344,13 +343,10 @@ A `PrintConfig` object has the following properties:
 	Like the previous options, this only has an effect on kdl-py objects;
 	native Python numbers are printed as normal for Python.
 
-* `sortEntries: bool = False`
+* `sortProperties: bool = False`
 
-	When `False`, a node's entries (arguments and properties)
-	are printed in the exact order they appear in `node.entries`.
-	When `True`, entries are stably sorted with positional arguments first
-	(preserving their relative order),
-	followed by properties sorted lexicographically by key.
+	When `False`, a node's properties are printed in insertion order.
+	When `True`, properties are printed sorted lexicographically by key.
 
 ## Full API Reference
 
@@ -362,17 +358,15 @@ A `PrintConfig` object has the following properties:
 	* `doc[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `doc.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey). Returns the default value if nothing matches.
 	* `doc.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#nodekey)
-* `kdl.Node(name: str, tag: str|None = None, entries: list[tuple[str|None, Any]]?, nodes: list[kdl.Node]?)`
+* `kdl.Node(name: str, tag: str|None = None, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
 	* `node.print(PrintConfig|None = None, indentLevel: int = 0) -> str`
 	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey). Returns the default value if nothing matches.
 	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#nodekey)
-	* `node.getEntries(ValueKey) -> Iterable[tuple[str|None, Any]]` returns an iterator of `(name, value)` pairs for the entries (both arguments with `name=None` and properties) whose value matches the [`ValueKey`](#valuekey)
-		(Note: for this purpose, non-KDL values, such as `int`, have no tag, and can only meaningfully be tested via a `TypeKey`.)
 	* `node.getProps(ValueKey) -> Iterable[tuple[str, Any]]` returns an iterator of `(name, value)` pairs for the properties whose value matches the [`ValueKey`](#valuekey)
-		(Same disclaimer as `.getEntries()`.)
+		(Note: for this purpose, non-KDL values, such as `int`, have no tag, and can only meaningfully be tested via a `TypeKey`.)
 	* `node.getArgs(ValueKey) -> Iterable[Any]` returns an iterator of the arguments that match the [`ValueKey`](#valuekey)
-		(Same disclaimer as `.getEntries()`.)
+		(Same disclaimer as `.getProps()`.)
 	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#nodekey)
 
 * `kdl.Value` ‡

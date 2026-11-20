@@ -26,7 +26,7 @@ def main() -> bool:
         respectRadix=False,
         respectStringType=False,
         exponent="E",
-        sortEntries=True,
+        sortProperties=True,
     )
     parseConfig = kdl.ParseConfig(
         nativeUntaggedValues=False,

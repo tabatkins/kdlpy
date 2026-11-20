@@ -5,11 +5,12 @@ from dataclasses import dataclass
 class PrintConfig:
     indent: str = "\t"
     semicolons: bool = False
-    printNulls: bool = True
+    printNullArgs: bool = True
+    printNullProps: bool = True
     respectRadix: bool = True
     respectStringType: bool = True
     exponent: str = "e"
-    sortEntries: bool = False
+    sortProperties: bool = False
 
 
 defaults = PrintConfig()

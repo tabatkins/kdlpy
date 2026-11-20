@@ -28,13 +28,12 @@ from .types import (
 )
 
 if t.TYPE_CHECKING:
-    from .types import LooseEntry
-
     _FastFrame: t.TypeAlias = tuple[
         list[Node],  # parentNodes
         str,  # name
         str | None,  # tag
-        list[LooseEntry],  # entries
+        list[t.Any],  # args
+        dict[str, t.Any],  # props
         bool,  # nodeDiscard
         bool,  # childDiscard
         bool,  # parentDiscard
@@ -49,7 +48,8 @@ if t.TYPE_CHECKING:
         int,  # nameEnd
         str,  # name
         str | None,  # tag
-        list[LooseEntry],  # entries
+        list[t.Any],  # args
+        dict[str, t.Any],  # props
         bool,  # nodeDiscard
         bool,  # childDiscard
         bool,  # parentDiscard
@@ -850,11 +850,11 @@ def _tokenOffset(chars: str, pos: int, endPos: int, tokIdx: int) -> int:
 
 
 def _unclosedBlockPos(chars: str, frame: _FastFrame) -> int:
-    bPos = frame[7]
-    bEnd = frame[8]
+    bPos = frame[8]
+    bEnd = frame[9]
     if bEnd < 0:
         return bPos
-    m = next(itertools.islice(_tokFinditer(chars, bPos, bEnd), frame[9], frame[9] + 1))
+    m = next(itertools.islice(_tokFinditer(chars, bPos, bEnd), frame[10], frame[10] + 1))
     # For `' {'` token, `{` is at start + 1; for bare `'{'`, at start.
     st = m.start()
     return st + 1 if chars[st] == " " else st
@@ -869,9 +869,8 @@ def _handleChunkFallback(
     state: int,
     name: str,
     tag: str | None,
-    entries: list[LooseEntry] | None,
+    args: list[t.Any] | None,
     props: dict[str, t.Any] | None,
-    propIndices: dict[str, int] | None,
     nodeDiscard: bool,
     curNodes: list[Node],
     curDiscard: bool,
@@ -881,9 +880,8 @@ def _handleChunkFallback(
     int,  # new state
     str,  # name
     str | None,  # tag
-    list[LooseEntry] | None,  # entries
+    list[t.Any] | None,  # args
     dict[str, t.Any] | None,  # props
-    dict[str, int] | None,  # propIndices
     bool,  # nodeDiscard
     list[Node],  # curNodes
     bool,  # curDiscard
@@ -907,14 +905,14 @@ def _handleChunkFallback(
                     mh.start(1),
                     "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-            return (mh.end(), 1, cand, None, None, None, None, curDiscard, curNodes, curDiscard)
+            return (mh.end(), 1, cand, None, None, None, curDiscard, curNodes, curDiscard)
         if li == 3:
             if not stack:
                 raise ParseError(s, mh.start(3), "Expected a node")
-            parentNodes, pName, pTag, pEntries, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = stack.pop()
+            parentNodes, pName, pTag, pArgs, pProps, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = stack.pop()
             if not pNodeDiscard:
-                parentNodes.append(Node(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
-            return (mh.end(), 2, "", None, None, None, None, False, parentNodes, pParentDiscard)
+                parentNodes.append(Node(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
+            return (mh.end(), 2, "", None, None, None, False, parentNodes, pParentDiscard)
         if li is None:
             end = mh.end()
             if end >= n:
@@ -924,14 +922,14 @@ def _handleChunkFallback(
                         _unclosedBlockPos(chars, stack[-1]),
                         "Hit EOF while searching for end of child list",
                     )
-                return (-1, 0, "", None, None, None, None, False, curNodes, curDiscard)
+                return (-1, 0, "", None, None, None, False, curNodes, curDiscard)
             raise ParseError(
                 s,
                 end,
                 "Junk between end of child list and closing }" if stack else "Expected a node",
             )
         if li == 2:
-            return (mh.end(), 1, mh.group(2), None, None, None, None, curDiscard, curNodes, curDiscard)
+            return (mh.end(), 1, mh.group(2), None, None, None, curDiscard, curNodes, curDiscard)
         if li == 5:
             tagStart = mh.start(5)
             newTag, tagEnd = _parseTag(s, tagStart)
@@ -948,7 +946,7 @@ def _handleChunkFallback(
                     tagStart,
                     "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-            return (nameEnd, 1, nameOrNone, newTag, None, None, None, curDiscard, curNodes, curDiscard)
+            return (nameEnd, 1, nameOrNone, newTag, None, None, curDiscard, curNodes, curDiscard)
         if li == 4:
             sdStart = mh.start(4)
             j = _skipNodespace(s, mh.end())
@@ -964,15 +962,15 @@ def _handleChunkFallback(
                     sdStart,
                     "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-            return (nameEnd, 1, nameOrNone, newTag, None, None, None, True, curNodes, curDiscard)
+            return (nameEnd, 1, nameOrNone, newTag, None, None, True, curNodes, curDiscard)
         if li == 6:
-            return (_skipBlockComment(s, mh.start(6)), 0, "", None, None, None, None, False, curNodes, curDiscard)
+            return (_skipBlockComment(s, mh.start(6)), 0, "", None, None, None, False, curNodes, curDiscard)
         if li == 7:
             qName, qEnd = _parseEscapedString(s, mh.start(7))
-            return (qEnd, 1, qName, None, None, None, None, curDiscard, curNodes, curDiscard)
+            return (qEnd, 1, qName, None, None, None, curDiscard, curNodes, curDiscard)
         rawStart = mh.start(8)
         rName, rEnd = _parseRawString(s, rawStart, mh.end() - rawStart - 2)
-        return (rEnd, 1, rName, None, None, None, None, curDiscard, curNodes, curDiscard)
+        return (rEnd, 1, rName, None, None, None, curDiscard, curNodes, curDiscard)
 
     if state == 2:
         if i < n:
@@ -980,15 +978,7 @@ def _handleChunkFallback(
             if chEnd in wsSet or chEnd == "\\" or (chEnd == "/" and i + 1 < n and chars[i + 1] == "*"):
                 i = _skipNodespace(s, i)
             i = _skipTerminator(s, i)
-        return (i, 0, "", None, None, None, None, False, curNodes, curDiscard)
-
-    def _finishEntries() -> list[LooseEntry]:
-        if props is not None:
-            if entries is not None:
-                entries.extend(props.items())
-                return entries
-            return list(props.items())
-        return [] if entries is None else entries
+        return (i, 0, "", None, None, None, False, curNodes, curDiscard)
 
     # state == 1
     ch = chars[i]
@@ -1000,79 +990,65 @@ def _handleChunkFallback(
             hadSpace = True
     if not hadSpace:
         if ch == "{":
-            finalEnt = [] if nodeDiscard else _finishEntries()
-            stack.append((curNodes, name, tag, finalEnt, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
-            return (i + 1, 0, "", None, None, None, None, False, [], nodeDiscard)
+            finalArgs: list[t.Any] = [] if (nodeDiscard or args is None) else args
+            finalProps: dict[str, t.Any] = {} if (nodeDiscard or props is None) else props
+            stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
+            return (i + 1, 0, "", None, None, None, False, [], nodeDiscard)
         if ch == "/" and i + 1 < n and chars[i + 1] == "-":
             j = _skipNodespace(s, i + 2)
             if j < n and chars[j] == "{":
-                finalEnt = [] if nodeDiscard else _finishEntries()
-                stack.append((curNodes, name, tag, finalEnt, nodeDiscard, True, curDiscard, i, -1, 0))
-                return (j + 1, 0, "", None, None, None, None, False, [], True)
+                finalArgs = [] if (nodeDiscard or args is None) else args
+                finalProps = {} if (nodeDiscard or props is None) else props
+                stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, True, curDiscard, i, -1, 0))
+                return (j + 1, 0, "", None, None, None, False, [], True)
             raise ParseError(s, i, "Junk after node, before terminator.")
         i = _skipTerminator(s, i)
         if not nodeDiscard:
-            curNodes.append(Node(name, tag, _finishEntries(), []))
-        return (i, 0, "", None, None, None, None, False, curNodes, curDiscard)
+            curNodes.append(Node(name, tag, [] if args is None else args, {} if props is None else props, []))
+        return (i, 0, "", None, None, None, False, curNodes, curDiscard)
 
     if i >= n:
         if not nodeDiscard:
-            curNodes.append(Node(name, tag, _finishEntries(), []))
-        return (n, 0, "", None, None, None, None, False, curNodes, curDiscard)
+            curNodes.append(Node(name, tag, [] if args is None else args, {} if props is None else props, []))
+        return (n, 0, "", None, None, None, False, curNodes, curDiscard)
 
     ch2 = chars[i]
     if ch2 == "{":
-        finalEnt = [] if nodeDiscard else _finishEntries()
-        stack.append((curNodes, name, tag, finalEnt, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
-        return (i + 1, 0, "", None, None, None, None, False, [], nodeDiscard)
+        finalArgs = [] if (nodeDiscard or args is None) else args
+        finalProps = {} if (nodeDiscard or props is None) else props
+        stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
+        return (i + 1, 0, "", None, None, None, False, [], nodeDiscard)
     if ch2 in ("\n", ";") or ch2 in nlSet or (ch2 == "/" and i + 1 < n and chars[i + 1] == "/"):
         i = _skipTerminator(s, i)
         if not nodeDiscard:
-            curNodes.append(Node(name, tag, _finishEntries(), []))
-        return (i, 0, "", None, None, None, None, False, curNodes, curDiscard)
+            curNodes.append(Node(name, tag, [] if args is None else args, {} if props is None else props, []))
+        return (i, 0, "", None, None, None, False, curNodes, curDiscard)
     if ch2 == "/" and i + 1 < n and chars[i + 1] == "-":
         sdStart = i
         j = _skipNodespace(s, i + 2)
         if j < n and chars[j] == "{":
-            finalEnt = [] if nodeDiscard else _finishEntries()
-            stack.append((curNodes, name, tag, finalEnt, nodeDiscard, True, curDiscard, sdStart, -1, 0))
-            return (j + 1, 0, "", None, None, None, None, False, [], True)
+            finalArgs = [] if (nodeDiscard or args is None) else args
+            finalProps = {} if (nodeDiscard or props is None) else props
+            stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, True, curDiscard, sdStart, -1, 0))
+            return (j + 1, 0, "", None, None, None, False, [], True)
         entEnd = _parseDiscardedEntity(s, j)
         if entEnd < 0:
             raise ParseError(s, sdStart, "Junk after node, before terminator.")
-        return (entEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        return (entEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
     def _addProp(pk: str, pv: t.Any) -> None:
-        nonlocal entries, props, propIndices
-        if props is not None:
-            props[pk] = pv
-        elif propIndices is None:
+        nonlocal props
+        if props is None:
             props = {pk: pv}
         else:
-            assert entries is not None
-            nEnt = len(entries)
-            idx = propIndices.setdefault(pk, nEnt)
-            if idx == nEnt:
-                entries.append((pk, pv))
-            else:
-                entries[idx] = (pk, pv)
+            props[pk] = pv
 
     def _addArg(av: t.Any) -> None:
-        nonlocal entries, props, propIndices
-        if props is not None:
-            if entries is None:
-                entries = list(props.items())
-                propIndices = {pk: pi for pi, pk in enumerate(props)}
-            else:
-                base = len(entries)
-                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                entries.extend(props.items())
-            props = None
-            entries.append((None, av))
-        elif entries is None:
-            entries = [(None, av)]
+        nonlocal args
+        if args is None:
+            args = [av]
         else:
-            entries.append((None, av))
+            args.append(av)
 
     m = _matchEntry(chars, i)
     if m is not None:
@@ -1095,7 +1071,7 @@ def _handleChunkFallback(
                         else (Bool(True) if kwStr == "true" else (Bool(False) if kwStr == "false" else Null()))
                     )
                 _addProp(key, pval)
-            return (endPos, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (endPos, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if eli == 5:
             key = m.group(1)
             valStart = m.end()
@@ -1108,17 +1084,17 @@ def _handleChunkFallback(
                 raise ParseError(s, valStart, "Expected value after prop=.")
             if not nodeDiscard:
                 _addProp(key, val)
-            return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if eli == 6:
             if not nodeDiscard:
                 sVal = m.group(6)
                 _addArg(sVal if nativeUntagged else String(sVal))
-            return (m.end(), 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if eli == 7:
             if not nodeDiscard:
                 rawNum = m.group(7)
                 _addArg(_floatFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum))
-            return (m.end(), 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         tok1 = m.group(1)
         kwVal = _KW_NATIVE.get(tok1, _UNSET)
         if kwVal is not _UNSET:
@@ -1129,7 +1105,7 @@ def _handleChunkFallback(
                     else (Bool(True) if tok1 == "true" else (Bool(False) if tok1 == "false" else Null()))
                 )
                 _addArg(val)
-            return (m.end(), 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if tok1.lower() in keywords:
             raise ParseError(s, i, "KDL keywords are lower-case.")
         raise ParseError(s, i, "Junk after node, before terminator.")
@@ -1146,10 +1122,10 @@ def _handleChunkFallback(
                 raise ParseError(s, strEnd + 1, "Expected value after prop=.")
             if not nodeDiscard:
                 _addProp(strVal, val)
-            return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if not nodeDiscard:
             _addArg(strVal if nativeUntagged else String(strVal))
-        return (strEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        return (strEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
     if ch2 == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
         j = i + 1
@@ -1167,10 +1143,10 @@ def _handleChunkFallback(
                     raise ParseError(s, strEnd + 1, "Expected value after prop=.")
                 if not nodeDiscard:
                     _addProp(rawVal, val)
-                return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+                return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
             if not nodeDiscard:
                 _addArg(rawVal if nativeUntagged else RawString(rawVal))
-            return (strEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            return (strEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
     val, valEnd = (
         _parseValueFast(s, i, nodeDiscard, nativeTagged) if nativeUntagged else _parseValue(s, i, False, nodeDiscard)
@@ -1179,7 +1155,7 @@ def _handleChunkFallback(
         raise ParseError(s, i, "Junk after node, before terminator.")
     if not nodeDiscard:
         _addArg(val)
-    return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+    return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
 
 def _parseChunkedNative(s: Stream) -> Document:
@@ -1198,7 +1174,6 @@ def _parseChunkedNative(s: Stream) -> Document:
     strCls = String
     floatFn = float
     intFn = int
-    listFn = list
     unescFn = _unescapeValidated
 
     curNodes: list[Node] = []
@@ -1210,9 +1185,8 @@ def _parseChunkedNative(s: Stream) -> Document:
     state = 0
     name = ""
     tag: str | None = None
-    entries: list[LooseEntry] | None = None
+    args: list[t.Any] | None = None
     props: dict[str, t.Any] | None = None
-    propIndices: dict[str, int] | None = None
     nodeDiscard = False
     nextEntDiscard = False
     sdTokIdx = 0
@@ -1241,9 +1215,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                 state,
                 name,
                 tag,
-                entries,
+                args,
                 props,
-                propIndices,
                 nodeDiscard,
                 curNodes,
                 curDiscard,
@@ -1255,9 +1228,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                 state=state,
                 name=name,
                 tag=tag,
-                entries=entries,
+                args=args,
                 props=props,
-                propIndices=propIndices,
                 nodeDiscard=nodeDiscard,
                 curNodes=curNodes,
                 curDiscard=curDiscard,
@@ -1321,18 +1293,10 @@ def _parseChunkedNative(s: Stream) -> Document:
                     if fval == 0.0 and vc == "-" and "." not in pv:
                         fval = _floatFromDecStr(pv)
                     pval = fval
-                if props is not None:
-                    props[k] = pval
-                elif propIndices is None:
+                if props is None:
                     props = {k: pval}
                 else:
-                    assert entries is not None
-                    nEnt = len(entries)
-                    idx = propIndices.setdefault(k, nEnt)
-                    if idx == nEnt:
-                        entries.append((k, pval))
-                    else:
-                        entries[idx] = (k, pval)
+                    props[k] = pval
                 continue
 
             if nh:
@@ -1345,19 +1309,14 @@ def _parseChunkedNative(s: Stream) -> Document:
                         failIdx = nToks - 1 - lengthHint(tokIter)
                         break
                     if state == 1 and not nodeDiscard:
-                        if props is not None:
-                            if entries is not None:
-                                entries.extend(props.items())
-                                curNodes.append(nodeCls(name, tag, entries, []))
-                            else:
-                                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                        else:
-                            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
-                    parentNodes, pName, pTag, pEntries, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
+                        curNodes.append(
+                            nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
+                        )
+                    parentNodes, pName, pTag, pArgs, pProps, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
                         stackPop()
                     )
                     if not pNodeDiscard:
-                        parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                        parentNodes.append(nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
                     curNodes = parentNodes
                     curDiscard = pParentDiscard
                     state = 2
@@ -1386,19 +1345,13 @@ def _parseChunkedNative(s: Stream) -> Document:
                         break
                     nDisc = curDiscard
                 if state == 1 and not nodeDiscard:
-                    if props is not None:
-                        if entries is not None:
-                            entries.extend(props.items())
-                            curNodes.append(nodeCls(name, tag, entries, []))
-                        else:
-                            curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                    else:
-                        curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                    curNodes.append(
+                        nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
+                    )
                 name = nName
                 tag = nTag
-                entries = None
+                args = None
                 props = None
-                propIndices = None
                 nodeDiscard = nDisc
                 state = 1
                 continue
@@ -1415,7 +1368,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                                 parentNodes,
                                 pName,
                                 pTag,
-                                pEntries,
+                                pArgs,
+                                pProps,
                                 pNodeDiscard,
                                 pChildDiscard,
                                 pParentDiscard,
@@ -1424,7 +1378,9 @@ def _parseChunkedNative(s: Stream) -> Document:
                                 _,
                             ) = stackPop()
                             if not pNodeDiscard:
-                                parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                                parentNodes.append(
+                                    nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes),
+                                )
                             curNodes = parentNodes
                             curDiscard = pParentDiscard
                             state = 2
@@ -1437,9 +1393,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                         ):
                             name = arg
                             tag = None
-                            entries = None
+                            args = None
                             props = None
-                            propIndices = None
                             nodeDiscard = curDiscard
                             state = 1
                             continue
@@ -1447,16 +1402,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                     break
 
                 if ac0 == "{":
-                    if nodeDiscard:
-                        finalEnt: list[LooseEntry] = []
-                    elif props is not None:
-                        if entries is not None:
-                            entries.extend(props.items())
-                            finalEnt = entries
-                        else:
-                            finalEnt = listFn(props.items())
-                    else:
-                        finalEnt = [] if entries is None else entries
+                    finalArgs: list[t.Any] = [] if (nodeDiscard or args is None) else args
+                    finalProps: dict[str, t.Any] = {} if (nodeDiscard or props is None) else props
                     childDisc = nodeDiscard or nextEntDiscard
                     nextEntDiscard = False
                     stackPush(
@@ -1464,7 +1411,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                             curNodes,
                             name,
                             tag,
-                            finalEnt,
+                            finalArgs,
+                            finalProps,
                             nodeDiscard,
                             childDisc,
                             curDiscard,
@@ -1509,20 +1457,10 @@ def _parseChunkedNative(s: Stream) -> Document:
                             failIdx = nToks - 1 - lengthHint(tokIter)
                             break
                     if not entDiscard:
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, inner))
-                        elif entries is None:
-                            entries = [(None, inner)]
+                        if args is None:
+                            args = [inner]
                         else:
-                            entries.append((None, inner))
+                            args.append(inner)
                     continue
                 if ac0 == "(":
                     rp = arg.find(")", 1)
@@ -1551,20 +1489,10 @@ def _parseChunkedNative(s: Stream) -> Document:
                                 val: t.Any = conv
                             else:
                                 val = strCls(inner, tName)
-                            if props is not None:
-                                if entries is None:
-                                    entries = listFn(props.items())
-                                    propIndices = {pk: pi for pi, pk in enumerate(props)}
-                                else:
-                                    base = len(entries)
-                                    propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                    entries.extend(props.items())
-                                props = None
-                                entries.append((None, val))
-                            elif entries is None:
-                                entries = [(None, val)]
+                            if args is None:
+                                args = [val]
                             else:
-                                entries.append((None, val))
+                                args.append(val)
                         continue
                     nextEntDiscard = False
                     if not entDiscard:
@@ -1578,20 +1506,10 @@ def _parseChunkedNative(s: Stream) -> Document:
                             dObj = _decimalFromStr(vStr)
                             dObj.tag = tName
                             val = dObj
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
                     nextEntDiscard = False
@@ -1599,20 +1517,10 @@ def _parseChunkedNative(s: Stream) -> Document:
                         q = arg.find('"', 1)
                         h = q - 1
                         rText = arg[q + 1 : len(arg) - 1 - h]
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, rText))
-                        elif entries is None:
-                            entries = [(None, rText)]
+                        if args is None:
+                            args = [rText]
                         else:
-                            entries.append((None, rText))
+                            args.append(rText)
                     continue
                 if "1" <= ac0 <= "9":
                     nextEntDiscard = False
@@ -1621,20 +1529,10 @@ def _parseChunkedNative(s: Stream) -> Document:
                             val = floatFn(arg)
                         except ValueError:
                             val = floatFn(arg.replace("_", ""))
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and arg[1] in digits):
                     nextEntDiscard = False
@@ -1655,39 +1553,19 @@ def _parseChunkedNative(s: Stream) -> Document:
                             if fval == 0.0 and ac0 == "-" and "." not in arg:
                                 fval = _floatFromDecStr(arg)
                             val = fval
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 kwVal = kwGet(arg, unset)
                 if kwVal is not unset:
                     nextEntDiscard = False
                     if not entDiscard:
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, kwVal))
-                        elif entries is None:
-                            entries = [(None, kwVal)]
+                        if args is None:
+                            args = [kwVal]
                         else:
-                            entries.append((None, kwVal))
+                            args.append(kwVal)
                     continue
                 failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
                 nextEntDiscard = False
@@ -1701,30 +1579,17 @@ def _parseChunkedNative(s: Stream) -> Document:
                         break
                     if state == 1:
                         if not nodeDiscard:
-                            if props is not None:
-                                if entries is not None:
-                                    entries.extend(props.items())
-                                    curNodes.append(nodeCls(name, tag, entries, []))
-                                else:
-                                    curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                            else:
-                                curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                            curNodes.append(
+                                nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
+                            )
                         state = 0
                         continue
                     if state == 2:
                         state = 0
                         continue
                 elif fb == "{" and state == 1:
-                    if nodeDiscard:
-                        finalEnt = []
-                    elif props is not None:
-                        if entries is not None:
-                            entries.extend(props.items())
-                            finalEnt = entries
-                        else:
-                            finalEnt = listFn(props.items())
-                    else:
-                        finalEnt = [] if entries is None else entries
+                    finalArgs = [] if (nodeDiscard or args is None) else args
+                    finalProps = {} if (nodeDiscard or props is None) else props
                     childDisc = nodeDiscard or nextEntDiscard
                     nextEntDiscard = False
                     stackPush(
@@ -1732,7 +1597,8 @@ def _parseChunkedNative(s: Stream) -> Document:
                             curNodes,
                             name,
                             tag,
-                            finalEnt,
+                            finalArgs,
+                            finalProps,
                             nodeDiscard,
                             childDisc,
                             curDiscard,
@@ -1760,14 +1626,7 @@ def _parseChunkedNative(s: Stream) -> Document:
                 nextEntDiscard = False
                 break
             if state == 1 and not nodeDiscard:
-                if props is not None:
-                    if entries is not None:
-                        entries.extend(props.items())
-                        curNodes.append(nodeCls(name, tag, entries, []))
-                    else:
-                        curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                else:
-                    curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
             state = 0
 
         if failIdx < 0 and failOffset < 0:
@@ -1786,9 +1645,8 @@ def _parseChunkedNative(s: Stream) -> Document:
             state,
             name,
             tag,
-            entries,
+            args,
             props,
-            propIndices,
             nodeDiscard,
             curNodes,
             curDiscard,
@@ -1800,9 +1658,8 @@ def _parseChunkedNative(s: Stream) -> Document:
             state=state,
             name=name,
             tag=tag,
-            entries=entries,
+            args=args,
             props=props,
-            propIndices=propIndices,
             nodeDiscard=nodeDiscard,
             curNodes=curNodes,
             curDiscard=curDiscard,
@@ -1813,14 +1670,7 @@ def _parseChunkedNative(s: Stream) -> Document:
         pos = newPos
 
     if state == 1 and not nodeDiscard:
-        if props is not None:
-            if entries is not None:
-                entries.extend(props.items())
-                curNodes.append(nodeCls(name, tag, entries, []))
-            else:
-                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-        else:
-            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+        curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
     if stack:
         raise ParseError(s, _unclosedBlockPos(chars, stack[-1]), "Hit EOF while searching for end of child list")
     return Document(curNodes)
@@ -1845,7 +1695,6 @@ def _parseChunkedRaw(s: Stream) -> Document:
     octCls = Octal
     binCls = Binary
     intFn = int
-    listFn = list
     unescFn = _unescapeValidated
 
     curNodes: list[Node] = []
@@ -1857,9 +1706,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
     state = 0
     name = ""
     tag: str | None = None
-    entries: list[LooseEntry] | None = None
+    args: list[t.Any] | None = None
     props: dict[str, t.Any] | None = None
-    propIndices: dict[str, int] | None = None
     nodeDiscard = False
     nextEntDiscard = False
     sdTokIdx = 0
@@ -1887,9 +1735,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                 state,
                 name,
                 tag,
-                entries,
+                args,
                 props,
-                propIndices,
                 nodeDiscard,
                 curNodes,
                 curDiscard,
@@ -1901,9 +1748,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                 state=state,
                 name=name,
                 tag=tag,
-                entries=entries,
+                args=args,
                 props=props,
-                propIndices=propIndices,
                 nodeDiscard=nodeDiscard,
                 curNodes=curNodes,
                 curDiscard=curDiscard,
@@ -1957,18 +1803,10 @@ def _parseChunkedRaw(s: Stream) -> Document:
                     pval = hexCls(iv) if rc == "x" else (octCls(iv) if rc == "o" else binCls(iv))
                 else:
                     pval = _decimalFromStr(pv)
-                if props is not None:
-                    props[k] = pval
-                elif propIndices is None:
+                if props is None:
                     props = {k: pval}
                 else:
-                    assert entries is not None
-                    nEnt = len(entries)
-                    idx = propIndices.setdefault(k, nEnt)
-                    if idx == nEnt:
-                        entries.append((k, pval))
-                    else:
-                        entries[idx] = (k, pval)
+                    props[k] = pval
                 continue
 
             if nh:
@@ -1981,19 +1819,14 @@ def _parseChunkedRaw(s: Stream) -> Document:
                         failIdx = nToks - 1 - lengthHint(tokIter)
                         break
                     if state == 1 and not nodeDiscard:
-                        if props is not None:
-                            if entries is not None:
-                                entries.extend(props.items())
-                                curNodes.append(nodeCls(name, tag, entries, []))
-                            else:
-                                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                        else:
-                            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
-                    parentNodes, pName, pTag, pEntries, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
+                        curNodes.append(
+                            nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
+                        )
+                    parentNodes, pName, pTag, pArgs, pProps, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
                         stackPop()
                     )
                     if not pNodeDiscard:
-                        parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                        parentNodes.append(nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
                     curNodes = parentNodes
                     curDiscard = pParentDiscard
                     state = 2
@@ -2022,19 +1855,13 @@ def _parseChunkedRaw(s: Stream) -> Document:
                         break
                     nDisc = curDiscard
                 if state == 1 and not nodeDiscard:
-                    if props is not None:
-                        if entries is not None:
-                            entries.extend(props.items())
-                            curNodes.append(nodeCls(name, tag, entries, []))
-                        else:
-                            curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                    else:
-                        curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                    curNodes.append(
+                        nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
+                    )
                 name = nName
                 tag = nTag
-                entries = None
+                args = None
                 props = None
-                propIndices = None
                 nodeDiscard = nDisc
                 state = 1
                 continue
@@ -2051,7 +1878,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                                 parentNodes,
                                 pName,
                                 pTag,
-                                pEntries,
+                                pArgs,
+                                pProps,
                                 pNodeDiscard,
                                 pChildDiscard,
                                 pParentDiscard,
@@ -2060,7 +1888,9 @@ def _parseChunkedRaw(s: Stream) -> Document:
                                 _,
                             ) = stackPop()
                             if not pNodeDiscard:
-                                parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                                parentNodes.append(
+                                    nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes),
+                                )
                             curNodes = parentNodes
                             curDiscard = pParentDiscard
                             state = 2
@@ -2073,9 +1903,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                         ):
                             name = arg
                             tag = None
-                            entries = None
+                            args = None
                             props = None
-                            propIndices = None
                             nodeDiscard = curDiscard
                             state = 1
                             continue
@@ -2083,16 +1912,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                     break
 
                 if ac0 == "{":
-                    if nodeDiscard:
-                        finalEnt: list[LooseEntry] = []
-                    elif props is not None:
-                        if entries is not None:
-                            entries.extend(props.items())
-                            finalEnt = entries
-                        else:
-                            finalEnt = listFn(props.items())
-                    else:
-                        finalEnt = [] if entries is None else entries
+                    finalArgs: list[t.Any] = [] if (nodeDiscard or args is None) else args
+                    finalProps: dict[str, t.Any] = {} if (nodeDiscard or props is None) else props
                     childDisc = nodeDiscard or nextEntDiscard
                     nextEntDiscard = False
                     stackPush(
@@ -2100,7 +1921,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                             curNodes,
                             name,
                             tag,
-                            finalEnt,
+                            finalArgs,
+                            finalProps,
                             nodeDiscard,
                             childDisc,
                             curDiscard,
@@ -2146,20 +1968,10 @@ def _parseChunkedRaw(s: Stream) -> Document:
                             break
                     if not entDiscard:
                         sv = strCls(inner)
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, sv))
-                        elif entries is None:
-                            entries = [(None, sv)]
+                        if args is None:
+                            args = [sv]
                         else:
-                            entries.append((None, sv))
+                            args.append(sv)
                     continue
                 if ac0 == "(":
                     rp = arg.find(")", 1)
@@ -2188,20 +2000,10 @@ def _parseChunkedRaw(s: Stream) -> Document:
                                 val: t.Any = conv
                             else:
                                 val = strCls(inner, tName)
-                            if props is not None:
-                                if entries is None:
-                                    entries = listFn(props.items())
-                                    propIndices = {pk: pi for pi, pk in enumerate(props)}
-                                else:
-                                    base = len(entries)
-                                    propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                    entries.extend(props.items())
-                                props = None
-                                entries.append((None, val))
-                            elif entries is None:
-                                entries = [(None, val)]
+                            if args is None:
+                                args = [val]
                             else:
-                                entries.append((None, val))
+                                args.append(val)
                         continue
                     nextEntDiscard = False
                     if not entDiscard:
@@ -2215,20 +2017,10 @@ def _parseChunkedRaw(s: Stream) -> Document:
                             dObj = _decimalFromStr(vStr)
                             dObj.tag = tName
                             val = dObj
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
                     nextEntDiscard = False
@@ -2236,39 +2028,19 @@ def _parseChunkedRaw(s: Stream) -> Document:
                         q = arg.find('"', 1)
                         h = q - 1
                         rv = rawStrCls(arg[q + 1 : len(arg) - 1 - h])
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, rv))
-                        elif entries is None:
-                            entries = [(None, rv)]
+                        if args is None:
+                            args = [rv]
                         else:
-                            entries.append((None, rv))
+                            args.append(rv)
                     continue
                 if "1" <= ac0 <= "9":
                     nextEntDiscard = False
                     if not entDiscard:
                         val = _decimalFromStr(arg)
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and arg[1] in digits):
                     nextEntDiscard = False
@@ -2282,39 +2054,19 @@ def _parseChunkedRaw(s: Stream) -> Document:
                             val = hexCls(iv) if rc == "x" else (octCls(iv) if rc == "o" else binCls(iv))
                         else:
                             val = _decimalFromStr(arg)
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 if arg in keywords:
                     nextEntDiscard = False
                     if not entDiscard:
                         val = boolCls(True) if arg == "true" else (boolCls(False) if arg == "false" else nullCls())
-                        if props is not None:
-                            if entries is None:
-                                entries = listFn(props.items())
-                                propIndices = {pk: pi for pi, pk in enumerate(props)}
-                            else:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                            props = None
-                            entries.append((None, val))
-                        elif entries is None:
-                            entries = [(None, val)]
+                        if args is None:
+                            args = [val]
                         else:
-                            entries.append((None, val))
+                            args.append(val)
                     continue
                 failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
                 nextEntDiscard = False
@@ -2328,30 +2080,17 @@ def _parseChunkedRaw(s: Stream) -> Document:
                         break
                     if state == 1:
                         if not nodeDiscard:
-                            if props is not None:
-                                if entries is not None:
-                                    entries.extend(props.items())
-                                    curNodes.append(nodeCls(name, tag, entries, []))
-                                else:
-                                    curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                            else:
-                                curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                            curNodes.append(
+                                nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
+                            )
                         state = 0
                         continue
                     if state == 2:
                         state = 0
                         continue
                 elif fb == "{" and state == 1:
-                    if nodeDiscard:
-                        finalEnt = []
-                    elif props is not None:
-                        if entries is not None:
-                            entries.extend(props.items())
-                            finalEnt = entries
-                        else:
-                            finalEnt = listFn(props.items())
-                    else:
-                        finalEnt = [] if entries is None else entries
+                    finalArgs = [] if (nodeDiscard or args is None) else args
+                    finalProps = {} if (nodeDiscard or props is None) else props
                     childDisc = nodeDiscard or nextEntDiscard
                     nextEntDiscard = False
                     stackPush(
@@ -2359,7 +2098,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
                             curNodes,
                             name,
                             tag,
-                            finalEnt,
+                            finalArgs,
+                            finalProps,
                             nodeDiscard,
                             childDisc,
                             curDiscard,
@@ -2386,14 +2126,7 @@ def _parseChunkedRaw(s: Stream) -> Document:
                 nextEntDiscard = False
                 break
             if state == 1 and not nodeDiscard:
-                if props is not None:
-                    if entries is not None:
-                        entries.extend(props.items())
-                        curNodes.append(nodeCls(name, tag, entries, []))
-                    else:
-                        curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-                else:
-                    curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
             state = 0
 
         if failIdx < 0 and failOffset < 0:
@@ -2412,9 +2145,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
             state,
             name,
             tag,
-            entries,
+            args,
             props,
-            propIndices,
             nodeDiscard,
             curNodes,
             curDiscard,
@@ -2426,9 +2158,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
             state=state,
             name=name,
             tag=tag,
-            entries=entries,
+            args=args,
             props=props,
-            propIndices=propIndices,
             nodeDiscard=nodeDiscard,
             curNodes=curNodes,
             curDiscard=curDiscard,
@@ -2439,14 +2170,7 @@ def _parseChunkedRaw(s: Stream) -> Document:
         pos = newPos
 
     if state == 1 and not nodeDiscard:
-        if props is not None:
-            if entries is not None:
-                entries.extend(props.items())
-                curNodes.append(nodeCls(name, tag, entries, []))
-            else:
-                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
-        else:
-            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+        curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
     if stack:
         raise ParseError(s, _unclosedBlockPos(chars, stack[-1]), "Hit EOF while searching for end of child list")
     return Document(curNodes)
@@ -2518,7 +2242,8 @@ def _parseDirect(s: Stream) -> Document:
                 pNameEnd,
                 pName,
                 pTag,
-                pEntries,
+                pArgs,
+                pProps,
                 pNodeDiscard,
                 pChildDiscard,
                 pParentDiscard,
@@ -2533,7 +2258,7 @@ def _parseDirect(s: Stream) -> Document:
                         i = _skipNodespace(s, i)
                     i = _skipTerminator(s, i)
             if not pNodeDiscard:
-                built = nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes)
+                built = nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes)
                 if hasNodeConverters:
                     built = _applyNodeConverters(s, built, pStart, pNameEnd)
                 parentNodes.append(built)
@@ -2544,7 +2269,7 @@ def _parseDirect(s: Stream) -> Document:
             i = mh.end()
             if i >= n:
                 if stack:
-                    raise ParseError(s, stack[-1][9], "Hit EOF while searching for end of child list")
+                    raise ParseError(s, stack[-1][10], "Hit EOF while searching for end of child list")
                 return Document(curNodes)
             raise ParseError(
                 s,
@@ -2605,7 +2330,7 @@ def _parseDirect(s: Stream) -> Document:
 
         if i >= n:
             if not nodeDiscard:
-                built = nodeCls(name, tag, [], [])
+                built = nodeCls(name, tag, [], {}, [])
                 if hasNodeConverters:
                     built = _applyNodeConverters(s, built, nodeStart, nameEnd)
                 curNodes.append(built)
@@ -2614,21 +2339,20 @@ def _parseDirect(s: Stream) -> Document:
         if ch0 in ("\n", ";"):
             i += 1
             if not nodeDiscard:
-                built = nodeCls(name, tag, [], [])
+                built = nodeCls(name, tag, [], {}, [])
                 if hasNodeConverters:
                     built = _applyNodeConverters(s, built, nodeStart, nameEnd)
                 curNodes.append(built)
             continue
         if ch0 == "{":
-            stack.append((curNodes, nodeStart, nameEnd, name, tag, [], nodeDiscard, nodeDiscard, curDiscard, i))
+            stack.append((curNodes, nodeStart, nameEnd, name, tag, [], {}, nodeDiscard, nodeDiscard, curDiscard, i))
             curNodes = []
             curDiscard = nodeDiscard
             i += 1
             continue
 
-        entries: list[LooseEntry] = []
-        props: dict[str, t.Any] | None = None
-        propIndices: dict[str, int] | None = None
+        args: list[t.Any] = []
+        props: dict[str, t.Any] = {}
         enteredChildren = False
 
         while i < n:
@@ -2641,14 +2365,8 @@ def _parseDirect(s: Stream) -> Document:
                 i += 1
                 break
             elif ch == "{":
-                if not nodeDiscard and props is not None:
-                    if entries:
-                        entries.extend(props.items())
-                    else:
-                        entries = list(props.items())
-                    props = None
                 stack.append(
-                    (curNodes, nodeStart, nameEnd, name, tag, entries, nodeDiscard, nodeDiscard, curDiscard, i),
+                    (curNodes, nodeStart, nameEnd, name, tag, args, props, nodeDiscard, nodeDiscard, curDiscard, i),
                 )
                 curNodes = []
                 curDiscard = nodeDiscard
@@ -2666,13 +2384,9 @@ def _parseDirect(s: Stream) -> Document:
             elif ch == "/" and i + 1 < n and chars[i + 1] == "-":
                 j = _skipNodespace(s, i + 2)
                 if j < n and chars[j] == "{":
-                    if not nodeDiscard and props is not None:
-                        if entries:
-                            entries.extend(props.items())
-                        else:
-                            entries = list(props.items())
-                        props = None
-                    stack.append((curNodes, nodeStart, nameEnd, name, tag, entries, nodeDiscard, True, curDiscard, i))
+                    stack.append(
+                        (curNodes, nodeStart, nameEnd, name, tag, args, props, nodeDiscard, True, curDiscard, i),
+                    )
                     curNodes = []
                     curDiscard = True
                     i = j + 1
@@ -2686,14 +2400,8 @@ def _parseDirect(s: Stream) -> Document:
             while True:
                 ch2 = chars[i]
                 if ch2 == "{":
-                    if not nodeDiscard and props is not None:
-                        if entries:
-                            entries.extend(props.items())
-                        else:
-                            entries = list(props.items())
-                        props = None
                     stack.append(
-                        (curNodes, nodeStart, nameEnd, name, tag, entries, nodeDiscard, nodeDiscard, curDiscard, i),
+                        (curNodes, nodeStart, nameEnd, name, tag, args, props, nodeDiscard, nodeDiscard, curDiscard, i),
                     )
                     curNodes = []
                     curDiscard = nodeDiscard
@@ -2710,12 +2418,7 @@ def _parseDirect(s: Stream) -> Document:
                         raise ParseError(s, i, "Junk after node, before terminator.")
                     i = valEnd
                     if not nodeDiscard:
-                        if props is not None:
-                            base = len(entries)
-                            propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                            entries.extend(props.items())
-                            props = None
-                        entries.append((None, val))
+                        args.append(val)
                     break
                 if ch2 in wsSet or ch2 == "\\" or (ch2 == "/" and i + 1 < n and chars[i + 1] == "*"):
                     nextI = _skipNodespace(s, i)
@@ -2733,12 +2436,6 @@ def _parseDirect(s: Stream) -> Document:
                         sdStart = i
                         j = _skipNodespace(s, i + 2)
                         if j < n and chars[j] == "{":
-                            if not nodeDiscard and props is not None:
-                                if entries:
-                                    entries.extend(props.items())
-                                else:
-                                    entries = list(props.items())
-                                props = None
                             stack.append(
                                 (
                                     curNodes,
@@ -2746,7 +2443,8 @@ def _parseDirect(s: Stream) -> Document:
                                     nameEnd,
                                     name,
                                     tag,
-                                    entries,
+                                    args,
+                                    props,
                                     nodeDiscard,
                                     True,
                                     curDiscard,
@@ -2783,17 +2481,7 @@ def _parseDirect(s: Stream) -> Document:
                                 val = _decimalFromStr(numStr)
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, m.start(3), i)
-                            if props is not None:
-                                props[key] = val
-                            elif propIndices is None:
-                                props = {key: val}
-                            else:
-                                nEnt = len(entries)
-                                idx = propIndices.setdefault(key, nEnt)
-                                if idx == nEnt:
-                                    entries.append((key, val))
-                                else:
-                                    entries[idx] = (key, val)
+                            props[key] = val
                         break
                     if eli == 2:
                         i = m.end()
@@ -2805,17 +2493,7 @@ def _parseDirect(s: Stream) -> Document:
                                 val = strCls(sVal)
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, m.start(2) - 1, i)
-                            if props is not None:
-                                props[key] = val
-                            elif propIndices is None:
-                                props = {key: val}
-                            else:
-                                nEnt = len(entries)
-                                idx = propIndices.setdefault(key, nEnt)
-                                if idx == nEnt:
-                                    entries.append((key, val))
-                                else:
-                                    entries[idx] = (key, val)
+                            props[key] = val
                         break
                     if eli == 4:
                         i = m.end()
@@ -2829,26 +2507,11 @@ def _parseDirect(s: Stream) -> Document:
                                 )
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, m.start(4), i)
-                            if props is not None:
-                                props[key] = val
-                            elif propIndices is None:
-                                props = {key: val}
-                            else:
-                                nEnt = len(entries)
-                                idx = propIndices.setdefault(key, nEnt)
-                                if idx == nEnt:
-                                    entries.append((key, val))
-                                else:
-                                    entries[idx] = (key, val)
+                            props[key] = val
                         break
                     if eli == 6:
                         i = m.end()
                         if not nodeDiscard:
-                            if props is not None:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                                props = None
                             sVal = m.group(6)
                             if fastUntagged:
                                 val = sVal
@@ -2856,23 +2519,18 @@ def _parseDirect(s: Stream) -> Document:
                                 val = strCls(sVal)
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, m.start(6) - 1, i)
-                            entries.append((None, val))
+                            args.append(val)
                         break
                     if eli == 7:
                         i = m.end()
                         if not nodeDiscard:
-                            if props is not None:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                                props = None
                             if fastUntagged:
                                 val = _floatFromDecStr(m.group(7))
                             else:
                                 val = _decimalFromStr(m.group(7))
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, m.start(7), i)
-                            entries.append((None, val))
+                            args.append(val)
                         break
                     if eli == 5:
                         key = m.group(1)
@@ -2882,27 +2540,12 @@ def _parseDirect(s: Stream) -> Document:
                             raise ParseError(s, valStart, "Expected value after prop=.")
                         i = valEnd
                         if not nodeDiscard:
-                            if props is not None:
-                                props[key] = val
-                            elif propIndices is None:
-                                props = {key: val}
-                            else:
-                                nEnt = len(entries)
-                                idx = propIndices.setdefault(key, nEnt)
-                                if idx == nEnt:
-                                    entries.append((key, val))
-                                else:
-                                    entries[idx] = (key, val)
+                            props[key] = val
                         break
                     tok = m.group(1)
                     if tok in keywords:
                         endPos = m.end()
                         if not nodeDiscard:
-                            if props is not None:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                                props = None
                             if fastUntagged:
                                 val = kwMap[tok]
                             else:
@@ -2913,7 +2556,7 @@ def _parseDirect(s: Stream) -> Document:
                                 )
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, i, endPos)
-                            entries.append((None, val))
+                            args.append(val)
                         i = endPos
                         break
                     if tok.lower() in keywords:
@@ -2929,32 +2572,17 @@ def _parseDirect(s: Stream) -> Document:
                             raise ParseError(s, strEnd + 1, "Expected value after prop=.")
                         i = valEnd
                         if not nodeDiscard:
-                            if props is not None:
-                                props[strVal] = val
-                            elif propIndices is None:
-                                props = {strVal: val}
-                            else:
-                                nEnt = len(entries)
-                                idx = propIndices.setdefault(strVal, nEnt)
-                                if idx == nEnt:
-                                    entries.append((strVal, val))
-                                else:
-                                    entries[idx] = (strVal, val)
+                            props[strVal] = val
                     else:
                         i = strEnd
                         if not nodeDiscard:
-                            if props is not None:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                                props = None
                             if fastUntagged:
                                 val = strVal
                             else:
                                 val = strCls(strVal)
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, strStart, strEnd)
-                            entries.append((None, val))
+                            args.append(val)
                     break
                 if ch2 == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
                     j = i + 1
@@ -2969,46 +2597,26 @@ def _parseDirect(s: Stream) -> Document:
                                 raise ParseError(s, strEnd + 1, "Expected value after prop=.")
                             i = valEnd
                             if not nodeDiscard:
-                                if props is not None:
-                                    props[rawVal] = val
-                                elif propIndices is None:
-                                    props = {rawVal: val}
-                                else:
-                                    nEnt = len(entries)
-                                    idx = propIndices.setdefault(rawVal, nEnt)
-                                    if idx == nEnt:
-                                        entries.append((rawVal, val))
-                                    else:
-                                        entries[idx] = (rawVal, val)
+                                props[rawVal] = val
                         else:
                             i = strEnd
                             if not nodeDiscard:
-                                if props is not None:
-                                    base = len(entries)
-                                    propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                    entries.extend(props.items())
-                                    props = None
                                 if fastUntagged:
                                     val = rawVal
                                 else:
                                     val = RawString(rawVal)
                                     if hasValConverters:
                                         val = _finalizeValue(s, val, None, rawStart, strEnd)
-                                entries.append((None, val))
+                                args.append(val)
                         break
                 if ch2 in digits or (ch2 in ("+", "-") and i + 1 < n and chars[i + 1] in digits):
                     numStart = i
                     val, valEnd = _parseNumber(s, numStart, fastUntagged, nodeDiscard)
                     i = valEnd
                     if not nodeDiscard:
-                        if props is not None:
-                            base = len(entries)
-                            propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                            entries.extend(props.items())
-                            props = None
                         if not fastUntagged and hasValConverters:
                             val = _finalizeValue(s, t.cast("Value", val), None, numStart, valEnd)
-                        entries.append((None, val))
+                        args.append(val)
                     break
                 if ch2 in nlSet:
                     i = i + 2 if (ch2 == "\r" and i + 1 < n and chars[i + 1] == "\n") else i + 1
@@ -3019,11 +2627,6 @@ def _parseDirect(s: Stream) -> Document:
                     if mk is not None:
                         endPos = mk.end()
                         if not nodeDiscard:
-                            if props is not None:
-                                base = len(entries)
-                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
-                                entries.extend(props.items())
-                                props = None
                             kw = mk.group()
                             if fastUntagged:
                                 val = kwMap[kw]
@@ -3033,7 +2636,7 @@ def _parseDirect(s: Stream) -> Document:
                                 )
                                 if hasValConverters:
                                     val = _finalizeValue(s, val, None, i, endPos)
-                            entries.append((None, val))
+                            args.append(val)
                         i = endPos
                         break
                 if ch2 == "'":
@@ -3044,12 +2647,7 @@ def _parseDirect(s: Stream) -> Document:
                 break
 
         if not enteredChildren and not nodeDiscard:
-            if props is not None:
-                if entries:
-                    entries.extend(props.items())
-                else:
-                    entries = list(props.items())
-            built = nodeCls(name, tag, entries, [])
+            built = nodeCls(name, tag, args, props, [])
             if hasNodeConverters:
                 built = _applyNodeConverters(s, built, nodeStart, nameEnd)
             curNodes.append(built)

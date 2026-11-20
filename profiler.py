@@ -1985,7 +1985,7 @@ def main() -> None:
             respectRadix=False,
             respectStringType=False,
             exponent="E",
-            sortEntries=True,
+            sortProperties=True,
         )
     else:
         print_config = kdl.PrintConfig()

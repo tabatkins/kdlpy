@@ -16,11 +16,6 @@ from .chars import NL_SET, isBareIdent
 
 if t.TYPE_CHECKING:
     VT = t.TypeVar("VT")
-    LooseEntry = tuple[str | None, t.Any]
-
-
-def _entrySortKey(entry: tuple[str | None, t.Any]) -> str:
-    return entry[0] or ""
 
 
 # Precomputed indentation strings per indent unit, grown lazily for deep trees.
@@ -100,7 +95,8 @@ class Document:
 class Node:
     name: str
     tag: str | None = None
-    entries: list[LooseEntry] = dataclasses.field(default_factory=list)
+    args: list[t.Any] = dataclasses.field(default_factory=list)
+    props: dict[str, t.Any] = dataclasses.field(default_factory=dict)
     nodes: list[Node] = dataclasses.field(default_factory=list)
 
     def print(
@@ -150,19 +146,14 @@ class Node:
     def matchesKey(self, key: t.NodeKey) -> bool:
         return nodeMatchesKey(self, key)
 
-    def getEntries(self, key: t.ValueKey) -> t.Iterable[LooseEntry]:
-        for name, val in self.entries:
+    def getProps(self, key: t.ValueKey) -> t.Iterable[tuple[str, t.Any]]:
+        for name, val in self.props.items():
             if valueMatchesKey(val, key):
                 yield name, val
 
-    def getProps(self, key: t.ValueKey) -> t.Iterable[tuple[str, t.Any]]:
-        for name, val in self.entries:
-            if name is not None and valueMatchesKey(val, key):
-                yield name, val
-
     def getArgs(self, key: t.ValueKey) -> t.Iterable[t.Any]:
-        for name, val in self.entries:
-            if name is None and valueMatchesKey(val, key):
+        for val in self.args:
+            if valueMatchesKey(val, key):
                 yield val
 
     def __str__(self) -> str:
@@ -189,49 +180,77 @@ def _printNodeInto(
     else:
         append(f"{indentStr}{nameStr}" if indentStr else nameStr)
 
-    entries: t.Iterable[tuple[str | None, t.Any]]
-    if config.sortEntries:
-        entries = sorted(node.entries, key=_entrySortKey)
-    else:
-        entries = node.entries
-
-    printNulls = config.printNulls
-    for name, value in entries:
-        # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives;
-        # subclasses (e.g. IntEnum) still fall through to toKdlValue().
-        valType = type(value)
-        if valType is str:
-            valStr = identCache.get(value) or printIdent(value)
-        elif value is True:
-            valStr = "#true"
-        elif value is False:
-            valStr = "#false"
-        elif valType is float:
-            if math.isfinite(value):
+    if node.args:
+        printNullArgs = config.printNullArgs
+        for value in node.args:
+            # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives;
+            # subclasses (e.g. IntEnum) still fall through to toKdlValue().
+            valType = type(value)
+            if valType is str:
+                valStr = identCache.get(value) or printIdent(value)
+            elif value is True:
+                valStr = "#true"
+            elif value is False:
+                valStr = "#false"
+            elif valType is float:
+                if math.isfinite(value):
+                    valStr = str(value)
+                elif math.isnan(value):
+                    valStr = "#nan"
+                else:
+                    valStr = "#inf" if value > 0 else "#-inf"
+            elif valType is int:
                 valStr = str(value)
-            elif math.isnan(value):
-                valStr = "#nan"
+            elif value is None:
+                if not printNullArgs:
+                    continue
+                valStr = "#null"
+            elif isinstance(value, Value):
+                if not printNullArgs and isinstance(value, Null):
+                    continue
+                valStr = value.print(config)
             else:
-                valStr = "#inf" if value > 0 else "#-inf"
-        elif valType is int:
-            valStr = str(value)
-        elif value is None:
-            if not printNulls:
-                continue
-            valStr = "#null"
-        elif isinstance(value, Value):
-            if not printNulls and isinstance(value, Null):
-                continue
-            valStr = value.print(config)
-        else:
-            kdlVal = toKdlValue(value)
-            if not printNulls and isinstance(kdlVal, Null):
-                continue
-            valStr = kdlVal.print(config)
-
-        if name is None:
+                kdlVal = toKdlValue(value)
+                if not printNullArgs and isinstance(kdlVal, Null):
+                    continue
+                valStr = kdlVal.print(config)
             append(f" {valStr}")
-        else:
+
+    if node.props:
+        propsIter: t.Iterable[tuple[str, t.Any]] = (
+            sorted(node.props.items()) if config.sortProperties else node.props.items()
+        )
+        printNullProps = config.printNullProps
+        for name, value in propsIter:
+            valType = type(value)
+            if valType is str:
+                valStr = identCache.get(value) or printIdent(value)
+            elif value is True:
+                valStr = "#true"
+            elif value is False:
+                valStr = "#false"
+            elif valType is float:
+                if math.isfinite(value):
+                    valStr = str(value)
+                elif math.isnan(value):
+                    valStr = "#nan"
+                else:
+                    valStr = "#inf" if value > 0 else "#-inf"
+            elif valType is int:
+                valStr = str(value)
+            elif value is None:
+                if not printNullProps:
+                    continue
+                valStr = "#null"
+            elif isinstance(value, Value):
+                if not printNullProps and isinstance(value, Null):
+                    continue
+                valStr = value.print(config)
+            else:
+                kdlVal = toKdlValue(value)
+                if not printNullProps and isinstance(kdlVal, Null):
+                    continue
+                valStr = kdlVal.print(config)
             keyStr = identCache.get(name) or printIdent(name)
             append(f" {keyStr}={valStr}")
 

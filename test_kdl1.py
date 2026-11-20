@@ -39,8 +39,8 @@ def _normalizeValue(val: t.Any) -> t.Any:
 
 
 def _normalizeNode(node: kdl.Node) -> tuple[t.Any, ...]:
-    args = [_normalizeValue(v) for k, v in node.entries if k is None]
-    props = sorted((k, _normalizeValue(v)) for k, v in node.entries if k is not None)
+    args = [_normalizeValue(v) for v in node.args]
+    props = sorted((k, _normalizeValue(v)) for k, v in node.props.items())
     children = [_normalizeNode(c) for c in node.nodes]
     return (node.name, node.tag, args, props, children)
 
@@ -73,7 +73,7 @@ def runV1UpstreamSuite(verbose: int) -> tuple[int, int, list[str]]:
         respectRadix=False,
         respectStringType=False,
         exponent="E",
-        sortEntries=True,
+        sortProperties=True,
     )
 
     good = 0
@@ -170,128 +170,128 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
 
     # 1. KDL1 constructs that MUST trigger opportunistic fallback and succeed
     kdl1FallbackCases: list[tuple[str, str, t.Callable[[kdl.Document], None]]] = [
-        ("kw_arg_true", "node true\n", lambda d: _assert(d.nodes[0].entries == [(None, True)])),
-        ("kw_arg_false", "node false\n", lambda d: _assert(d.nodes[0].entries == [(None, False)])),
-        ("kw_arg_null", "node null\n", lambda d: _assert(d.nodes[0].entries == [(None, None)])),
-        ("kw_prop_true", "node k=true\n", lambda d: _assert(d.nodes[0].entries == [("k", True)])),
-        ("kw_prop_false", "node k=false\n", lambda d: _assert(d.nodes[0].entries == [("k", False)])),
-        ("kw_prop_null", "node k=null\n", lambda d: _assert(d.nodes[0].entries == [("k", None)])),
+        ("kw_arg_true", "node true\n", lambda d: _assert(d.nodes[0].args == [True])),
+        ("kw_arg_false", "node false\n", lambda d: _assert(d.nodes[0].args == [False])),
+        ("kw_arg_null", "node null\n", lambda d: _assert(d.nodes[0].args == [None])),
+        ("kw_prop_true", "node k=true\n", lambda d: _assert(d.nodes[0].props == {"k": True})),
+        ("kw_prop_false", "node k=false\n", lambda d: _assert(d.nodes[0].props == {"k": False})),
+        ("kw_prop_null", "node k=null\n", lambda d: _assert(d.nodes[0].props == {"k": None})),
         (
             "kw_tagged_arg",
             "node (t)true\n",
-            lambda d: _assert(isinstance(d.nodes[0].entries[0][1], kdl.Bool) and d.nodes[0].entries[0][1].tag == "t"),
+            lambda d: _assert(isinstance(d.nodes[0].args[0], kdl.Bool) and d.nodes[0].args[0].tag == "t"),
         ),
         (
             "kw_tagged_prop",
             "node k=(t)null\n",
-            lambda d: _assert(isinstance(d.nodes[0].entries[0][1], kdl.Null) and d.nodes[0].entries[0][1].tag == "t"),
+            lambda d: _assert(isinstance(d.nodes[0].props["k"], kdl.Null) and d.nodes[0].props["k"].tag == "t"),
         ),
-        ("kw_slashdash_arg", "node /- true 1\n", lambda d: _assert(d.nodes[0].entries == [(None, 1.0)])),
+        ("kw_slashdash_arg", "node /- true 1\n", lambda d: _assert(d.nodes[0].args == [1.0])),
         (
             "kw_slashdash_node",
             "/- node false\nok 1\n",
             lambda d: _assert(len(d.nodes) == 1 and d.nodes[0].name == "ok"),
         ),
-        ("raw_arg", 'node r"foo\\n"\n', lambda d: _assert(d.nodes[0].entries == [(None, "foo\\n")])),
-        ("raw_hash_arg", 'node r#"a"b"#\n', lambda d: _assert(d.nodes[0].entries == [(None, 'a"b')])),
-        ("raw_multi_hash", 'node r###"a"##b"###\n', lambda d: _assert(d.nodes[0].entries == [(None, 'a"##b')])),
+        ("raw_arg", 'node r"foo\\n"\n', lambda d: _assert(d.nodes[0].args == ["foo\\n"])),
+        ("raw_hash_arg", 'node r#"a"b"#\n', lambda d: _assert(d.nodes[0].args == ['a"b'])),
+        ("raw_multi_hash", 'node r###"a"##b"###\n', lambda d: _assert(d.nodes[0].args == ['a"##b'])),
         ("raw_node_name", 'r"\\node" 1\n', lambda d: _assert(d.nodes[0].name == "\\node")),
         ("raw_hash_node_name", 'r#"no"de"# 1\n', lambda d: _assert(d.nodes[0].name == 'no"de')),
-        ("raw_prop_key", 'node r"k\\n"=1\n', lambda d: _assert(d.nodes[0].entries == [("k\\n", 1.0)])),
-        ("raw_prop_val", 'node k=r#"v"x"#\n', lambda d: _assert(d.nodes[0].entries == [("k", 'v"x')])),
+        ("raw_prop_key", 'node r"k\\n"=1\n', lambda d: _assert(d.nodes[0].props == {"k\\n": 1.0})),
+        ("raw_prop_val", 'node k=r#"v"x"#\n', lambda d: _assert(d.nodes[0].props == {"k": 'v"x'})),
         ("raw_node_tag", '(r"tg")node\n', lambda d: _assert(d.nodes[0].tag == "tg")),
         ("raw_hash_node_tag", '(r#"t"g"#)node\n', lambda d: _assert(d.nodes[0].tag == 't"g')),
         (
             "raw_arg_tag",
             'node (r"tg")1\n',
             lambda d: _assert(
-                isinstance(d.nodes[0].entries[0][1], kdl.Decimal) and d.nodes[0].entries[0][1].tag == "tg",
+                isinstance(d.nodes[0].args[0], kdl.Decimal) and d.nodes[0].args[0].tag == "tg",
             ),
         ),
         ("raw_in_child", 'parent {\n    r"ch" r#"v"#\n}\n', lambda d: _assert(d.nodes[0].nodes[0].name == "ch")),
-        ("raw_slashdash", 'node /- r"skip" 2\n', lambda d: _assert(d.nodes[0].entries == [(None, 2.0)])),
-        ("raw_slashdash_nospace", 'node /-r"skip" 2\n', lambda d: _assert(d.nodes[0].entries == [(None, 2.0)])),
+        ("raw_slashdash", 'node /- r"skip" 2\n', lambda d: _assert(d.nodes[0].args == [2.0])),
+        ("raw_slashdash_nospace", 'node /-r"skip" 2\n', lambda d: _assert(d.nodes[0].args == [2.0])),
         (
             "raw_slashdash_node_nospace",
             '/-r"skip"\nok 1\n',
             lambda d: _assert(len(d.nodes) == 1 and d.nodes[0].name == "ok"),
         ),
-        ("raw_multiline", 'node r"line1\nline2"\n', lambda d: _assert(d.nodes[0].entries == [(None, "line1\nline2")])),
+        ("raw_multiline", 'node r"line1\nline2"\n', lambda d: _assert(d.nodes[0].args == ["line1\nline2"])),
         (
             "multiline_quoted",
             'node "hello\nworld"\n',
-            lambda d: _assert(d.nodes[0].entries == [(None, "hello\nworld")]),
+            lambda d: _assert(d.nodes[0].args == ["hello\nworld"]),
         ),
         (
             "multiline_quoted_crlf",
             'node "a\r\nb"\n',
-            lambda d: _assert(d.nodes[0].entries == [(None, "a\r\nb")]),
+            lambda d: _assert(d.nodes[0].args == ["a\r\nb"]),
         ),
         (
             "multiline_quoted_vtab",
             'node "a\x0bb"\n',
-            lambda d: _assert(d.nodes[0].entries == [(None, "a\x0bb")]),
+            lambda d: _assert(d.nodes[0].args == ["a\x0bb"]),
         ),
         (
             "multiline_quoted_in_child",
             'p {\n    c "a\nb"\n}\n',
-            lambda d: _assert(d.nodes[0].nodes[0].entries == [(None, "a\nb")]),
+            lambda d: _assert(d.nodes[0].nodes[0].args == ["a\nb"]),
         ),
-        ("solidus_escape", 'node "a\\/b"\n', lambda d: _assert(d.nodes[0].entries == [(None, "a/b")])),
+        ("solidus_escape", 'node "a\\/b"\n', lambda d: _assert(d.nodes[0].args == ["a/b"])),
         ("solidus_in_node_name", '"a\\/b" 1\n', lambda d: _assert(d.nodes[0].name == "a/b")),
         ("solidus_in_tag", '("a\\/b")node\n', lambda d: _assert(d.nodes[0].tag == "a/b")),
         ("hash_in_node_name", 'foo#bar "x"\n', lambda d: _assert(d.nodes[0].name == "foo#bar")),
         ("hash_start_node_name", '#foo "x"\n', lambda d: _assert(d.nodes[0].name == "#foo")),
         ("hash_only_node_name", '# "x"\n', lambda d: _assert(d.nodes[0].name == "#")),
         ("double_hash_node_name", '## "x"\n', lambda d: _assert(d.nodes[0].name == "##")),
-        ("hash_in_prop_key", "node a#b=1\n", lambda d: _assert(d.nodes[0].entries == [("a#b", 1.0)])),
-        ("hash_start_prop_key", "node #foo=1\n", lambda d: _assert(d.nodes[0].entries == [("#foo", 1.0)])),
-        ("hash_only_prop_key", "node #=1\n", lambda d: _assert(d.nodes[0].entries == [("#", 1.0)])),
-        ("double_hash_prop_key", "node ##foo=1\n", lambda d: _assert(d.nodes[0].entries == [("##foo", 1.0)])),
-        ("hash_kw_prop_key", "node #true=1\n", lambda d: _assert(d.nodes[0].entries == [("#true", 1.0)])),
-        ("hash_kw_slashdash_nospace", "node /-#true=1 2\n", lambda d: _assert(d.nodes[0].entries == [(None, 2.0)])),
-        ("hash_upper_kw_prop_key", "node #True=1\n", lambda d: _assert(d.nodes[0].entries == [("#True", 1.0)])),
+        ("hash_in_prop_key", "node a#b=1\n", lambda d: _assert(d.nodes[0].props == {"a#b": 1.0})),
+        ("hash_start_prop_key", "node #foo=1\n", lambda d: _assert(d.nodes[0].props == {"#foo": 1.0})),
+        ("hash_only_prop_key", "node #=1\n", lambda d: _assert(d.nodes[0].props == {"#": 1.0})),
+        ("double_hash_prop_key", "node ##foo=1\n", lambda d: _assert(d.nodes[0].props == {"##foo": 1.0})),
+        ("hash_kw_prop_key", "node #true=1\n", lambda d: _assert(d.nodes[0].props == {"#true": 1.0})),
+        ("hash_kw_slashdash_nospace", "node /-#true=1 2\n", lambda d: _assert(d.nodes[0].args == [2.0])),
+        ("hash_upper_kw_prop_key", "node #True=1\n", lambda d: _assert(d.nodes[0].props == {"#True": 1.0})),
         ("hash_node_tag", "(#tag)node\n", lambda d: _assert(d.nodes[0].tag == "#tag")),
         ("hash_in_tag", "(a#b)node\n", lambda d: _assert(d.nodes[0].tag == "a#b")),
         (
             "hash_arg_tag",
             "node (#tag)1\n",
             lambda d: _assert(
-                isinstance(d.nodes[0].entries[0][1], kdl.Decimal) and d.nodes[0].entries[0][1].tag == "#tag",
+                isinstance(d.nodes[0].args[0], kdl.Decimal) and d.nodes[0].args[0].tag == "#tag",
             ),
         ),
         (
             "hash_prop_tag",
             "node k=(#tag)1\n",
             lambda d: _assert(
-                isinstance(d.nodes[0].entries[0][1], kdl.Decimal) and d.nodes[0].entries[0][1].tag == "#tag",
+                isinstance(d.nodes[0].props["k"], kdl.Decimal) and d.nodes[0].props["k"].tag == "#tag",
             ),
         ),
         ("confusable_node_name_inf", 'inf "x"\n', lambda d: _assert(d.nodes[0].name == "inf")),
         ("confusable_node_name_True", 'True "x"\n', lambda d: _assert(d.nodes[0].name == "True")),
-        ("confusable_prop_key_inf", "node inf=1\n", lambda d: _assert(d.nodes[0].entries == [("inf", 1.0)])),
-        ("confusable_prop_key_neginf", "node -inf=1\n", lambda d: _assert(d.nodes[0].entries == [("-inf", 1.0)])),
-        ("confusable_prop_key_True", "node True=1\n", lambda d: _assert(d.nodes[0].entries == [("True", 1.0)])),
+        ("confusable_prop_key_inf", "node inf=1\n", lambda d: _assert(d.nodes[0].props == {"inf": 1.0})),
+        ("confusable_prop_key_neginf", "node -inf=1\n", lambda d: _assert(d.nodes[0].props == {"-inf": 1.0})),
+        ("confusable_prop_key_True", "node True=1\n", lambda d: _assert(d.nodes[0].props == {"True": 1.0})),
         ("confusable_tag_inf", "(inf)node\n", lambda d: _assert(d.nodes[0].tag == "inf")),
         ("dot_digit_node_name", '.0 "x"\n', lambda d: _assert(d.nodes[0].name == ".0")),
         ("signed_dot_digit_node_name", '-.5 "x"\n', lambda d: _assert(d.nodes[0].name == "-.5")),
-        ("dot_digit_prop_key", "node .5=1\n", lambda d: _assert(d.nodes[0].entries == [(".5", 1.0)])),
+        ("dot_digit_prop_key", "node .5=1\n", lambda d: _assert(d.nodes[0].props == {".5": 1.0})),
         ("dot_digit_node_tag", "(.0)node\n", lambda d: _assert(d.nodes[0].tag == ".0")),
         (
             "dot_digit_arg_tag",
             "node (.0)1\n",
             lambda d: _assert(
-                isinstance(d.nodes[0].entries[0][1], kdl.Decimal) and d.nodes[0].entries[0][1].tag == ".0",
+                isinstance(d.nodes[0].args[0], kdl.Decimal) and d.nodes[0].args[0].tag == ".0",
             ),
         ),
         (
             "dot_digit_prop_tag",
             "node k=(.0)1\n",
             lambda d: _assert(
-                isinstance(d.nodes[0].entries[0][1], kdl.Decimal) and d.nodes[0].entries[0][1].tag == ".0",
+                isinstance(d.nodes[0].props["k"], kdl.Decimal) and d.nodes[0].props["k"].tag == ".0",
             ),
         ),
-        ("mid_doc_bom", 'node \ufeff"x"\n', lambda d: _assert(d.nodes[0].entries == [(None, "x")])),
+        ("mid_doc_bom", 'node \ufeff"x"\n', lambda d: _assert(d.nodes[0].args == ["x"])),
         ("double_leading_bom", '\ufeff\ufeffnode "x"\n', lambda d: _assert(d.nodes[0].name == "node")),
     ]
 
@@ -407,7 +407,7 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         try:
             doc = kdl.parse("/- kdl-version 1\nnode true\n")
             _assert(calls[0] == 1)
-            _assert(doc.nodes[0].entries == [(None, True)])
+            _assert(doc.nodes[0].args == [True])
         finally:
             restore()
 
@@ -416,7 +416,7 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         try:
             doc = kdl.parse("\ufeff/- kdl-version 1\nnode false\n")
             _assert(calls[0] == 1)
-            _assert(doc.nodes[0].entries == [(None, False)])
+            _assert(doc.nodes[0].args == [False])
         finally:
             restore()
 
@@ -466,7 +466,7 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
 
     def _testConfigVersion1OverridesMarkerV2() -> None:
         doc = kdl.parse("/- kdl-version 2\nnode true\n", kdl.ParseConfig(version=1))
-        _assert(doc.nodes[0].entries == [(None, True)])
+        _assert(doc.nodes[0].args == [True])
 
     def _testInvalidConfigVersion() -> None:
         try:
@@ -519,7 +519,12 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         def customNode(node: kdl.Node, pf: kdl.ParseFragment) -> t.Any:
             if node.tag == "skip":
                 return NotImplemented
-            return kdl.Node(name=f"conv_{node.name}_{pf.fragment}", entries=node.entries, nodes=node.nodes)
+            return kdl.Node(
+                name=f"conv_{node.name}_{pf.fragment}",
+                args=node.args,
+                props=node.props,
+                nodes=node.nodes,
+            )
 
         cfg = kdl.ParseConfig(
             nativeUntaggedValues=True,
@@ -545,19 +550,34 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         node = doc.nodes[0]
         _assert(node.name == "conv_item_(wrap)item", f"Got node.name={node.name!r}")
         _assert(
-            node.entries
+            node.args
             == [
-                (None, True),
-                (None, datetime.date(2026, 11, 19)),
-                (None, ipaddress.IPv4Address("10.0.0.1")),
-                (None, 1.5),
-                (None, "custom:hi"),
-                (None, kdl.String("keep", tag="skip")),
-                ("dup", 2.0),
+                True,
+                datetime.date(2026, 11, 19),
+                ipaddress.IPv4Address("10.0.0.1"),
+                1.5,
+                "custom:hi",
+                kdl.String("keep", tag="skip"),
             ],
-            f"Unexpected entries: {node.entries!r}",
+            f"Unexpected args: {node.args!r}",
         )
+        _assert(node.props == {"dup": 2.0}, f"Unexpected props: {node.props!r}")
         _assert(seenVals == ['"hi"', '"keep"'], f"Slashdashed value should not invoke converter; saw {seenVals!r}")
+
+    def _testNodeArgsPropsAndPrintConfig() -> None:
+        doc = kdl.parse("n b=2 #null 1 a=#null c=3 #null\n")
+        node = doc.nodes[0]
+        _assert(node.args == [None, 1.0, None], f"Got args={node.args!r}")
+        _assert(node.props == {"b": 2.0, "a": None, "c": 3.0}, f"Got props={node.props!r}")
+        _assert(list(node.getArgs((..., float))) == [1.0])
+        _assert(list(node.getProps((..., float))) == [("b", 2.0), ("c", 3.0)])
+        _assert(doc.print(kdl.PrintConfig(printNullArgs=False)) == "n 1.0 b=2.0 a=#null c=3.0\n")
+        _assert(doc.print(kdl.PrintConfig(printNullProps=False)) == "n #null 1.0 #null b=2.0 c=3.0\n")
+        _assert(
+            doc.print(kdl.PrintConfig(printNullArgs=False, printNullProps=False, sortProperties=True))
+            == "n 1.0 b=2.0 c=3.0\n",
+        )
+        _assert(doc.print(kdl.PrintConfig(sortProperties=True)) == "n #null 1.0 #null a=#null b=2.0 c=3.0\n")
 
     extraChecks: list[tuple[str, t.Callable[[], None]]] = [
         ("marker_v1_direct", _testMarkerV1Direct),
@@ -571,6 +591,7 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         ("fallback_failure_reraises_v2", _testFallbackFailureReraisesV2Error),
         ("broken_raw_fallback_reraises_v2", _testBrokenRawStringFallbackReraisesV2Error),
         ("config_converters_and_native_in_kdl1", _testConfigConvertersAndNativeTypesInKdl1),
+        ("node_args_props_and_print_config", _testNodeArgsPropsAndPrintConfig),
     ]
     for name, fn in extraChecks:
         check(name, fn)
