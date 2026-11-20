@@ -1,755 +1,3066 @@
 from __future__ import annotations
 
-from typing import NamedTuple
+import base64
+import datetime
+import decimal
+import ipaddress
+import itertools
+import operator
+import re
+import urllib.parse
+import uuid
 
-from . import converters, parsing, t, types
+from . import converters, parsing, t
 from .errors import ParseError, ParseFragment
 from .stream import Stream
+from .types import (
+    Binary,
+    Bool,
+    Decimal,
+    Document,
+    Hex,
+    Node,
+    Null,
+    Octal,
+    RawString,
+    String,
+    Value,
+)
 
 if t.TYPE_CHECKING:
     from .types import LooseEntry
 
+    _FastFrame: t.TypeAlias = tuple[
+        list[Node],  # parentNodes
+        str,  # name
+        str | None,  # tag
+        list[LooseEntry],  # entries
+        bool,  # nodeDiscard
+        bool,  # childDiscard
+        bool,  # parentDiscard
+        int,  # blockPos (exact offset if blockEnd < 0, else chunk pos)
+        int,  # blockEnd (chunk endPos if >= 0, else -1)
+        int,  # blockTokIdx (token index within chunk if blockEnd >= 0)
+    ]
 
-class Failure:
-    pass
+    _GenFrame: t.TypeAlias = tuple[
+        list[Node],  # parentNodes
+        int,  # nodeStart
+        int,  # nameEnd
+        str,  # name
+        str | None,  # tag
+        list[LooseEntry],  # entries
+        bool,  # nodeDiscard
+        bool,  # childDiscard
+        bool,  # parentDiscard
+        int,  # blockStart
+    ]
+
+# KDL 1.0 character classes (differ from KDL 2.0: BOM is whitespace, \x0b is not newline/WS,
+# `<` and `>` are disallowed in bare idents, `#` and leading `.0` ARE allowed in bare idents).
+_WS_CHARS = "\t \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u205f\u3000\ufeff"
+_NL_CHARS = "\n\r\x85\x0c\u2028\u2029"
+_WS_RE = r"\t \xa0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff"
+_NL_RE = r"\n\r\x85\x0c\u2028\u2029"
+_ID_CH = r'[^\x00-\x20\\/(){}<>;\[\]=,"\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]'
+_ID_CH_OR_Q = r"[^\x00-\x20\\/(){}<>;\[\]=,\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
+
+_BARE_CORE = rf'(?![+-]?[0-9]|r#*"){_ID_CH}+'
+_BARE_PROP_KEY = rf'(?![+-]?[0-9]|r#*"|(?:true|false|null)=){_ID_CH}+'
+_DEC = r"[+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?"
+_ID_EQ = r"[A-Za-z_][A-Za-z0-9_-]*"
+_ID_END = rf"[A-Za-z_][A-Za-z0-9_-]*(?!{_ID_CH_OR_Q})"
+_RADIX = r"[+-]?0(?:x[0-9a-fA-F][0-9a-fA-F_]*|o[0-7][0-7_]*|b[01][01_]*)"
+_QSTR = r'"[^"\\]*(?:(?:\\["\\/bfnrt]|\\u\{[0-9a-fA-F]{1,6}\})[^"\\]*)*"'
+_RAW = r'r(?:"[^"]*"|#"[^"]*(?:"(?!#)[^"]*)*"#|##"[^"]*(?:"(?!##)[^"]*)*"##)(?![#=])'
+_SLASH = r"/(?:-|\*[^*]*(?:\*(?!/)[^*]*)*\*/(?=[ \n{]))"
+
+_WS_SET = frozenset(_WS_CHARS)
+_NL_SET = frozenset(_NL_CHARS)
+_DIGITS = frozenset("0123456789")
+_KEYWORDS = frozenset(("true", "false", "null"))
+_KW_NATIVE: dict[str, bool | None] = {"true": True, "false": False, "null": None}
+_NATIVE_TAGS = converters.NATIVE_TAGS
+_UNSET = t.UNSET
+_lengthHint = operator.length_hint
+
+_INT_TAG_BOUNDS: dict[str, tuple[int, int]] = {
+    "i8": (-(2**7), 2**7),
+    "i16": (-(2**15), 2**15),
+    "i32": (-(2**31), 2**31),
+    "i64": (-(2**63), 2**63),
+    "u8": (0, 2**8),
+    "u16": (0, 2**16),
+    "u32": (0, 2**32),
+    "u64": (0, 2**64),
+}
+
+_SIMPLE_ESCAPES: dict[str, str] = {
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "\\": "\\",
+    "/": "/",
+    '"': '"',
+    "b": "\b",
+    "f": "\f",
+}
+
+# 5-group chunked tokenizer for C-speed scanning without Match allocations:
+# (propKey, propVal, argOrSym, nlHead, fallback)
+# The trailing `(?s:.+)` in `fallback` stops `findall` immediately on any complex/error byte
+# and lets us compute its exact offset in O(1) as `endPos - len(fb)`.
+_TOK_RE = re.compile(
+    rf" (?:"
+    rf"({_ID_EQ})=({_DEC}(?![.eExob])|(?:true|false|null)(?!{_ID_CH})|{_QSTR}|{_RADIX})"
+    rf"|(\{{|{_QSTR}(?!=)|{_DEC}(?![.eExob])|\({_ID_EQ}\)(?:{_QSTR}|{_DEC}(?![.eExob]))"
+    rf"|{_RAW}|{_SLASH}|\}}|\\[ \t]*\n[ \t]*(?= )|{_RADIX}|{_ID_END})"
+    rf")"
+    rf"|\n(?:[ \t]*(?://[^{_NL_RE}]*)?\n)*[ \t]*(\}}|{_ID_END}|/- {_ID_END}|\({_ID_EQ}\){_ID_END}|)"
+    rf"|(\{{|;|(?s:.+))",
+)
+_tokFindall = _TOK_RE.findall
+_tokFinditer = _TOK_RE.finditer
+
+_escSub = re.compile(r'\\(["\\/bfnrt]|u\{([0-9a-fA-F]{1,6})\})').sub
+_uEscSub = re.compile(r"\\u\{([0-9a-fA-F]{1,6})\}").sub
+
+_dateFromIso = datetime.date.fromisoformat
+_timeFromIso = datetime.time.fromisoformat
+_dtFromIso = datetime.datetime.fromisoformat
+_ipv4Cls = ipaddress.IPv4Address
+_ipv6Cls = ipaddress.IPv6Address
+_urlparse = urllib.parse.urlparse
+_uuidCls = uuid.UUID
+_reCompile = re.compile
+_b64decode = base64.b64decode
+_decCls = decimal.Decimal
+
+# Exact regex matchers for fallback, tiny docs, and custom-converter path
+_matchNodeHead = re.compile(
+    rf"(?:[{_WS_RE}{_NL_RE}]+|//[^{_NL_RE}]*)*(?:"
+    rf"({_BARE_CORE})"  # 1: bare node name
+    rf'|"([^"\\]*)"'  # 2: plain quoted node name
+    rf"|(\}})"  # 3: closing brace
+    rf"|(/-)"  # 4: slashdash
+    rf"|(\()"  # 5: tag start
+    rf"|(/\*)"  # 6: block comment
+    rf'|(")'  # 7: escaped/unclosed quoted node name
+    rf'|(r#*")'  # 8: raw string node name
+    rf")?",
+).match
+
+_matchEntry = re.compile(
+    rf"(?:"
+    rf'({_BARE_PROP_KEY})(?:=(?:"([^"\\]*)"|({_DEC})(?![.eExob])|(true|false|null)(?!{_ID_CH})|()))?'
+    rf'|"([^"\\]*)"(?!=)'
+    rf"|({_DEC})(?![.eExob])"
+    rf")",
+).match
+
+_matchBareIdent = re.compile(_BARE_CORE).match
+_matchBareTag = re.compile(rf"\(({_BARE_CORE})\)").match
+_matchWs = re.compile(rf"[{_WS_RE}]+").match
+_matchSingleLineComment = re.compile(rf"//[^{_NL_RE}]*(?:\r\n|[{_NL_RE}])?").match
+_searchBlockCommentToken = re.compile(r"/\*|\*/").search
+_matchHexEscape = re.compile(r"[0-9a-fA-F]*").match
+_matchDecDigits = re.compile(r"[0-9][0-9_]*").match
+_matchDecimal = re.compile(r"([+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?)(?:[eE]([+-]?[0-9][0-9_]*))?").match
+_matchHexDigits = re.compile(r"[0-9a-fA-F][0-9a-fA-F_]*").match
+_matchOctDigits = re.compile(r"[0-7][0-7_]*").match
+_matchBinDigits = re.compile(r"[01][01_]*").match
+_matchKeyword = re.compile(rf"(true|false|null)(?!{_ID_CH})").match
 
 
-class Result(NamedTuple):
-    value: t.Any
+def _uEscCb(m: re.Match[str]) -> str:
+    v = int(m.group(1), 16)
+    if v > 0x10FFFF:
+        raise ValueError
+    return chr(v)
+
+
+def _unescapeValidated(inner: str) -> str:
+    """Unescape a string body already validated by `_QSTR`; raises ValueError on codepoint > 0x10FFFF."""
+    if "\\\\" not in inner:
+        if '\\"' in inner:
+            inner = inner.replace('\\"', '"')
+        if "\\n" in inner:
+            inner = inner.replace("\\n", "\n")
+        if "\\t" in inner:
+            inner = inner.replace("\\t", "\t")
+        if "\\r" in inner:
+            inner = inner.replace("\\r", "\r")
+        if "\\/" in inner:
+            inner = inner.replace("\\/", "/")
+        if "\\b" in inner:
+            inner = inner.replace("\\b", "\b")
+        if "\\f" in inner:
+            inner = inner.replace("\\f", "\f")
+        if "\\u" in inner:
+            return _uEscSub(_uEscCb, inner)
+        return inner
+    return _escSub(_unescCb, inner)
+
+
+def _unescCb(m: re.Match[str]) -> str:
+    h = m.group(2)
+    if h is not None:
+        v = int(h, 16)
+        if v > 0x10FFFF:
+            raise ValueError
+        return chr(v)
+    return _SIMPLE_ESCAPES[m.group(1)]
+
+
+def _skipBlockComment(s: Stream, start: int) -> int:
+    chars = s.chars
+    search = _searchBlockCommentToken
+    starts: list[int] = [start]
+    i = start + 2
+    while starts:
+        m = search(chars, i)
+        if m is None:
+            raise ParseError(s, starts[-1], "Hit EOF while inside a multiline comment")
+        if m.group() == "/*":
+            starts.append(m.start())
+        else:
+            starts.pop()
+        i = m.end()
+    return i
+
+
+def _skipWhitespace(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
+    i = start
+    matchWs = _matchWs
+    while i < n:
+        m = matchWs(chars, i)
+        if m is not None:
+            i = m.end()
+            if i >= n:
+                break
+        if chars[i] == "/" and i + 1 < n and chars[i + 1] == "*":
+            i = _skipBlockComment(s, i)
+        else:
+            break
+    return i
+
+
+def _skipNodespace(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
+    i = start
+    while i < n:
+        i = _skipWhitespace(s, i)
+        if i >= n or chars[i] != "\\":
+            return i
+        j = _skipWhitespace(s, i + 1)
+        if j < n and chars[j] == "\n":
+            i = j + 1
+            continue
+        if j + 1 < n and chars[j] == "/" and chars[j + 1] == "/":
+            m = _matchSingleLineComment(chars, j)
+            assert m is not None
+            i = m.end()
+            continue
+        return i
+    return i
+
+
+def _skipTerminator(s: Stream, i: int) -> int:
+    chars = s.chars
+    n = s.length
+    if i >= n:
+        return i
+    ch = chars[i]
+    if ch in ("\n", ";"):
+        return i + 1
+    if ch == "\r":
+        return i + 2 if (i + 1 < n and chars[i + 1] == "\n") else i + 1
+    if ch in _NL_SET:
+        return i + 1
+    if ch == "/" and i + 1 < n and chars[i + 1] == "/":
+        m = _matchSingleLineComment(chars, i)
+        assert m is not None
+        return m.end()
+    raise ParseError(s, i, "Junk after node, before terminator.")
+
+
+def _parseEscapedString(s: Stream, start: int) -> tuple[str, int]:
+    """Scan a double-quoted KDL1 string using C-level `str.find` (zero regex Match allocations)."""
+    chars = s.chars
+    n = s.length
+    find = chars.find
+    i = start + 1
+    q = find('"', i)
+    b = find("\\", i)
+    if b == -1 or (q != -1 and q < b):
+        if q == -1:
+            raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+        return (chars[i:q], q + 1)
+
+    simpleEsc = _SIMPLE_ESCAPES
+    parts: list[str] = []
+    append = parts.append
+    while True:
+        if b > i:
+            append(chars[i:b])
+        if b + 1 >= n:
+            raise ParseError(s, b, "Invalid character escape")
+        escCh = chars[b + 1]
+        mapped = simpleEsc.get(escCh)
+        if mapped is not None:
+            append(mapped)
+            i = b + 2
+        elif escCh == "u":
+            if b + 2 >= n or chars[b + 2] != "{":
+                raise ParseError(s, b, "Unicode escapes must surround their codepoint in {}")
+            hexStart = b + 3
+            mh = _matchHexEscape(chars, hexStart)
+            assert mh is not None
+            j = mh.end()
+            hexCount = j - hexStart
+            if j >= n or chars[j] != "}":
+                raise ParseError(s, hexStart, "Expected } to finish a unicode escape")
+            if hexCount < 1:
+                raise ParseError(s, hexStart, "Unicode escape doesn't contain a codepoint")
+            if hexCount > 6:
+                raise ParseError(s, hexStart, "Unicode escapes can contain at most six digits")
+            hexValue = int(chars[hexStart:j], 16)
+            if hexValue > 0x10FFFF:
+                raise ParseError(s, hexStart, "Maximum codepoint in a unicode escape is 0x10ffff")
+            append(chr(hexValue))
+            i = j + 1
+        else:
+            raise ParseError(s, b, "Invalid character escape")
+
+        if q != -1 and q < i:
+            q = find('"', i)
+        b = find("\\", i)
+        if b == -1 or (q != -1 and q < b):
+            if q == -1:
+                raise ParseError(s, start, "Hit EOF while looking for the end of the string")
+            if q > i:
+                append(chars[i:q])
+            return ("".join(parts), q + 1)
+
+
+def _parseRawString(s: Stream, start: int, hashCount: int) -> tuple[str, int]:
+    chars = s.chars
+    n = s.length
+    strStart = start + 2 + hashCount
+    delim = '"' if hashCount == 0 else '"' + ("#" * hashCount)
+    pos = chars.find(delim, strStart)
+    if pos == -1:
+        raise ParseError(s, start, "Hit EOF while looking for the end of the raw string.")
+    end = pos + 1 + hashCount
+    if end < n and chars[end] == "#":
+        j = end + 1
+        while j < n and chars[j] == "#":
+            j += 1
+        count = j - (pos + 1)
+        raise ParseError(s, pos + 1, f"Expected {hashCount} hashes at end of raw string; got {count}.")
+    return (chars[strStart:pos], end)
+
+
+def _parseIdent(s: Stream, start: int) -> tuple[str | None, int]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return (None, -1)
+    ch = chars[start]
+    if ch == '"':
+        return _parseEscapedString(s, start)
+    if ch == "r" and start + 1 < n and chars[start + 1] in ('"', "#"):
+        j = start + 1
+        while j < n and chars[j] == "#":
+            j += 1
+        if j < n and chars[j] == '"':
+            return _parseRawString(s, start, j - start - 1)
+    m = _matchBareIdent(chars, start)
+    if m is None:
+        return (None, -1)
+    ident = m.group()
+    if ident in _KEYWORDS:
+        return (None, -1)
+    return (ident, m.end())
+
+
+def _parseTag(s: Stream, start: int) -> tuple[str | None, int]:
+    chars = s.chars
+    n = s.length
+    if start >= n or chars[start] != "(":
+        return (None, -1)
+    m = _matchBareTag(chars, start)
+    if m is not None:
+        tag = m.group(1)
+        if tag not in _KEYWORDS:
+            return (tag, m.end())
+        return (None, -1)
+    tagOrNone, end = _parseIdent(s, start + 1)
+    if tagOrNone is None:
+        return (None, -1)
+    if end >= n or chars[end] != ")":
+        raise ParseError(s, end, "Junk between tag ident and closing paren.")
+    return (tagOrNone, end + 1)
+
+
+def _decimalFromStr(raw: str) -> Decimal:
+    if "_" in raw:
+        raw = raw.replace("_", "")
+    ePos = raw.find("e")
+    if ePos == -1:
+        ePos = raw.find("E")
+    if ePos == -1:
+        mantissa: int | float = float(raw) if "." in raw else int(raw, 10)
+        return Decimal(mantissa, 0)
+    mantStr = raw[:ePos]
+    expVal = int(raw[ePos + 1 :], 10)
+    mantissa = float(mantStr) if "." in mantStr else int(mantStr, 10)
+    return Decimal(mantissa, expVal)
+
+
+def _floatFromDecStr(raw: str) -> float:
+    if "_" in raw:
+        raw = raw.replace("_", "")
+    fval = float(raw)
+    if fval == 0.0 and raw[0] == "-" and "." not in raw:
+        ePos = raw.find("e")
+        if ePos == -1:
+            ePos = raw.find("E")
+        if ePos == -1 or int(raw[:ePos], 10) == 0:
+            return 0.0
+    return fval
+
+
+def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.Any, int]:
+    chars = s.chars
+    n = s.length
+    ch = chars[start]
+    if ch in ("+", "-"):
+        sign = -1 if ch == "-" else 1
+        i = start + 1
+        if i >= n or chars[i] not in _DIGITS:
+            return (None, -1)
+    elif ch in _DIGITS:
+        sign = 1
+        i = start
+    else:
+        return (None, -1)
+
+    if chars[i] == "0" and i + 1 < n:
+        prefix = chars[i + 1]
+        if prefix == "x":
+            m = _matchHexDigits(chars, i + 2)
+            if m is None:
+                raise ParseError(s, i + 2, "Expected hex digit after 0x, got junk.")
+            if discard:
+                return (None, m.end())
+            raw = m.group()
+            intVal = int(raw.replace("_", "") if "_" in raw else raw, 16) * sign
+            return (intVal if native else Hex(intVal), m.end())
+        if prefix == "o":
+            m = _matchOctDigits(chars, i + 2)
+            if m is None:
+                raise ParseError(s, i + 2, "Expected octal digit after 0o, got junk.")
+            if discard:
+                return (None, m.end())
+            raw = m.group()
+            intVal = int(raw.replace("_", "") if "_" in raw else raw, 8) * sign
+            return (intVal if native else Octal(intVal), m.end())
+        if prefix == "b":
+            m = _matchBinDigits(chars, i + 2)
+            if m is None:
+                raise ParseError(s, i + 2, "Expected binary digit after 0b, got junk.")
+            if discard:
+                return (None, m.end())
+            raw = m.group()
+            intVal = int(raw.replace("_", "") if "_" in raw else raw, 2) * sign
+            return (intVal if native else Binary(intVal), m.end())
+
+    mDec = _matchDecimal(chars, start)
+    assert mDec is not None
+    end = mDec.end()
+    if end < n and chars[end] in (".", "e", "E"):
+        mInt = _matchDecDigits(chars, i)
+        assert mInt is not None
+        p = mInt.end()
+        if p < n and chars[p] == ".":
+            mFrac = _matchDecDigits(chars, p + 1)
+            if mFrac is None:
+                raise ParseError(s, p + 1, "Expected digit after decimal point.")
+            p = mFrac.end()
+        if p < n and chars[p] in ("e", "E"):
+            expDigits = p + 2 if (p + 1 < n and chars[p + 1] in ("+", "-")) else p + 1
+            if _matchDecDigits(chars, expDigits) is None:
+                raise ParseError(s, expDigits, "Expected number after exponent.")
+    if discard:
+        return (None, end)
+    if native:
+        return (_floatFromDecStr(mDec.group()), end)
+    mantStr = mDec.group(1)
+    if "_" in mantStr:
+        mantStr = mantStr.replace("_", "")
+    mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
+    expStr = mDec.group(2)
+    if expStr is None:
+        return (Decimal(mantissa, 0), end)
+    if "_" in expStr:
+        expStr = expStr.replace("_", "")
+    return (Decimal(mantissa, int(expStr, 10)), end)
+
+
+def _convertTaggedStringFast(tag: str, text: str) -> t.Any:
+    if tag == "date":
+        try:
+            return _dateFromIso(text)
+        except ValueError:
+            return _UNSET
+    if tag == "ipv4":
+        try:
+            return _ipv4Cls(text)
+        except ipaddress.AddressValueError:
+            return _UNSET
+    if tag == "url":
+        try:
+            return _urlparse(text)
+        except ValueError:
+            return _UNSET
+    if tag == "date-time":
+        try:
+            return _dtFromIso(text)
+        except ValueError:
+            return _UNSET
+    if tag == "time":
+        try:
+            return _timeFromIso(text)
+        except ValueError:
+            return _UNSET
+    if tag == "ipv6":
+        try:
+            return _ipv6Cls(text)
+        except ipaddress.AddressValueError:
+            return _UNSET
+    if tag == "uuid":
+        try:
+            return _uuidCls(text)
+        except Exception:
+            return _UNSET
+    if tag == "regex":
+        try:
+            return _reCompile(text)
+        except Exception:
+            return _UNSET
+    if tag == "base64":
+        try:
+            return _b64decode(text.encode("utf-8"), validate=True)
+        except Exception:
+            return _UNSET
+    if tag == "decimal":
+        try:
+            return _decCls(text)
+        except decimal.InvalidOperation:
+            return _UNSET
+    return String(text, tag)
+
+
+def _convertTaggedDecFast(tag: str, raw: str) -> t.Any:
+    bounds = _INT_TAG_BOUNDS.get(tag)
+    if bounds is not None:
+        fval = _floatFromDecStr(raw)
+        if bounds[0] <= fval < bounds[1]:
+            return int(fval)
+        return _UNSET
+    if tag in ("f32", "f64"):
+        return _floatFromDecStr(raw)
+    if tag in ("decimal64", "decimal128"):
+        try:
+            return _decCls(raw.replace("_", "") if "_" in raw else raw)
+        except decimal.InvalidOperation:
+            return _UNSET
+    d = _decimalFromStr(raw)
+    d.tag = tag
+    return d
+
+
+def _finalizeValue(s: Stream, val: Value, tag: str | None, valStart: int, valEnd: int) -> t.Any:
+    val.tag = tag
+    config = s.config
+    valueConverters = config.valueConverters
+    if valueConverters:
+        pf: ParseFragment | None = None
+        for key, converter in valueConverters.items():
+            if val.matchesKey(key):
+                if pf is None:
+                    pf = ParseFragment(s.chars[valStart:valEnd], s, valEnd)
+                converted = converter(val, pf)
+                if converted == NotImplemented:
+                    continue
+                return converted
+
+    if tag is None:
+        if config.nativeUntaggedValues:
+            return val.value
+        return val
+
+    if config.nativeTaggedValues and tag in _NATIVE_TAGS:
+        return converters.toNative(val, s, valStart, valEnd)
+    return val
+
+
+def _parseValueFast(s: Stream, start: int, discard: bool, nativeTagged: bool) -> tuple[t.Any, int]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return (None, -1)
+
+    tag: str | None = None
+    i = start
+    if chars[i] == "(":
+        mt = _matchBareTag(chars, i)
+        if mt is not None:
+            cand = mt.group(1)
+            if cand not in _KEYWORDS:
+                tag = cand
+                i = mt.end()
+        else:
+            tag, tagEnd = _parseTag(s, i)
+            if tagEnd >= 0:
+                i = tagEnd
+
+    if i >= n:
+        if tag is not None:
+            raise ParseError(s, i, "Found a tag, but no value following it.")
+        return (None, -1)
+
+    valStart = i
+    ch = chars[i]
+    untagged = tag is None
+    val: t.Any
     end: int
 
-    @property
-    def valid(self) -> bool:
-        return self.value is not Failure
+    if ch in _DIGITS or (ch in ("+", "-") and i + 1 < n and chars[i + 1] in _DIGITS):
+        val, end = _parseNumber(s, i, untagged, discard)
+        if discard or untagged:
+            return (val, end)
+        vObj = t.cast("Value", val)
+        vObj.tag = tag
+        if nativeTagged and tag in _NATIVE_TAGS:
+            return (converters.toNative(vObj, s, valStart, end), end)
+        return (vObj, end)
 
-    @staticmethod
-    def fail(index: int) -> Result:
-        return Result(Failure, index)
+    if ch == '"':
+        strVal, end = _parseEscapedString(s, i)
+        if discard:
+            return (None, end)
+        if untagged:
+            return (strVal, end)
+        sObj = String(strVal, tag)
+        if nativeTagged and tag in _NATIVE_TAGS:
+            return (converters.toNative(sObj, s, valStart, end), end)
+        return (sObj, end)
+
+    if ch == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
+        j = i + 1
+        while j < n and chars[j] == "#":
+            j += 1
+        if j < n and chars[j] == '"':
+            rawVal, end = _parseRawString(s, i, j - i - 1)
+            if discard:
+                return (None, end)
+            if untagged:
+                return (rawVal, end)
+            rObj = RawString(rawVal, tag)
+            if nativeTagged and tag in _NATIVE_TAGS:
+                return (converters.toNative(rObj, s, valStart, end), end)
+            return (rObj, end)
+
+    if ch in ("t", "f", "n"):
+        mk = _matchKeyword(chars, i)
+        if mk is not None:
+            end = mk.end()
+            if discard:
+                return (None, end)
+            kw = mk.group()
+            if untagged:
+                return (_KW_NATIVE[kw], end)
+            kObj: Value = Bool(True, tag) if kw == "true" else (Bool(False, tag) if kw == "false" else Null(tag))
+            return (kObj, end)
+
+    if ch == "'":
+        raise ParseError(s, i, "KDL strings use double-quotes.")
+
+    mb = _matchBareIdent(chars, i)
+    if mb is not None and mb.group().lower() in _KEYWORDS:
+        raise ParseError(s, i, "KDL keywords are lower-case.")
+
+    if tag is not None:
+        raise ParseError(s, i, "Found a tag, but no value following it.")
+    return (None, -1)
 
 
-def parse(input: str, config: t.ParseConfig | None = None) -> types.Document:
-    if config is None:
-        config = parsing.defaults
-    doc = types.Document()
-    s = Stream(input, config)
-    _, i = parseLinespace(s, 0)
-    while not s.eof(i):
-        node, i = parseNode(s, i)
-        if node is Failure:
-            raise ParseError(s, i, "Expected a node")
-        if node is not None:
-            doc.nodes.append(node)
-        _, i = parseLinespace(s, i)
-    return doc
+def _parseValue(s: Stream, start: int, fastUntagged: bool, discard: bool) -> tuple[t.Any, int]:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return (None, -1)
 
-
-def parseNode(s: Stream, start: int, discard: bool = False) -> Result:
+    tag: str | None = None
     i = start
+    if chars[i] == "(":
+        tag, tagEnd = _parseTag(s, i)
+        if tagEnd >= 0:
+            i = tagEnd
 
-    sd, i = parseSlashDash(s, i)
-    if sd is Failure:
-        sd = False
-    discard = discard or bool(sd)
+    if i >= n:
+        if tag is not None:
+            raise ParseError(s, i, "Found a tag, but no value following it.")
+        return (None, -1)
 
-    # tag?
-    tag, i = parseTag(s, i)
-    if tag is Failure:
-        tag = None
+    valStart = i
+    ch = chars[i]
+    native = discard or (tag is None and fastUntagged)
+    val: t.Any
+    end: int
 
-    # name
-    name, i = parseIdent(s, i)
-    if name is Failure:
-        return Result.fail(start)
+    if ch in _DIGITS or (ch in ("+", "-") and i + 1 < n and chars[i + 1] in _DIGITS):
+        val, end = _parseNumber(s, i, native, discard)
+        if discard:
+            return (None, end)
+        if native:
+            return (val, end)
+        return (_finalizeValue(s, t.cast("Value", val), tag, valStart, end), end)
 
-    nameEnd = i
+    if ch == '"':
+        strVal, end = _parseEscapedString(s, i)
+        if discard:
+            return (None, end)
+        if native:
+            return (strVal, end)
+        return (_finalizeValue(s, String(strVal), tag, valStart, end), end)
 
-    entries: list[LooseEntry] = []
-    propIndices: dict[str, int] | None = None
+    if ch == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
+        j = i + 1
+        while j < n and chars[j] == "#":
+            j += 1
+        if j < n and chars[j] == '"':
+            rawVal, end = _parseRawString(s, i, j - i - 1)
+            if discard:
+                return (None, end)
+            if native:
+                return (rawVal, end)
+            return (_finalizeValue(s, RawString(rawVal), tag, valStart, end), end)
 
-    # props and args
-    while True:
-        space, i = parseNodespace(s, i)
-        if space is Failure:
-            break
-        entity, i = parseEntity(s, i, discard=discard)
-        if entity is Failure:
-            break
-        if entity is None or discard:
-            continue
-        propKey = entity[0]
-        if propKey is None:
-            entries.append(entity)
-        elif propIndices is None:
-            propIndices = {propKey: len(entries)}
-            entries.append(entity)
-        else:
-            existingIdx = propIndices.get(propKey)
-            if existingIdx is not None:
-                entries[existingIdx] = entity
-            else:
-                propIndices[propKey] = len(entries)
-                entries.append(entity)
+    if ch in ("t", "f", "n"):
+        mk = _matchKeyword(chars, i)
+        if mk is not None:
+            end = mk.end()
+            if discard:
+                return (None, end)
+            kw = mk.group()
+            if native:
+                return (_KW_NATIVE[kw], end)
+            kwObj: Value = Bool(True) if kw == "true" else (Bool(False) if kw == "false" else Null())
+            return (_finalizeValue(s, kwObj, tag, valStart, end), end)
 
-    _, i = parseNodespace(s, i)
+    if ch == "'":
+        raise ParseError(s, i, "KDL strings use double-quotes.")
 
-    children: list[types.Node] = []
-    nodes, i = parseNodeChildren(s, i, discard=discard)
-    if nodes is not Failure and nodes is not None:
-        children = nodes
+    mb = _matchBareIdent(chars, i)
+    if mb is not None and mb.group().lower() in _KEYWORDS:
+        raise ParseError(s, i, "KDL keywords are lower-case.")
 
-    _, i = parseNodespace(s, i)
-    _, i = parseNodeTerminator(s, i)
+    if tag is not None:
+        raise ParseError(s, i, "Found a tag, but no value following it.")
+    return (None, -1)
 
-    if discard:
-        return Result(None, i)
 
-    node: types.Node = types.Node(name=name, tag=tag, entries=entries, nodes=children)
-    for key, converter in s.config.nodeConverters.items():
-        if node.matchesKey(key):
-            converted = converter(
-                node,
-                ParseFragment(s[start:nameEnd], s, start),
+def _parseDiscardedEntity(s: Stream, start: int) -> int:
+    chars = s.chars
+    n = s.length
+    if start >= n:
+        return -1
+    m = _matchEntry(chars, start)
+    if m is not None:
+        li = m.lastindex
+        if li in (2, 3, 4, 6, 7):
+            return m.end()
+        if li == 5:
+            _, valEnd = _parseValueFast(s, m.end(), True, False)
+            if valEnd < 0:
+                raise ParseError(s, m.end(), "Expected value after prop=.")
+            return valEnd
+        tok = m.group(1)
+        if tok in _KEYWORDS:
+            return m.end()
+        if tok.lower() in _KEYWORDS:
+            raise ParseError(s, start, "KDL keywords are lower-case.")
+        return -1
+
+    ch = chars[start]
+    if ch == '"':
+        _, strEnd = _parseEscapedString(s, start)
+        if strEnd < n and chars[strEnd] == "=":
+            _, valEnd = _parseValueFast(s, strEnd + 1, True, False)
+            if valEnd < 0:
+                raise ParseError(s, strEnd + 1, "Expected value after prop=.")
+            return valEnd
+        return strEnd
+    if ch == "r" and start + 1 < n and chars[start + 1] in ('"', "#"):
+        j = start + 1
+        while j < n and chars[j] == "#":
+            j += 1
+        if j < n and chars[j] == '"':
+            _, strEnd = _parseRawString(s, start, j - start - 1)
+            if strEnd < n and chars[strEnd] == "=":
+                _, valEnd = _parseValueFast(s, strEnd + 1, True, False)
+                if valEnd < 0:
+                    raise ParseError(s, strEnd + 1, "Expected value after prop=.")
+                return valEnd
+            return strEnd
+    _, valEnd = _parseValueFast(s, start, True, False)
+    return valEnd
+
+
+def _pickChunkEnd(chars: str, pos: int, n: int, chunkSize: int) -> int:
+    target = pos + chunkSize
+    if target >= n:
+        return n
+    nlPos = chars.find("\n", target, target + 512)
+    if nlPos != -1:
+        return nlPos
+    spPos = chars.find(" ", target, target + 512)
+    if spPos != -1:
+        return spPos
+    # Giant token (> 512 bytes without `\n` or ` `, e.g. long string or comment):
+    # cut before it if possible, else return -1 to handle it directly in C via fallback.
+    prevNl = chars.rfind("\n", pos + 1, target)
+    if prevNl != -1:
+        return prevNl
+    prevSp = chars.rfind(" ", pos + 1, target)
+    if prevSp != -1:
+        return prevSp
+    return -1
+
+
+def _tokenOffset(chars: str, pos: int, endPos: int, tokIdx: int) -> int:
+    m = next(itertools.islice(_tokFinditer(chars, pos, endPos), tokIdx, tokIdx + 1))
+    return m.start()
+
+
+def _unclosedBlockPos(chars: str, frame: _FastFrame) -> int:
+    bPos = frame[7]
+    bEnd = frame[8]
+    if bEnd < 0:
+        return bPos
+    m = next(itertools.islice(_tokFinditer(chars, bPos, bEnd), frame[9], frame[9] + 1))
+    # For `' {'` token, `{` is at start + 1; for bare `'{'`, at start.
+    st = m.start()
+    return st + 1 if chars[st] == " " else st
+
+
+def _handleChunkFallback(
+    s: Stream,
+    i: int,
+    *,
+    nativeUntagged: bool,
+    nativeTagged: bool,
+    state: int,
+    name: str,
+    tag: str | None,
+    entries: list[LooseEntry] | None,
+    props: dict[str, t.Any] | None,
+    propIndices: dict[str, int] | None,
+    nodeDiscard: bool,
+    curNodes: list[Node],
+    curDiscard: bool,
+    stack: list[_FastFrame],
+) -> tuple[
+    int,  # new pos (or -1 to return Document)
+    int,  # new state
+    str,  # name
+    str | None,  # tag
+    list[LooseEntry] | None,  # entries
+    dict[str, t.Any] | None,  # props
+    dict[str, int] | None,  # propIndices
+    bool,  # nodeDiscard
+    list[Node],  # curNodes
+    bool,  # curDiscard
+]:
+    """Execute one exact fallback step at byte offset `i` for `_parseChunkedNative`/`_parseChunkedRaw`."""
+    chars = s.chars
+    n = s.length
+    keywords = _KEYWORDS
+    wsSet = _WS_SET
+    nlSet = _NL_SET
+
+    if state == 0:
+        mh = _matchNodeHead(chars, i)
+        assert mh is not None
+        li = mh.lastindex
+        if li == 1:
+            cand = mh.group(1)
+            if cand in keywords:
+                raise ParseError(
+                    s,
+                    mh.start(1),
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            return (mh.end(), 1, cand, None, None, None, None, curDiscard, curNodes, curDiscard)
+        if li == 3:
+            if not stack:
+                raise ParseError(s, mh.start(3), "Expected a node")
+            parentNodes, pName, pTag, pEntries, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = stack.pop()
+            if not pNodeDiscard:
+                parentNodes.append(Node(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+            return (mh.end(), 2, "", None, None, None, None, False, parentNodes, pParentDiscard)
+        if li is None:
+            end = mh.end()
+            if end >= n:
+                if stack:
+                    raise ParseError(
+                        s,
+                        _unclosedBlockPos(chars, stack[-1]),
+                        "Hit EOF while searching for end of child list",
+                    )
+                return (-1, 0, "", None, None, None, None, False, curNodes, curDiscard)
+            raise ParseError(
+                s,
+                end,
+                "Junk between end of child list and closing }" if stack else "Expected a node",
             )
+        if li == 2:
+            return (mh.end(), 1, mh.group(2), None, None, None, None, curDiscard, curNodes, curDiscard)
+        if li == 5:
+            tagStart = mh.start(5)
+            newTag, tagEnd = _parseTag(s, tagStart)
+            if tagEnd < 0:
+                raise ParseError(
+                    s,
+                    tagStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            nameOrNone, nameEnd = _parseIdent(s, tagEnd)
+            if nameOrNone is None:
+                raise ParseError(
+                    s,
+                    tagStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            return (nameEnd, 1, nameOrNone, newTag, None, None, None, curDiscard, curNodes, curDiscard)
+        if li == 4:
+            sdStart = mh.start(4)
+            j = _skipNodespace(s, mh.end())
+            newTag = None
+            if j < n and chars[j] == "(":
+                newTag, tagEnd = _parseTag(s, j)
+                if tagEnd >= 0:
+                    j = tagEnd
+            nameOrNone, nameEnd = _parseIdent(s, j)
+            if nameOrNone is None:
+                raise ParseError(
+                    s,
+                    sdStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            return (nameEnd, 1, nameOrNone, newTag, None, None, None, True, curNodes, curDiscard)
+        if li == 6:
+            return (_skipBlockComment(s, mh.start(6)), 0, "", None, None, None, None, False, curNodes, curDiscard)
+        if li == 7:
+            qName, qEnd = _parseEscapedString(s, mh.start(7))
+            return (qEnd, 1, qName, None, None, None, None, curDiscard, curNodes, curDiscard)
+        rawStart = mh.start(8)
+        rName, rEnd = _parseRawString(s, rawStart, mh.end() - rawStart - 2)
+        return (rEnd, 1, rName, None, None, None, None, curDiscard, curNodes, curDiscard)
+
+    if state == 2:
+        if i < n:
+            chEnd = chars[i]
+            if chEnd in wsSet or chEnd == "\\" or (chEnd == "/" and i + 1 < n and chars[i + 1] == "*"):
+                i = _skipNodespace(s, i)
+            i = _skipTerminator(s, i)
+        return (i, 0, "", None, None, None, None, False, curNodes, curDiscard)
+
+    def _finishEntries() -> list[LooseEntry]:
+        if props is not None:
+            if entries is not None:
+                entries.extend(props.items())
+                return entries
+            return list(props.items())
+        return [] if entries is None else entries
+
+    # state == 1
+    ch = chars[i]
+    hadSpace = False
+    if ch in wsSet or ch == "\\" or (ch == "/" and i + 1 < n and chars[i + 1] == "*"):
+        nextI = _skipNodespace(s, i)
+        if nextI > i:
+            i = nextI
+            hadSpace = True
+    if not hadSpace:
+        if ch == "{":
+            finalEnt = [] if nodeDiscard else _finishEntries()
+            stack.append((curNodes, name, tag, finalEnt, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
+            return (i + 1, 0, "", None, None, None, None, False, [], nodeDiscard)
+        if ch == "/" and i + 1 < n and chars[i + 1] == "-":
+            j = _skipNodespace(s, i + 2)
+            if j < n and chars[j] == "{":
+                finalEnt = [] if nodeDiscard else _finishEntries()
+                stack.append((curNodes, name, tag, finalEnt, nodeDiscard, True, curDiscard, i, -1, 0))
+                return (j + 1, 0, "", None, None, None, None, False, [], True)
+            raise ParseError(s, i, "Junk after node, before terminator.")
+        i = _skipTerminator(s, i)
+        if not nodeDiscard:
+            curNodes.append(Node(name, tag, _finishEntries(), []))
+        return (i, 0, "", None, None, None, None, False, curNodes, curDiscard)
+
+    if i >= n:
+        if not nodeDiscard:
+            curNodes.append(Node(name, tag, _finishEntries(), []))
+        return (n, 0, "", None, None, None, None, False, curNodes, curDiscard)
+
+    ch2 = chars[i]
+    if ch2 == "{":
+        finalEnt = [] if nodeDiscard else _finishEntries()
+        stack.append((curNodes, name, tag, finalEnt, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
+        return (i + 1, 0, "", None, None, None, None, False, [], nodeDiscard)
+    if ch2 in ("\n", ";") or ch2 in nlSet or (ch2 == "/" and i + 1 < n and chars[i + 1] == "/"):
+        i = _skipTerminator(s, i)
+        if not nodeDiscard:
+            curNodes.append(Node(name, tag, _finishEntries(), []))
+        return (i, 0, "", None, None, None, None, False, curNodes, curDiscard)
+    if ch2 == "/" and i + 1 < n and chars[i + 1] == "-":
+        sdStart = i
+        j = _skipNodespace(s, i + 2)
+        if j < n and chars[j] == "{":
+            finalEnt = [] if nodeDiscard else _finishEntries()
+            stack.append((curNodes, name, tag, finalEnt, nodeDiscard, True, curDiscard, sdStart, -1, 0))
+            return (j + 1, 0, "", None, None, None, None, False, [], True)
+        entEnd = _parseDiscardedEntity(s, j)
+        if entEnd < 0:
+            raise ParseError(s, sdStart, "Junk after node, before terminator.")
+        return (entEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+
+    def _addProp(pk: str, pv: t.Any) -> None:
+        nonlocal entries, props, propIndices
+        if props is not None:
+            props[pk] = pv
+        elif propIndices is None:
+            props = {pk: pv}
+        else:
+            assert entries is not None
+            nEnt = len(entries)
+            idx = propIndices.setdefault(pk, nEnt)
+            if idx == nEnt:
+                entries.append((pk, pv))
+            else:
+                entries[idx] = (pk, pv)
+
+    def _addArg(av: t.Any) -> None:
+        nonlocal entries, props, propIndices
+        if props is not None:
+            if entries is None:
+                entries = list(props.items())
+                propIndices = {pk: pi for pi, pk in enumerate(props)}
+            else:
+                base = len(entries)
+                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                entries.extend(props.items())
+            props = None
+            entries.append((None, av))
+        elif entries is None:
+            entries = [(None, av)]
+        else:
+            entries.append((None, av))
+
+    m = _matchEntry(chars, i)
+    if m is not None:
+        eli = m.lastindex
+        if eli in (2, 3, 4):
+            endPos = m.end()
+            if not nodeDiscard:
+                key = m.group(1)
+                if eli == 3:
+                    rawNum = m.group(3)
+                    pval: t.Any = _floatFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum)
+                elif eli == 2:
+                    sVal = m.group(2)
+                    pval = sVal if nativeUntagged else String(sVal)
+                else:
+                    kwStr = m.group(4)
+                    pval = (
+                        _KW_NATIVE[kwStr]
+                        if nativeUntagged
+                        else (Bool(True) if kwStr == "true" else (Bool(False) if kwStr == "false" else Null()))
+                    )
+                _addProp(key, pval)
+            return (endPos, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        if eli == 5:
+            key = m.group(1)
+            valStart = m.end()
+            val, valEnd = (
+                _parseValueFast(s, valStart, nodeDiscard, nativeTagged)
+                if nativeUntagged
+                else _parseValue(s, valStart, False, nodeDiscard)
+            )
+            if valEnd < 0:
+                raise ParseError(s, valStart, "Expected value after prop=.")
+            if not nodeDiscard:
+                _addProp(key, val)
+            return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        if eli == 6:
+            if not nodeDiscard:
+                sVal = m.group(6)
+                _addArg(sVal if nativeUntagged else String(sVal))
+            return (m.end(), 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        if eli == 7:
+            if not nodeDiscard:
+                rawNum = m.group(7)
+                _addArg(_floatFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum))
+            return (m.end(), 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        tok1 = m.group(1)
+        kwVal = _KW_NATIVE.get(tok1, _UNSET)
+        if kwVal is not _UNSET:
+            if not nodeDiscard:
+                val = (
+                    kwVal
+                    if nativeUntagged
+                    else (Bool(True) if tok1 == "true" else (Bool(False) if tok1 == "false" else Null()))
+                )
+                _addArg(val)
+            return (m.end(), 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        if tok1.lower() in keywords:
+            raise ParseError(s, i, "KDL keywords are lower-case.")
+        raise ParseError(s, i, "Junk after node, before terminator.")
+
+    if ch2 == '"':
+        strVal, strEnd = _parseEscapedString(s, i)
+        if strEnd < n and chars[strEnd] == "=":
+            val, valEnd = (
+                _parseValueFast(s, strEnd + 1, nodeDiscard, nativeTagged)
+                if nativeUntagged
+                else _parseValue(s, strEnd + 1, False, nodeDiscard)
+            )
+            if valEnd < 0:
+                raise ParseError(s, strEnd + 1, "Expected value after prop=.")
+            if not nodeDiscard:
+                _addProp(strVal, val)
+            return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+        if not nodeDiscard:
+            _addArg(strVal if nativeUntagged else String(strVal))
+        return (strEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+
+    if ch2 == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
+        j = i + 1
+        while j < n and chars[j] == "#":
+            j += 1
+        if j < n and chars[j] == '"':
+            rawVal, strEnd = _parseRawString(s, i, j - i - 1)
+            if strEnd < n and chars[strEnd] == "=":
+                val, valEnd = (
+                    _parseValueFast(s, strEnd + 1, nodeDiscard, nativeTagged)
+                    if nativeUntagged
+                    else _parseValue(s, strEnd + 1, False, nodeDiscard)
+                )
+                if valEnd < 0:
+                    raise ParseError(s, strEnd + 1, "Expected value after prop=.")
+                if not nodeDiscard:
+                    _addProp(rawVal, val)
+                return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+            if not nodeDiscard:
+                _addArg(rawVal if nativeUntagged else RawString(rawVal))
+            return (strEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+
+    val, valEnd = (
+        _parseValueFast(s, i, nodeDiscard, nativeTagged) if nativeUntagged else _parseValue(s, i, False, nodeDiscard)
+    )
+    if valEnd < 0:
+        raise ParseError(s, i, "Junk after node, before terminator.")
+    if not nodeDiscard:
+        _addArg(val)
+    return (valEnd, 1, name, tag, entries, props, propIndices, nodeDiscard, curNodes, curDiscard)
+
+
+def _parseChunkedNative(s: Stream) -> Document:
+    """Specialized chunked C-regex parser for nativeUntaggedValues=True with no custom converters."""
+    chars = s.chars
+    n = s.length
+    nativeTagged = s.config.nativeTaggedValues
+    findall = _tokFindall
+    lengthHint = _lengthHint
+    kwMap = _KW_NATIVE
+    kwGet = kwMap.get
+    keywords = _KEYWORDS
+    digits = _DIGITS
+    unset = _UNSET
+    nodeCls = Node
+    strCls = String
+    floatFn = float
+    intFn = int
+    listFn = list
+    unescFn = _unescapeValidated
+
+    curNodes: list[Node] = []
+    curDiscard = False
+    stack: list[_FastFrame] = []
+    stackPush = stack.append
+    stackPop = stack.pop
+
+    state = 0
+    name = ""
+    tag: str | None = None
+    entries: list[LooseEntry] | None = None
+    props: dict[str, t.Any] | None = None
+    propIndices: dict[str, int] | None = None
+    nodeDiscard = False
+    nextEntDiscard = False
+    sdTokIdx = 0
+
+    pos = 0
+    if n > 0:
+        mh0 = _matchNodeHead(chars, 0)
+        assert mh0 is not None
+        li0 = mh0.lastindex
+        if li0 == 1:
+            cand0 = mh0.group(1)
+            if cand0 not in keywords:
+                name = cand0
+                pos = mh0.end()
+                state = 1
+        elif li0 is None and mh0.end() >= n:
+            return Document(curNodes)
+
+    chunkSize = 512
+    while pos < n:
+        endPos = _pickChunkEnd(chars, pos, n, chunkSize)
+        if endPos < 0:
+            # Giant single token (> 512 bytes with no space/newline): handle 1 exact step directly.
+            (
+                newPos,
+                state,
+                name,
+                tag,
+                entries,
+                props,
+                propIndices,
+                nodeDiscard,
+                curNodes,
+                curDiscard,
+            ) = _handleChunkFallback(
+                s,
+                pos,
+                nativeUntagged=True,
+                nativeTagged=nativeTagged,
+                state=state,
+                name=name,
+                tag=tag,
+                entries=entries,
+                props=props,
+                propIndices=propIndices,
+                nodeDiscard=nodeDiscard,
+                curNodes=curNodes,
+                curDiscard=curDiscard,
+                stack=stack,
+            )
+            if newPos < 0:
+                return Document(curNodes)
+            pos = newPos
+            continue
+
+        toks = findall(chars, pos, endPos)
+        nToks = len(toks)
+        tokIter = iter(toks)
+        failIdx = -1
+        failOffset = -1
+
+        for k, pv, arg, nh, fb in tokIter:
+            if k:
+                if state != 1 or k in keywords:
+                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                    nextEntDiscard = False
+                    break
+                if nodeDiscard or nextEntDiscard:
+                    nextEntDiscard = False
+                    if pv[0] == '"' and "\\" in pv:
+                        try:
+                            unescFn(pv[1:-1])
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    continue
+                vc = pv[0]
+                if "1" <= vc <= "9":
+                    try:
+                        pval: t.Any = floatFn(pv)
+                    except ValueError:
+                        pval = floatFn(pv.replace("_", ""))
+                elif vc == '"':
+                    inner = pv[1:-1]
+                    if "\\" in inner:
+                        try:
+                            inner = unescFn(inner)
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    pval = inner
+                elif vc in ("t", "f", "n"):
+                    pval = kwMap[pv]
+                elif len(pv) >= 2 and (
+                    pv[1] in ("x", "o", "b") or (vc in ("+", "-") and len(pv) >= 3 and pv[2] in ("x", "o", "b"))
+                ):
+                    try:
+                        pval = intFn(pv, 0)
+                    except ValueError:
+                        pval = intFn(pv.replace("_", ""), 0)
+                else:
+                    try:
+                        fval = floatFn(pv)
+                    except ValueError:
+                        fval = floatFn(pv.replace("_", ""))
+                    if fval == 0.0 and vc == "-" and "." not in pv:
+                        fval = _floatFromDecStr(pv)
+                    pval = fval
+                if props is not None:
+                    props[k] = pval
+                elif propIndices is None:
+                    props = {k: pval}
+                else:
+                    assert entries is not None
+                    nEnt = len(entries)
+                    idx = propIndices.setdefault(k, nEnt)
+                    if idx == nEnt:
+                        entries.append((k, pval))
+                    else:
+                        entries[idx] = (k, pval)
+                continue
+
+            if nh:
+                if nextEntDiscard:
+                    failIdx = sdTokIdx
+                    nextEntDiscard = False
+                    break
+                if nh == "}":
+                    if not stack:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    if state == 1 and not nodeDiscard:
+                        if props is not None:
+                            if entries is not None:
+                                entries.extend(props.items())
+                                curNodes.append(nodeCls(name, tag, entries, []))
+                            else:
+                                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                        else:
+                            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                    parentNodes, pName, pTag, pEntries, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
+                        stackPop()
+                    )
+                    if not pNodeDiscard:
+                        parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                    curNodes = parentNodes
+                    curDiscard = pParentDiscard
+                    state = 2
+                    continue
+                hc0 = nh[0]
+                if hc0 not in ("/", "("):
+                    if nh in keywords:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    nTag: str | None = None
+                    nName = nh
+                    nDisc = curDiscard
+                elif hc0 == "/":
+                    nName = nh[3:]
+                    if nName in keywords:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    nTag = None
+                    nDisc = True
+                else:
+                    rp = nh.find(")", 1)
+                    nTag = nh[1:rp]
+                    nName = nh[rp + 1 :]
+                    if nTag in keywords or nName in keywords:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    nDisc = curDiscard
+                if state == 1 and not nodeDiscard:
+                    if props is not None:
+                        if entries is not None:
+                            entries.extend(props.items())
+                            curNodes.append(nodeCls(name, tag, entries, []))
+                        else:
+                            curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                    else:
+                        curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                name = nName
+                tag = nTag
+                entries = None
+                props = None
+                propIndices = None
+                nodeDiscard = nDisc
+                state = 1
+                continue
+
+            if arg:
+                ac0 = arg[0]
+                if state != 1:
+                    if state == 0:
+                        if ac0 == "}":
+                            if not stack:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                            (
+                                parentNodes,
+                                pName,
+                                pTag,
+                                pEntries,
+                                pNodeDiscard,
+                                pChildDiscard,
+                                pParentDiscard,
+                                _,
+                                _,
+                                _,
+                            ) = stackPop()
+                            if not pNodeDiscard:
+                                parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                            curNodes = parentNodes
+                            curDiscard = pParentDiscard
+                            state = 2
+                            continue
+                        if (
+                            ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                            and ac0 not in digits
+                            and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                            and arg not in keywords
+                        ):
+                            name = arg
+                            tag = None
+                            entries = None
+                            props = None
+                            propIndices = None
+                            nodeDiscard = curDiscard
+                            state = 1
+                            continue
+                    failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
+
+                if ac0 == "{":
+                    if nodeDiscard:
+                        finalEnt: list[LooseEntry] = []
+                    elif props is not None:
+                        if entries is not None:
+                            entries.extend(props.items())
+                            finalEnt = entries
+                        else:
+                            finalEnt = listFn(props.items())
+                    else:
+                        finalEnt = [] if entries is None else entries
+                    childDisc = nodeDiscard or nextEntDiscard
+                    nextEntDiscard = False
+                    stackPush(
+                        (
+                            curNodes,
+                            name,
+                            tag,
+                            finalEnt,
+                            nodeDiscard,
+                            childDisc,
+                            curDiscard,
+                            pos,
+                            endPos,
+                            nToks - 1 - lengthHint(tokIter),
+                        ),
+                    )
+                    curNodes = []
+                    curDiscard = childDisc
+                    state = 0
+                    continue
+                if ac0 == "/":
+                    if arg[1] == "-":
+                        if nextEntDiscard:
+                            failIdx = sdTokIdx
+                            nextEntDiscard = False
+                            break
+                        nextEntDiscard = True
+                        sdTokIdx = nToks - 1 - lengthHint(tokIter)
+                        continue
+                    if "/*" in arg[2:-2]:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    continue
+                if ac0 == "\\":
+                    continue
+                if ac0 == "}":
+                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                    nextEntDiscard = False
+                    break
+
+                entDiscard = nodeDiscard or nextEntDiscard
+                if ac0 == '"':
+                    nextEntDiscard = False
+                    inner = arg[1:-1]
+                    if "\\" in inner:
+                        try:
+                            inner = unescFn(inner)
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    if not entDiscard:
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, inner))
+                        elif entries is None:
+                            entries = [(None, inner)]
+                        else:
+                            entries.append((None, inner))
+                    continue
+                if ac0 == "(":
+                    rp = arg.find(")", 1)
+                    tName = arg[1:rp]
+                    if tName in keywords:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    vStr = arg[rp + 1 :]
+                    if vStr[0] == '"':
+                        inner = vStr[1:-1]
+                        if "\\" in inner:
+                            try:
+                                inner = unescFn(inner)
+                            except ValueError:
+                                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                                nextEntDiscard = False
+                                break
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            if nativeTagged:
+                                conv = _convertTaggedStringFast(tName, inner)
+                                if conv is unset:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                val: t.Any = conv
+                            else:
+                                val = strCls(inner, tName)
+                            if props is not None:
+                                if entries is None:
+                                    entries = listFn(props.items())
+                                    propIndices = {pk: pi for pi, pk in enumerate(props)}
+                                else:
+                                    base = len(entries)
+                                    propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                    entries.extend(props.items())
+                                props = None
+                                entries.append((None, val))
+                            elif entries is None:
+                                entries = [(None, val)]
+                            else:
+                                entries.append((None, val))
+                        continue
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        if nativeTagged:
+                            conv = _convertTaggedDecFast(tName, vStr)
+                            if conv is unset:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                            val = conv
+                        else:
+                            dObj = _decimalFromStr(vStr)
+                            dObj.tag = tName
+                            val = dObj
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        q = arg.find('"', 1)
+                        h = q - 1
+                        rText = arg[q + 1 : len(arg) - 1 - h]
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, rText))
+                        elif entries is None:
+                            entries = [(None, rText)]
+                        else:
+                            entries.append((None, rText))
+                    continue
+                if "1" <= ac0 <= "9":
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        try:
+                            val = floatFn(arg)
+                        except ValueError:
+                            val = floatFn(arg.replace("_", ""))
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and arg[1] in digits):
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        if len(arg) >= 2 and (
+                            arg[1] in ("x", "o", "b")
+                            or (ac0 in ("+", "-") and len(arg) >= 3 and arg[2] in ("x", "o", "b"))
+                        ):
+                            try:
+                                val = intFn(arg, 0)
+                            except ValueError:
+                                val = intFn(arg.replace("_", ""), 0)
+                        else:
+                            try:
+                                fval = floatFn(arg)
+                            except ValueError:
+                                fval = floatFn(arg.replace("_", ""))
+                            if fval == 0.0 and ac0 == "-" and "." not in arg:
+                                fval = _floatFromDecStr(arg)
+                            val = fval
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                kwVal = kwGet(arg, unset)
+                if kwVal is not unset:
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, kwVal))
+                        elif entries is None:
+                            entries = [(None, kwVal)]
+                        else:
+                            entries.append((None, kwVal))
+                    continue
+                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                nextEntDiscard = False
+                break
+
+            if fb:
+                if fb == ";":
+                    if nextEntDiscard:
+                        failIdx = sdTokIdx
+                        nextEntDiscard = False
+                        break
+                    if state == 1:
+                        if not nodeDiscard:
+                            if props is not None:
+                                if entries is not None:
+                                    entries.extend(props.items())
+                                    curNodes.append(nodeCls(name, tag, entries, []))
+                                else:
+                                    curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                            else:
+                                curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                        state = 0
+                        continue
+                    if state == 2:
+                        state = 0
+                        continue
+                elif fb == "{" and state == 1:
+                    if nodeDiscard:
+                        finalEnt = []
+                    elif props is not None:
+                        if entries is not None:
+                            entries.extend(props.items())
+                            finalEnt = entries
+                        else:
+                            finalEnt = listFn(props.items())
+                    else:
+                        finalEnt = [] if entries is None else entries
+                    childDisc = nodeDiscard or nextEntDiscard
+                    nextEntDiscard = False
+                    stackPush(
+                        (
+                            curNodes,
+                            name,
+                            tag,
+                            finalEnt,
+                            nodeDiscard,
+                            childDisc,
+                            curDiscard,
+                            pos,
+                            endPos,
+                            nToks - 1 - lengthHint(tokIter),
+                        ),
+                    )
+                    curNodes = []
+                    curDiscard = childDisc
+                    state = 0
+                    continue
+                if nextEntDiscard:
+                    failIdx = sdTokIdx
+                    nextEntDiscard = False
+                elif lengthHint(tokIter) == 0:
+                    failOffset = endPos - len(fb)
+                else:
+                    failIdx = nToks - 1 - lengthHint(tokIter)
+                break
+
+            # Empty newline (all 5 groups == "")
+            if nextEntDiscard:
+                failIdx = sdTokIdx
+                nextEntDiscard = False
+                break
+            if state == 1 and not nodeDiscard:
+                if props is not None:
+                    if entries is not None:
+                        entries.extend(props.items())
+                        curNodes.append(nodeCls(name, tag, entries, []))
+                    else:
+                        curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                else:
+                    curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+            state = 0
+
+        if failIdx < 0 and failOffset < 0:
+            if nextEntDiscard:
+                failIdx = sdTokIdx
+                nextEntDiscard = False
+            else:
+                pos = endPos
+                chunkSize = min(chunkSize * 4, 32768)
+                continue
+
+        i = failOffset if failOffset >= 0 else _tokenOffset(chars, pos, endPos, failIdx)
+        chunkSize = max(256, chunkSize // 4)
+        (
+            newPos,
+            state,
+            name,
+            tag,
+            entries,
+            props,
+            propIndices,
+            nodeDiscard,
+            curNodes,
+            curDiscard,
+        ) = _handleChunkFallback(
+            s,
+            i,
+            nativeUntagged=True,
+            nativeTagged=nativeTagged,
+            state=state,
+            name=name,
+            tag=tag,
+            entries=entries,
+            props=props,
+            propIndices=propIndices,
+            nodeDiscard=nodeDiscard,
+            curNodes=curNodes,
+            curDiscard=curDiscard,
+            stack=stack,
+        )
+        if newPos < 0:
+            return Document(curNodes)
+        pos = newPos
+
+    if state == 1 and not nodeDiscard:
+        if props is not None:
+            if entries is not None:
+                entries.extend(props.items())
+                curNodes.append(nodeCls(name, tag, entries, []))
+            else:
+                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+        else:
+            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+    if stack:
+        raise ParseError(s, _unclosedBlockPos(chars, stack[-1]), "Hit EOF while searching for end of child list")
+    return Document(curNodes)
+
+
+def _parseChunkedRaw(s: Stream) -> Document:
+    """Specialized chunked C-regex parser for nativeUntaggedValues=False with no custom converters."""
+    chars = s.chars
+    n = s.length
+    nativeTagged = s.config.nativeTaggedValues
+    findall = _tokFindall
+    lengthHint = _lengthHint
+    keywords = _KEYWORDS
+    digits = _DIGITS
+    unset = _UNSET
+    nodeCls = Node
+    strCls = String
+    rawStrCls = RawString
+    boolCls = Bool
+    nullCls = Null
+    hexCls = Hex
+    octCls = Octal
+    binCls = Binary
+    intFn = int
+    listFn = list
+    unescFn = _unescapeValidated
+
+    curNodes: list[Node] = []
+    curDiscard = False
+    stack: list[_FastFrame] = []
+    stackPush = stack.append
+    stackPop = stack.pop
+
+    state = 0
+    name = ""
+    tag: str | None = None
+    entries: list[LooseEntry] | None = None
+    props: dict[str, t.Any] | None = None
+    propIndices: dict[str, int] | None = None
+    nodeDiscard = False
+    nextEntDiscard = False
+    sdTokIdx = 0
+
+    pos = 0
+    if n > 0:
+        mh0 = _matchNodeHead(chars, 0)
+        assert mh0 is not None
+        li0 = mh0.lastindex
+        if li0 == 1:
+            cand0 = mh0.group(1)
+            if cand0 not in keywords:
+                name = cand0
+                pos = mh0.end()
+                state = 1
+        elif li0 is None and mh0.end() >= n:
+            return Document(curNodes)
+
+    chunkSize = 512
+    while pos < n:
+        endPos = _pickChunkEnd(chars, pos, n, chunkSize)
+        if endPos < 0:
+            (
+                newPos,
+                state,
+                name,
+                tag,
+                entries,
+                props,
+                propIndices,
+                nodeDiscard,
+                curNodes,
+                curDiscard,
+            ) = _handleChunkFallback(
+                s,
+                pos,
+                nativeUntagged=False,
+                nativeTagged=nativeTagged,
+                state=state,
+                name=name,
+                tag=tag,
+                entries=entries,
+                props=props,
+                propIndices=propIndices,
+                nodeDiscard=nodeDiscard,
+                curNodes=curNodes,
+                curDiscard=curDiscard,
+                stack=stack,
+            )
+            if newPos < 0:
+                return Document(curNodes)
+            pos = newPos
+            continue
+
+        toks = findall(chars, pos, endPos)
+        nToks = len(toks)
+        tokIter = iter(toks)
+        failIdx = -1
+        failOffset = -1
+
+        for k, pv, arg, nh, fb in tokIter:
+            if k:
+                if state != 1 or k in keywords:
+                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                    nextEntDiscard = False
+                    break
+                if nodeDiscard or nextEntDiscard:
+                    nextEntDiscard = False
+                    if pv[0] == '"' and "\\" in pv:
+                        try:
+                            unescFn(pv[1:-1])
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    continue
+                vc = pv[0]
+                if "1" <= vc <= "9":
+                    pval: t.Any = _decimalFromStr(pv)
+                elif vc == '"':
+                    inner = pv[1:-1]
+                    if "\\" in inner:
+                        try:
+                            inner = unescFn(inner)
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    pval = strCls(inner)
+                elif vc in ("t", "f", "n"):
+                    pval = boolCls(True) if pv == "true" else (boolCls(False) if pv == "false" else nullCls())
+                elif len(pv) >= 2 and (
+                    pv[1] in ("x", "o", "b") or (vc in ("+", "-") and len(pv) >= 3 and pv[2] in ("x", "o", "b"))
+                ):
+                    iv = intFn(pv.replace("_", "") if "_" in pv else pv, 0)
+                    rc = pv[2] if vc in ("+", "-") else pv[1]
+                    pval = hexCls(iv) if rc == "x" else (octCls(iv) if rc == "o" else binCls(iv))
+                else:
+                    pval = _decimalFromStr(pv)
+                if props is not None:
+                    props[k] = pval
+                elif propIndices is None:
+                    props = {k: pval}
+                else:
+                    assert entries is not None
+                    nEnt = len(entries)
+                    idx = propIndices.setdefault(k, nEnt)
+                    if idx == nEnt:
+                        entries.append((k, pval))
+                    else:
+                        entries[idx] = (k, pval)
+                continue
+
+            if nh:
+                if nextEntDiscard:
+                    failIdx = sdTokIdx
+                    nextEntDiscard = False
+                    break
+                if nh == "}":
+                    if not stack:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    if state == 1 and not nodeDiscard:
+                        if props is not None:
+                            if entries is not None:
+                                entries.extend(props.items())
+                                curNodes.append(nodeCls(name, tag, entries, []))
+                            else:
+                                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                        else:
+                            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                    parentNodes, pName, pTag, pEntries, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
+                        stackPop()
+                    )
+                    if not pNodeDiscard:
+                        parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                    curNodes = parentNodes
+                    curDiscard = pParentDiscard
+                    state = 2
+                    continue
+                hc0 = nh[0]
+                if hc0 not in ("/", "("):
+                    if nh in keywords:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    nTag: str | None = None
+                    nName = nh
+                    nDisc = curDiscard
+                elif hc0 == "/":
+                    nName = nh[3:]
+                    if nName in keywords:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    nTag = None
+                    nDisc = True
+                else:
+                    rp = nh.find(")", 1)
+                    nTag = nh[1:rp]
+                    nName = nh[rp + 1 :]
+                    if nTag in keywords or nName in keywords:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    nDisc = curDiscard
+                if state == 1 and not nodeDiscard:
+                    if props is not None:
+                        if entries is not None:
+                            entries.extend(props.items())
+                            curNodes.append(nodeCls(name, tag, entries, []))
+                        else:
+                            curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                    else:
+                        curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                name = nName
+                tag = nTag
+                entries = None
+                props = None
+                propIndices = None
+                nodeDiscard = nDisc
+                state = 1
+                continue
+
+            if arg:
+                ac0 = arg[0]
+                if state != 1:
+                    if state == 0:
+                        if ac0 == "}":
+                            if not stack:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                            (
+                                parentNodes,
+                                pName,
+                                pTag,
+                                pEntries,
+                                pNodeDiscard,
+                                pChildDiscard,
+                                pParentDiscard,
+                                _,
+                                _,
+                                _,
+                            ) = stackPop()
+                            if not pNodeDiscard:
+                                parentNodes.append(nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes))
+                            curNodes = parentNodes
+                            curDiscard = pParentDiscard
+                            state = 2
+                            continue
+                        if (
+                            ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                            and ac0 not in digits
+                            and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                            and arg not in keywords
+                        ):
+                            name = arg
+                            tag = None
+                            entries = None
+                            props = None
+                            propIndices = None
+                            nodeDiscard = curDiscard
+                            state = 1
+                            continue
+                    failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
+
+                if ac0 == "{":
+                    if nodeDiscard:
+                        finalEnt: list[LooseEntry] = []
+                    elif props is not None:
+                        if entries is not None:
+                            entries.extend(props.items())
+                            finalEnt = entries
+                        else:
+                            finalEnt = listFn(props.items())
+                    else:
+                        finalEnt = [] if entries is None else entries
+                    childDisc = nodeDiscard or nextEntDiscard
+                    nextEntDiscard = False
+                    stackPush(
+                        (
+                            curNodes,
+                            name,
+                            tag,
+                            finalEnt,
+                            nodeDiscard,
+                            childDisc,
+                            curDiscard,
+                            pos,
+                            endPos,
+                            nToks - 1 - lengthHint(tokIter),
+                        ),
+                    )
+                    curNodes = []
+                    curDiscard = childDisc
+                    state = 0
+                    continue
+                if ac0 == "/":
+                    if arg[1] == "-":
+                        if nextEntDiscard:
+                            failIdx = sdTokIdx
+                            nextEntDiscard = False
+                            break
+                        nextEntDiscard = True
+                        sdTokIdx = nToks - 1 - lengthHint(tokIter)
+                        continue
+                    if "/*" in arg[2:-2]:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    continue
+                if ac0 == "\\":
+                    continue
+                if ac0 == "}":
+                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                    nextEntDiscard = False
+                    break
+
+                entDiscard = nodeDiscard or nextEntDiscard
+                if ac0 == '"':
+                    nextEntDiscard = False
+                    inner = arg[1:-1]
+                    if "\\" in inner:
+                        try:
+                            inner = unescFn(inner)
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    if not entDiscard:
+                        sv = strCls(inner)
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, sv))
+                        elif entries is None:
+                            entries = [(None, sv)]
+                        else:
+                            entries.append((None, sv))
+                    continue
+                if ac0 == "(":
+                    rp = arg.find(")", 1)
+                    tName = arg[1:rp]
+                    if tName in keywords:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    vStr = arg[rp + 1 :]
+                    if vStr[0] == '"':
+                        inner = vStr[1:-1]
+                        if "\\" in inner:
+                            try:
+                                inner = unescFn(inner)
+                            except ValueError:
+                                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                                nextEntDiscard = False
+                                break
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            if nativeTagged:
+                                conv = _convertTaggedStringFast(tName, inner)
+                                if conv is unset:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                val: t.Any = conv
+                            else:
+                                val = strCls(inner, tName)
+                            if props is not None:
+                                if entries is None:
+                                    entries = listFn(props.items())
+                                    propIndices = {pk: pi for pi, pk in enumerate(props)}
+                                else:
+                                    base = len(entries)
+                                    propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                    entries.extend(props.items())
+                                props = None
+                                entries.append((None, val))
+                            elif entries is None:
+                                entries = [(None, val)]
+                            else:
+                                entries.append((None, val))
+                        continue
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        if nativeTagged:
+                            conv = _convertTaggedDecFast(tName, vStr)
+                            if conv is unset:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                            val = conv
+                        else:
+                            dObj = _decimalFromStr(vStr)
+                            dObj.tag = tName
+                            val = dObj
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        q = arg.find('"', 1)
+                        h = q - 1
+                        rv = rawStrCls(arg[q + 1 : len(arg) - 1 - h])
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, rv))
+                        elif entries is None:
+                            entries = [(None, rv)]
+                        else:
+                            entries.append((None, rv))
+                    continue
+                if "1" <= ac0 <= "9":
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        val = _decimalFromStr(arg)
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and arg[1] in digits):
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        if len(arg) >= 2 and (
+                            arg[1] in ("x", "o", "b")
+                            or (ac0 in ("+", "-") and len(arg) >= 3 and arg[2] in ("x", "o", "b"))
+                        ):
+                            iv = intFn(arg.replace("_", "") if "_" in arg else arg, 0)
+                            rc = arg[2] if ac0 in ("+", "-") else arg[1]
+                            val = hexCls(iv) if rc == "x" else (octCls(iv) if rc == "o" else binCls(iv))
+                        else:
+                            val = _decimalFromStr(arg)
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                if arg in keywords:
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        val = boolCls(True) if arg == "true" else (boolCls(False) if arg == "false" else nullCls())
+                        if props is not None:
+                            if entries is None:
+                                entries = listFn(props.items())
+                                propIndices = {pk: pi for pi, pk in enumerate(props)}
+                            else:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                            props = None
+                            entries.append((None, val))
+                        elif entries is None:
+                            entries = [(None, val)]
+                        else:
+                            entries.append((None, val))
+                    continue
+                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                nextEntDiscard = False
+                break
+
+            if fb:
+                if fb == ";":
+                    if nextEntDiscard:
+                        failIdx = sdTokIdx
+                        nextEntDiscard = False
+                        break
+                    if state == 1:
+                        if not nodeDiscard:
+                            if props is not None:
+                                if entries is not None:
+                                    entries.extend(props.items())
+                                    curNodes.append(nodeCls(name, tag, entries, []))
+                                else:
+                                    curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                            else:
+                                curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+                        state = 0
+                        continue
+                    if state == 2:
+                        state = 0
+                        continue
+                elif fb == "{" and state == 1:
+                    if nodeDiscard:
+                        finalEnt = []
+                    elif props is not None:
+                        if entries is not None:
+                            entries.extend(props.items())
+                            finalEnt = entries
+                        else:
+                            finalEnt = listFn(props.items())
+                    else:
+                        finalEnt = [] if entries is None else entries
+                    childDisc = nodeDiscard or nextEntDiscard
+                    nextEntDiscard = False
+                    stackPush(
+                        (
+                            curNodes,
+                            name,
+                            tag,
+                            finalEnt,
+                            nodeDiscard,
+                            childDisc,
+                            curDiscard,
+                            pos,
+                            endPos,
+                            nToks - 1 - lengthHint(tokIter),
+                        ),
+                    )
+                    curNodes = []
+                    curDiscard = childDisc
+                    state = 0
+                    continue
+                if nextEntDiscard:
+                    failIdx = sdTokIdx
+                    nextEntDiscard = False
+                elif lengthHint(tokIter) == 0:
+                    failOffset = endPos - len(fb)
+                else:
+                    failIdx = nToks - 1 - lengthHint(tokIter)
+                break
+
+            if nextEntDiscard:
+                failIdx = sdTokIdx
+                nextEntDiscard = False
+                break
+            if state == 1 and not nodeDiscard:
+                if props is not None:
+                    if entries is not None:
+                        entries.extend(props.items())
+                        curNodes.append(nodeCls(name, tag, entries, []))
+                    else:
+                        curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+                else:
+                    curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+            state = 0
+
+        if failIdx < 0 and failOffset < 0:
+            if nextEntDiscard:
+                failIdx = sdTokIdx
+                nextEntDiscard = False
+            else:
+                pos = endPos
+                chunkSize = min(chunkSize * 4, 32768)
+                continue
+
+        i = failOffset if failOffset >= 0 else _tokenOffset(chars, pos, endPos, failIdx)
+        chunkSize = max(256, chunkSize // 4)
+        (
+            newPos,
+            state,
+            name,
+            tag,
+            entries,
+            props,
+            propIndices,
+            nodeDiscard,
+            curNodes,
+            curDiscard,
+        ) = _handleChunkFallback(
+            s,
+            i,
+            nativeUntagged=False,
+            nativeTagged=nativeTagged,
+            state=state,
+            name=name,
+            tag=tag,
+            entries=entries,
+            props=props,
+            propIndices=propIndices,
+            nodeDiscard=nodeDiscard,
+            curNodes=curNodes,
+            curDiscard=curDiscard,
+            stack=stack,
+        )
+        if newPos < 0:
+            return Document(curNodes)
+        pos = newPos
+
+    if state == 1 and not nodeDiscard:
+        if props is not None:
+            if entries is not None:
+                entries.extend(props.items())
+                curNodes.append(nodeCls(name, tag, entries, []))
+            else:
+                curNodes.append(nodeCls(name, tag, listFn(props.items()), []))
+        else:
+            curNodes.append(nodeCls(name, tag, [] if entries is None else entries, []))
+    if stack:
+        raise ParseError(s, _unclosedBlockPos(chars, stack[-1]), "Hit EOF while searching for end of child list")
+    return Document(curNodes)
+
+
+def _applyNodeConverters(s: Stream, node: Node, nodeStart: int, nameEnd: int) -> Node:
+    pf: ParseFragment | None = None
+    for convKey, converter in s.config.nodeConverters.items():
+        if node.matchesKey(convKey):
+            if pf is None:
+                pf = ParseFragment(s.chars[nodeStart:nameEnd], s, nodeStart)
+            converted = converter(node, pf)
             if converted == NotImplemented:
                 continue
             node = converted
             break
-    return Result(node, i)
+    return node
 
 
-def parseNodeChildren(s: Stream, start: int, discard: bool = False) -> Result:
-    sd, i = parseSlashDash(s, start)
-    if sd is Failure:
-        sd = False
-    childDiscard = discard or bool(sd)
+def _parseDirect(s: Stream) -> Document:
+    """Monolithic iterative parser for tiny inputs (<= 128 chars) and configs with custom converters."""
+    chars = s.chars
+    n = s.length
+    config = s.config
+    fastUntagged = s.fastUntagged
+    hasNodeConverters = bool(config.nodeConverters)
+    hasValConverters = bool(config.valueConverters)
+    matchHead = _matchNodeHead
+    matchEntry = _matchEntry
+    kwMap = _KW_NATIVE
+    keywords = _KEYWORDS
+    wsSet = _WS_SET
+    nlSet = _NL_SET
+    digits = _DIGITS
+    nodeCls = Node
+    strCls = String
+    boolCls = Bool
+    nullCls = Null
 
-    if s[i] != "{":
-        return Result.fail(start)
-    i += 1
-    nodes: list[types.Node] = []
+    curNodes: list[Node] = []
+    curDiscard = False
+    stack: list[_GenFrame] = []
+    i = 0
+
     while True:
-        _, i = parseLinespace(s, i)
-        node, i = parseNode(s, i, discard=childDiscard)
-        if node is Failure:
-            break
-        if node is not None:
-            nodes.append(node)
-    _, i = parseLinespace(s, i)
-    if s.eof(i):
-        raise ParseError(s, start, "Hit EOF while searching for end of child list")
-    if s[i] != "}":
-        raise ParseError(s, i, "Junk between end of child list and closing }")
-    if childDiscard:
-        return Result(None, i + 1)
-    return Result(nodes, i + 1)
-
-
-def parseTag(s: Stream, start: int) -> Result:
-    if s[start] != "(":
-        return Result.fail(start)
-    tag, end = parseIdent(s, start + 1)
-    if tag is Failure:
-        return Result.fail(start)
-    if s[end] != ")":
-        raise ParseError(s, end, "Junk between tag ident and closing paren.")
-    return Result(tag, end + 1)
-
-
-def parseIdent(s: Stream, start: int) -> Result:
-    string, i = parseString(s, start)
-    if string is not Failure:
-        return Result(string.value, i)
-    return parseBareIdent(s, start)
-
-
-def parseBareIdent(s: Stream, start: int) -> Result:
-    res, i = parseIdentStart(s, start)
-    if res is Failure:
-        return Result.fail(start)
-    while isIdentChar(s[i]):
-        i += 1
-    ident = s[start:i]
-    if isKeyword(ident):
-        return Result.fail(start)
-    return Result(ident, i)
-
-
-def parseIdentStart(s: Stream, start: int) -> Result:
-    if isDigit(s[start]) or (isSign(s[start]) and isDigit(s[start + 1])):
-        return Result.fail(start)
-    if not isIdentChar(s[start]):
-        return Result.fail(start)
-    return Result(s[start], start + 1)
-
-
-def parseNodeTerminator(s: Stream, start: int) -> Result:
-    res = parseNewline(s, start)
-    if res.valid:
-        return res
-    res = parseSingleLineComment(s, start)
-    if res.valid:
-        return res
-    if s[start] == ";":
-        return Result(";", start + 1)
-    if s.eof(start):
-        return Result(True, start)
-    raise ParseError(s, start, "Junk after node, before terminator.")
-
-
-def parseEntity(s: Stream, start: int, discard: bool = False) -> Result:
-    sd, i = parseSlashDash(s, start)
-    if sd is Failure:
-        sd = False
-    entryDiscard = discard or bool(sd)
-
-    ent, i = parseProperty(s, i, discard=entryDiscard)
-    if ent is Failure:
-        ent, i = parseValue(s, i, discard=entryDiscard)
-        if ent is Failure:
-            return Result.fail(start)
-    if entryDiscard:
-        return Result(None, i)
-    return Result(ent, i)
-
-
-def parseProperty(s: Stream, start: int, discard: bool = False) -> Result:
-    key, i = parseIdent(s, start)
-    if key is Failure:
-        return Result.fail(start)
-    if s[i] != "=":
-        # property name might be a string,
-        # so this isn't point-of-no-return yet
-        return Result.fail(start)
-    entity, i = parseValue(s, i + 1, discard=discard)
-    if entity is Failure:
-        raise ParseError(s, i, "Expected value after prop=.")
-    return Result((key, entity[1]), i)
-
-
-def parseValue(s: Stream, start: int, discard: bool = False) -> Result:
-    tag, i = parseTag(s, start)
-    if tag is Failure:
-        tag = None
-
-    valueStart = i
-    val, i = parseNumber(s, i)
-    if val is Failure:
-        val, i = parseKeyword(s, i)
-        if val is Failure:
-            val, i = parseString(s, i)
-    if val is not Failure:
-        if discard:
-            return Result((None, None), i)
-        val.tag = tag
-        for key, converter in s.config.valueConverters.items():
-            if val.matchesKey(key):
-                converted = converter(
-                    val,
-                    ParseFragment(s[valueStart:i], s, i),
+        mh = matchHead(chars, i)
+        assert mh is not None
+        li = mh.lastindex
+        tag: str | None = None
+        nodeDiscard = curDiscard
+        if li == 1:
+            nodeStart = mh.start(1)
+            name = mh.group(1)
+            if name in keywords:
+                raise ParseError(
+                    s,
+                    nodeStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-                if converted == NotImplemented:
-                    continue
-                val = converted
-                break
+            i = mh.end()
+            nameEnd = i
+        elif li == 3:
+            if not stack:
+                raise ParseError(s, mh.start(3), "Expected a node")
+            i = mh.end()
+            (
+                parentNodes,
+                pStart,
+                pNameEnd,
+                pName,
+                pTag,
+                pEntries,
+                pNodeDiscard,
+                pChildDiscard,
+                pParentDiscard,
+                _,
+            ) = stack.pop()
+            if i < n:
+                chEnd = chars[i]
+                if chEnd in ("\n", ";"):
+                    i += 1
+                else:
+                    if chEnd in wsSet or chEnd == "\\" or (chEnd == "/" and i + 1 < n and chars[i + 1] == "*"):
+                        i = _skipNodespace(s, i)
+                    i = _skipTerminator(s, i)
+            if not pNodeDiscard:
+                built = nodeCls(pName, pTag, pEntries, [] if pChildDiscard else curNodes)
+                if hasNodeConverters:
+                    built = _applyNodeConverters(s, built, pStart, pNameEnd)
+                parentNodes.append(built)
+            curNodes = parentNodes
+            curDiscard = pParentDiscard
+            continue
+        elif li is None:
+            i = mh.end()
+            if i >= n:
+                if stack:
+                    raise ParseError(s, stack[-1][9], "Hit EOF while searching for end of child list")
+                return Document(curNodes)
+            raise ParseError(
+                s,
+                i,
+                "Junk between end of child list and closing }" if stack else "Expected a node",
+            )
+        elif li == 2:
+            nodeStart = mh.start(2) - 1
+            name = mh.group(2)
+            i = mh.end()
+            nameEnd = i
+        elif li == 5:
+            nodeStart = mh.start(5)
+            tag, tagEnd = _parseTag(s, nodeStart)
+            if tagEnd < 0:
+                raise ParseError(
+                    s,
+                    nodeStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            nameOrNone, nameEnd = _parseIdent(s, tagEnd)
+            if nameOrNone is None:
+                raise ParseError(
+                    s,
+                    nodeStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            name = nameOrNone
+            i = nameEnd
+        elif li == 4:
+            nodeStart = mh.start(4)
+            j = _skipNodespace(s, mh.end())
+            if j < n and chars[j] == "(":
+                tag, tagEnd = _parseTag(s, j)
+                if tagEnd >= 0:
+                    j = tagEnd
+            nameOrNone, nameEnd = _parseIdent(s, j)
+            if nameOrNone is None:
+                raise ParseError(
+                    s,
+                    nodeStart,
+                    "Junk between end of child list and closing }" if stack else "Expected a node",
+                )
+            name = nameOrNone
+            nodeDiscard = True
+            i = nameEnd
+        elif li == 6:
+            i = _skipBlockComment(s, mh.start(6))
+            continue
+        elif li == 7:
+            nodeStart = mh.start(7)
+            name, i = _parseEscapedString(s, nodeStart)
+            nameEnd = i
         else:
-            if tag is None and s.config.nativeUntaggedValues:
-                val = val.value
-            elif tag is not None and s.config.nativeTaggedValues:
-                val = converters.toNative(val, s, valueStart, i)
-        return Result((None, val), i)
+            nodeStart = mh.start(8)
+            name, i = _parseRawString(s, nodeStart, mh.end() - nodeStart - 2)
+            nameEnd = i
 
-    if s[i] == "'":
-        raise ParseError(s, i, "KDL strings use double-quotes.")
-
-    ident, _ = parseBareIdent(s, i)
-    if ident is not Failure and ident.lower() in ("true", "false", "null"):
-        raise ParseError(s, i, "KDL keywords are lower-case.")
-
-    # Failed to find a value
-    # But if I found a tag, something's up
-    if tag is not None:
-        raise ParseError(s, i, "Found a tag, but no value following it.")
-    return Result.fail(start)
-
-
-def parseNumber(s: Stream, start: int) -> Result:
-    if not isNumberStart(s, start):
-        return Result.fail(start)
-    res = parseBinaryNumber(s, start)
-    if res.valid:
-        return res
-    res = parseOctalNumber(s, start)
-    if res.valid:
-        return res
-    res = parseHexNumber(s, start)
-    if res.valid:
-        return res
-    res = parseDecimalNumber(s, start)
-    if res.valid:
-        return res
-    raise ParseError(
-        s,
-        start,
-        "Expected a number, but got junk after the initial digit.",
-    )
-
-
-def parseBinaryNumber(s: Stream, start: int) -> Result:
-    i = start
-
-    # optional sign
-    sign, i = parseSign(s, i)
-    if sign is Failure:
-        sign = 1
-
-    # prefix
-    if not (s[i] == "0" and s[i + 1] == "b"):
-        return Result.fail(start)
-    i += 2
-
-    # initial digit
-    if not isBinaryDigit(s[i]):
-        raise ParseError(s, i, "Expected binary digit after 0b, got junk.")
-
-    # following digits/underscores
-    end = i + 1
-    while isBinaryDigit(s[end]) or s[end] == "_":
-        end += 1
-    value = int(s[i:end].replace("_", ""), 2) * sign
-    return Result(types.Binary(value), end)
-
-
-def parseOctalNumber(s: Stream, start: int) -> Result:
-    i = start
-
-    # optional sign
-    sign, i = parseSign(s, i)
-    if sign is Failure:
-        sign = 1
-
-    # prefix
-    if not (s[i] == "0" and s[i + 1] == "o"):
-        return Result.fail(start)
-    i += 2
-
-    # initial digit
-    if not isOctalDigit(s[i]):
-        raise ParseError(s, i, "Expected octal digit after 0o, got junk.")
-
-    # following digits/underscores
-    end = i + 1
-    while isOctalDigit(s[end]) or s[end] == "_":
-        end += 1
-    value = int(s[i:end].replace("_", ""), 8) * sign
-    return Result(types.Octal(value), end)
-
-
-def parseHexNumber(s: Stream, start: int) -> Result:
-    i = start
-
-    # optional sign
-    sign, i = parseSign(s, i)
-    if sign is Failure:
-        sign = 1
-
-    # prefix
-    if not (s[i] == "0" and s[i + 1] == "x"):
-        return Result.fail(start)
-    i += 2
-
-    # initial digit
-    if not isHexDigit(s[i]):
-        raise ParseError(s, i, "Expected hex digit after 0x, got junk.")
-
-    # following digits/underscores
-    end = i + 1
-    while isHexDigit(s[end]) or s[end] == "_":
-        end += 1
-    value = int(s[i:end].replace("_", ""), 16) * sign
-    return Result(types.Hex(value), end)
-
-
-def parseDecimalNumber(s: Stream, start: int) -> Result:
-    i = start
-
-    # optional sign
-    _, i = parseSign(s, i)
-
-    # integer part
-    _, i = parseDigits(s, i)
-
-    if s[i] == ".":
-        result, i = parseDigits(s, i + 1)
-        if result is Failure:
-            raise ParseError(s, i, "Expected digit after decimal point.")
-
-    mantissaChars = s[start:i].replace("_", "")
-    mantissa: int | float
-    try:
-        mantissa = int(mantissaChars, 10)
-    except ValueError:
-        try:
-            mantissa = float(mantissaChars)
-        except ValueError as exc:
-            raise ParseError(
-                s,
-                start,
-                "Number-like string didn't actually parse as a number.",
-            ) from exc
-
-    exponent = 0
-    if s[i] in ("e", "E"):
-        exponentStart = i + 1
-        _, i = parseSign(s, i + 1)
-        result, i = parseDigits(s, i)
-        if result is Failure:
-            raise ParseError(s, i, "Expected number after exponent.")
-        exponent = int(s[exponentStart:i].replace("_", ""))
-
-    return Result(types.Decimal(mantissa, exponent), i)
-
-
-def parseDigits(s: Stream, start: int) -> Result:
-    # First digit must be decimal digit
-    # Subsequent can be digit or underscore
-    if not isDigit(s[start]):
-        return Result.fail(start)
-    end = start + 1
-    while isDigit(s[end]) or s[end] == "_":
-        end += 1
-    return Result(True, end)
-
-
-def isNumberStart(s: Stream, start: int) -> bool:
-    # all numbers start with an optional sign
-    # followed by a digit:
-    # either the first digit of the number,
-    # or the 0 of the prefix
-    if isDigit(s[start]):
-        return True
-    if isSign(s[start]) and isDigit(s[start + 1]):
-        return True
-    return False
-
-
-def parseSign(s: Stream, start: int) -> Result:
-    if s[start] == "+":
-        return Result(1, start + 1)
-    if s[start] == "-":
-        return Result(-1, start + 1)
-    return Result.fail(start)
-
-
-def parseKeyword(s: Stream, start: int) -> Result:
-    if s[start : start + 4] == "true" and not isIdentChar(s[start + 4]):
-        return Result(types.Bool(True), start + 4)
-    if s[start : start + 5] == "false" and not isIdentChar(s[start + 5]):
-        return Result(types.Bool(False), start + 5)
-    if s[start : start + 4] == "null" and not isIdentChar(s[start + 4]):
-        return Result(types.Null(), start + 4)
-    return Result.fail(start)
-
-
-def parseString(s: Stream, start: int) -> Result:
-    if s[start] == '"':
-        return parseEscapedString(s, start)
-    if s[start] == "r" and s[start + 1] in ("#", '"'):
-        return parseRawString(s, start)
-    return Result.fail(start)
-
-
-def parseEscapedString(s: Stream, start: int) -> Result:
-    if s[start] != '"':
-        return Result.fail(start)
-    i = start + 1
-
-    rawChars = ""
-    while True:
-        if s[i] not in ("\\", '"', ""):
-            rawChars += s[i]
+        if i >= n:
+            if not nodeDiscard:
+                built = nodeCls(name, tag, [], [])
+                if hasNodeConverters:
+                    built = _applyNodeConverters(s, built, nodeStart, nameEnd)
+                curNodes.append(built)
+            continue
+        ch0 = chars[i]
+        if ch0 in ("\n", ";"):
+            i += 1
+            if not nodeDiscard:
+                built = nodeCls(name, tag, [], [])
+                if hasNodeConverters:
+                    built = _applyNodeConverters(s, built, nodeStart, nameEnd)
+                curNodes.append(built)
+            continue
+        if ch0 == "{":
+            stack.append((curNodes, nodeStart, nameEnd, name, tag, [], nodeDiscard, nodeDiscard, curDiscard, i))
+            curNodes = []
+            curDiscard = nodeDiscard
             i += 1
             continue
-        if s[i] == '"':
-            break
-        if s[i] == "":
-            raise ParseError(
-                s,
-                start,
-                "Hit EOF while looking for the end of the string",
-            )
-        ch, i = parseEscape(s, i)
-        if ch is Failure:
-            raise ParseError(s, i, "Invalid escape sequence in string")
-        rawChars += ch
 
-    return Result(types.String(rawChars), i + 1)
+        entries: list[LooseEntry] = []
+        props: dict[str, t.Any] | None = None
+        propIndices: dict[str, int] | None = None
+        enteredChildren = False
+
+        while i < n:
+            ch = chars[i]
+            if ch == " ":
+                i += 1
+                if i >= n:
+                    break
+            elif ch in ("\n", ";"):
+                i += 1
+                break
+            elif ch == "{":
+                if not nodeDiscard and props is not None:
+                    if entries:
+                        entries.extend(props.items())
+                    else:
+                        entries = list(props.items())
+                    props = None
+                stack.append(
+                    (curNodes, nodeStart, nameEnd, name, tag, entries, nodeDiscard, nodeDiscard, curDiscard, i),
+                )
+                curNodes = []
+                curDiscard = nodeDiscard
+                i += 1
+                enteredChildren = True
+                break
+            elif ch in wsSet or ch == "\\" or (ch == "/" and i + 1 < n and chars[i + 1] == "*"):
+                nextI = _skipNodespace(s, i)
+                if nextI == i:
+                    i = _skipTerminator(s, i)
+                    break
+                i = nextI
+                if i >= n:
+                    break
+            elif ch == "/" and i + 1 < n and chars[i + 1] == "-":
+                j = _skipNodespace(s, i + 2)
+                if j < n and chars[j] == "{":
+                    if not nodeDiscard and props is not None:
+                        if entries:
+                            entries.extend(props.items())
+                        else:
+                            entries = list(props.items())
+                        props = None
+                    stack.append((curNodes, nodeStart, nameEnd, name, tag, entries, nodeDiscard, True, curDiscard, i))
+                    curNodes = []
+                    curDiscard = True
+                    i = j + 1
+                    enteredChildren = True
+                    break
+                raise ParseError(s, i, "Junk after node, before terminator.")
+            else:
+                i = _skipTerminator(s, i)
+                break
+
+            while True:
+                ch2 = chars[i]
+                if ch2 == "{":
+                    if not nodeDiscard and props is not None:
+                        if entries:
+                            entries.extend(props.items())
+                        else:
+                            entries = list(props.items())
+                        props = None
+                    stack.append(
+                        (curNodes, nodeStart, nameEnd, name, tag, entries, nodeDiscard, nodeDiscard, curDiscard, i),
+                    )
+                    curNodes = []
+                    curDiscard = nodeDiscard
+                    i += 1
+                    enteredChildren = True
+                    break
+                if ch2 in ("\n", ";"):
+                    i += 1
+                    ch2 = "\n"
+                    break
+                if ch2 == "(":
+                    val, valEnd = _parseValue(s, i, fastUntagged, nodeDiscard)
+                    if valEnd < 0:
+                        raise ParseError(s, i, "Junk after node, before terminator.")
+                    i = valEnd
+                    if not nodeDiscard:
+                        if props is not None:
+                            base = len(entries)
+                            propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                            entries.extend(props.items())
+                            props = None
+                        entries.append((None, val))
+                    break
+                if ch2 in wsSet or ch2 == "\\" or (ch2 == "/" and i + 1 < n and chars[i + 1] == "*"):
+                    nextI = _skipNodespace(s, i)
+                    if nextI > i:
+                        i = nextI
+                        if i >= n:
+                            break
+                        continue
+                    i = _skipTerminator(s, i)
+                    ch2 = "\n"
+                    break
+                if ch2 == "/" and i + 1 < n:
+                    chNext = chars[i + 1]
+                    if chNext == "-":
+                        sdStart = i
+                        j = _skipNodespace(s, i + 2)
+                        if j < n and chars[j] == "{":
+                            if not nodeDiscard and props is not None:
+                                if entries:
+                                    entries.extend(props.items())
+                                else:
+                                    entries = list(props.items())
+                                props = None
+                            stack.append(
+                                (
+                                    curNodes,
+                                    nodeStart,
+                                    nameEnd,
+                                    name,
+                                    tag,
+                                    entries,
+                                    nodeDiscard,
+                                    True,
+                                    curDiscard,
+                                    sdStart,
+                                ),
+                            )
+                            curNodes = []
+                            curDiscard = True
+                            i = j + 1
+                            enteredChildren = True
+                            break
+                        entEnd = _parseDiscardedEntity(s, j)
+                        if entEnd < 0:
+                            raise ParseError(s, sdStart, "Junk after node, before terminator.")
+                        i = entEnd
+                        break
+                    if chNext == "/":
+                        mc = _matchSingleLineComment(chars, i)
+                        assert mc is not None
+                        i = mc.end()
+                        ch2 = "\n"
+                        break
+
+                m = matchEntry(chars, i)
+                if m is not None:
+                    eli = m.lastindex
+                    if eli == 3:
+                        i = m.end()
+                        if not nodeDiscard:
+                            key, numStr = t.cast("tuple[str, str]", m.group(1, 3))
+                            if fastUntagged:
+                                val = _floatFromDecStr(numStr)
+                            else:
+                                val = _decimalFromStr(numStr)
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, m.start(3), i)
+                            if props is not None:
+                                props[key] = val
+                            elif propIndices is None:
+                                props = {key: val}
+                            else:
+                                nEnt = len(entries)
+                                idx = propIndices.setdefault(key, nEnt)
+                                if idx == nEnt:
+                                    entries.append((key, val))
+                                else:
+                                    entries[idx] = (key, val)
+                        break
+                    if eli == 2:
+                        i = m.end()
+                        if not nodeDiscard:
+                            key, sVal = t.cast("tuple[str, str]", m.group(1, 2))
+                            if fastUntagged:
+                                val = sVal
+                            else:
+                                val = strCls(sVal)
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, m.start(2) - 1, i)
+                            if props is not None:
+                                props[key] = val
+                            elif propIndices is None:
+                                props = {key: val}
+                            else:
+                                nEnt = len(entries)
+                                idx = propIndices.setdefault(key, nEnt)
+                                if idx == nEnt:
+                                    entries.append((key, val))
+                                else:
+                                    entries[idx] = (key, val)
+                        break
+                    if eli == 4:
+                        i = m.end()
+                        if not nodeDiscard:
+                            key, kw = t.cast("tuple[str, str]", m.group(1, 4))
+                            if fastUntagged:
+                                val = kwMap[kw]
+                            else:
+                                val = (
+                                    boolCls(True) if kw == "true" else (boolCls(False) if kw == "false" else nullCls())
+                                )
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, m.start(4), i)
+                            if props is not None:
+                                props[key] = val
+                            elif propIndices is None:
+                                props = {key: val}
+                            else:
+                                nEnt = len(entries)
+                                idx = propIndices.setdefault(key, nEnt)
+                                if idx == nEnt:
+                                    entries.append((key, val))
+                                else:
+                                    entries[idx] = (key, val)
+                        break
+                    if eli == 6:
+                        i = m.end()
+                        if not nodeDiscard:
+                            if props is not None:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                                props = None
+                            sVal = m.group(6)
+                            if fastUntagged:
+                                val = sVal
+                            else:
+                                val = strCls(sVal)
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, m.start(6) - 1, i)
+                            entries.append((None, val))
+                        break
+                    if eli == 7:
+                        i = m.end()
+                        if not nodeDiscard:
+                            if props is not None:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                                props = None
+                            if fastUntagged:
+                                val = _floatFromDecStr(m.group(7))
+                            else:
+                                val = _decimalFromStr(m.group(7))
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, m.start(7), i)
+                            entries.append((None, val))
+                        break
+                    if eli == 5:
+                        key = m.group(1)
+                        valStart = m.end()
+                        val, valEnd = _parseValue(s, valStart, fastUntagged, nodeDiscard)
+                        if valEnd < 0:
+                            raise ParseError(s, valStart, "Expected value after prop=.")
+                        i = valEnd
+                        if not nodeDiscard:
+                            if props is not None:
+                                props[key] = val
+                            elif propIndices is None:
+                                props = {key: val}
+                            else:
+                                nEnt = len(entries)
+                                idx = propIndices.setdefault(key, nEnt)
+                                if idx == nEnt:
+                                    entries.append((key, val))
+                                else:
+                                    entries[idx] = (key, val)
+                        break
+                    tok = m.group(1)
+                    if tok in keywords:
+                        endPos = m.end()
+                        if not nodeDiscard:
+                            if props is not None:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                                props = None
+                            if fastUntagged:
+                                val = kwMap[tok]
+                            else:
+                                val = (
+                                    boolCls(True)
+                                    if tok == "true"
+                                    else (boolCls(False) if tok == "false" else nullCls())
+                                )
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, i, endPos)
+                            entries.append((None, val))
+                        i = endPos
+                        break
+                    if tok.lower() in keywords:
+                        raise ParseError(s, i, "KDL keywords are lower-case.")
+                    raise ParseError(s, i, "Junk after node, before terminator.")
+
+                if ch2 == '"':
+                    strStart = i
+                    strVal, strEnd = _parseEscapedString(s, strStart)
+                    if strEnd < n and chars[strEnd] == "=":
+                        val, valEnd = _parseValue(s, strEnd + 1, fastUntagged, nodeDiscard)
+                        if valEnd < 0:
+                            raise ParseError(s, strEnd + 1, "Expected value after prop=.")
+                        i = valEnd
+                        if not nodeDiscard:
+                            if props is not None:
+                                props[strVal] = val
+                            elif propIndices is None:
+                                props = {strVal: val}
+                            else:
+                                nEnt = len(entries)
+                                idx = propIndices.setdefault(strVal, nEnt)
+                                if idx == nEnt:
+                                    entries.append((strVal, val))
+                                else:
+                                    entries[idx] = (strVal, val)
+                    else:
+                        i = strEnd
+                        if not nodeDiscard:
+                            if props is not None:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                                props = None
+                            if fastUntagged:
+                                val = strVal
+                            else:
+                                val = strCls(strVal)
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, strStart, strEnd)
+                            entries.append((None, val))
+                    break
+                if ch2 == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
+                    j = i + 1
+                    while j < n and chars[j] == "#":
+                        j += 1
+                    if j < n and chars[j] == '"':
+                        rawStart = i
+                        rawVal, strEnd = _parseRawString(s, rawStart, j - i - 1)
+                        if strEnd < n and chars[strEnd] == "=":
+                            val, valEnd = _parseValue(s, strEnd + 1, fastUntagged, nodeDiscard)
+                            if valEnd < 0:
+                                raise ParseError(s, strEnd + 1, "Expected value after prop=.")
+                            i = valEnd
+                            if not nodeDiscard:
+                                if props is not None:
+                                    props[rawVal] = val
+                                elif propIndices is None:
+                                    props = {rawVal: val}
+                                else:
+                                    nEnt = len(entries)
+                                    idx = propIndices.setdefault(rawVal, nEnt)
+                                    if idx == nEnt:
+                                        entries.append((rawVal, val))
+                                    else:
+                                        entries[idx] = (rawVal, val)
+                        else:
+                            i = strEnd
+                            if not nodeDiscard:
+                                if props is not None:
+                                    base = len(entries)
+                                    propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                    entries.extend(props.items())
+                                    props = None
+                                if fastUntagged:
+                                    val = rawVal
+                                else:
+                                    val = RawString(rawVal)
+                                    if hasValConverters:
+                                        val = _finalizeValue(s, val, None, rawStart, strEnd)
+                                entries.append((None, val))
+                        break
+                if ch2 in digits or (ch2 in ("+", "-") and i + 1 < n and chars[i + 1] in digits):
+                    numStart = i
+                    val, valEnd = _parseNumber(s, numStart, fastUntagged, nodeDiscard)
+                    i = valEnd
+                    if not nodeDiscard:
+                        if props is not None:
+                            base = len(entries)
+                            propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                            entries.extend(props.items())
+                            props = None
+                        if not fastUntagged and hasValConverters:
+                            val = _finalizeValue(s, t.cast("Value", val), None, numStart, valEnd)
+                        entries.append((None, val))
+                    break
+                if ch2 in nlSet:
+                    i = i + 2 if (ch2 == "\r" and i + 1 < n and chars[i + 1] == "\n") else i + 1
+                    ch2 = "\n"
+                    break
+                if ch2 in ("t", "f", "n"):
+                    mk = _matchKeyword(chars, i)
+                    if mk is not None:
+                        endPos = mk.end()
+                        if not nodeDiscard:
+                            if props is not None:
+                                base = len(entries)
+                                propIndices = {pk: base + pi for pi, pk in enumerate(props)}
+                                entries.extend(props.items())
+                                props = None
+                            kw = mk.group()
+                            if fastUntagged:
+                                val = kwMap[kw]
+                            else:
+                                val = (
+                                    boolCls(True) if kw == "true" else (boolCls(False) if kw == "false" else nullCls())
+                                )
+                                if hasValConverters:
+                                    val = _finalizeValue(s, val, None, i, endPos)
+                            entries.append((None, val))
+                        i = endPos
+                        break
+                if ch2 == "'":
+                    raise ParseError(s, i, "KDL strings use double-quotes.")
+                raise ParseError(s, i, "Junk after node, before terminator.")
+
+            if enteredChildren or i >= n or ch2 == "\n":
+                break
+
+        if not enteredChildren and not nodeDiscard:
+            if props is not None:
+                if entries:
+                    entries.extend(props.items())
+                else:
+                    entries = list(props.items())
+            built = nodeCls(name, tag, entries, [])
+            if hasNodeConverters:
+                built = _applyNodeConverters(s, built, nodeStart, nameEnd)
+            curNodes.append(built)
 
 
-def parseEscape(s: Stream, start: int) -> Result:
-    if s[start] != "\\":
-        return Result.fail(start)
-    ch = s[start + 1]
-    if ch == "n":
-        return Result("\n", start + 2)
-    if ch == "r":
-        return Result("\r", start + 2)
-    if ch == "t":
-        return Result("\t", start + 2)
-    if ch == "\\":
-        return Result("\\", start + 2)
-    if ch == "/":
-        return Result("/", start + 2)
-    if ch == '"':
-        return Result('"', start + 2)
-    if ch == "b":
-        return Result("\b", start + 2)
-    if ch == "f":
-        return Result("\f", start + 2)
-    if ch == "u":
-        if s[start + 2] != "{":
-            raise ParseError(
-                s,
-                start,
-                "Unicode escapes must surround their codepoint in {}",
-            )
-        i = start + 3
-        hexStart = i
-        while isHexDigit(s[i]):
-            i += 1
-        hexCount = i - hexStart
-        if s[i] != "}":
-            raise ParseError(s, hexStart, "Expected } to finish a unicode escape")
-        if hexCount < 1:
-            raise ParseError(s, hexStart, "Unicode escape doesn't contain a codepoint")
-        if hexCount > 6:
-            raise ParseError(
-                s,
-                hexStart,
-                "Unicode escapes can contain at most six digits",
-            )
-        hexValue = int(s[hexStart:i], 16)
-        if hexValue > 0x10FFFF:
-            raise ParseError(
-                s,
-                hexStart,
-                "Maximum codepoint in a unicode escape is 0x10ffff",
-            )
-        return Result(chr(hexValue), i + 1)
-    raise ParseError(s, start, "Invalid character escape")
-
-
-def parseRawString(s: Stream, start: int) -> Result:
-    if s[start] != "r":
-        return Result.fail(start)
-    i = start + 1
-
-    # count hashes
-    hashCount, i = parseInitialHashes(s, i)
-    if hashCount is Failure:
-        return Result.fail(start)
-
-    if s[i] != '"':
-        return Result.fail(start)
-    i = i + 1
-
-    stringStart = i
-    while True:
-        while s[i] not in ('"', ""):
-            i += 1
-        if s[i] == "":
-            raise ParseError(
-                s,
-                start,
-                "Hit EOF while looking for the end of the raw string.",
-            )
-        stringEnd = i
-        i += 1
-        result, i = parseFinalHashes(s, i, expectedCount=hashCount)
-        if result is not Failure:
-            return Result(types.RawString(s[stringStart:stringEnd]), i)
-
-
-def parseInitialHashes(s: Stream, start: int) -> Result:
-    i = start
-    while s[i] == "#":
-        i += 1
-    if s[i] == '"':
-        return Result(i - start, i)
-    return Result.fail(start)
-
-
-def parseFinalHashes(s: Stream, start: int, expectedCount: int) -> Result:
-    i = start
-    while s[i] == "#":
-        i += 1
-    count = i - start
-    if count < expectedCount:
-        return Result.fail(start)
-    if count > expectedCount:
-        raise ParseError(
-            s,
-            start,
-            f"Expected {expectedCount} hashes at end of raw string; got {count}.",
-        )
-    return Result(True, i)
-
-
-def parseNewline(s: Stream, start: int) -> Result:
-    if s[start] == "\x0d" and s[start + 1] == "\x0a":
-        return Result(True, start + 2)
-    if isNewlineChar(s[start]):
-        return Result(True, start + 1)
-    return Result.fail(start)
-
-
-def parseLinespace(s: Stream, start: int) -> Result:
-    i = start
-    while True:
-        nl, i = parseNewline(s, i)
-        ws, i = parseWhitespace(s, i)
-        sc, i = parseSingleLineComment(s, i)
-        if nl is Failure and ws is Failure and sc is Failure:
-            break
-    if i == start:
-        return Result.fail(start)
-    return Result(True, i)
-
-
-def parseNodespace(s: Stream, start: int) -> Result:
-    i = start
-    while True:
-        _, i = parseWhitespace(s, i)
-        escline, i = parseEscline(s, i)
-        if escline is Failure:
-            break
-    if i == start:
-        return Result.fail(start)
-    return Result(True, i)
-
-
-def parseEscline(s: Stream, start: int) -> Result:
-    if s[start] != "\\":
-        return Result.fail(start)
-    _, i = parseWhitespace(s, start + 1)
-    if s[i] == "\n":
-        return Result(True, i + 1)
-    sl, i = parseSingleLineComment(s, i)
-    if sl is not Failure:
-        return Result(True, i)
-    return Result.fail(start)
-
-
-def parseWhitespace(s: Stream, start: int) -> Result:
-    i = start
-    while True:
-        sp, i = parseUnicodeSpace(s, i)
-        bc, i = parseBlockComment(s, i)
-        if sp is Failure and bc is Failure:
-            break
-    if i == start:
-        return Result.fail(start)
-    return Result(True, i)
-
-
-def parseUnicodeSpace(s: Stream, start: int) -> Result:
-    if not isWSChar(s[start]):
-        return Result.fail(start)
-    end = start + 1
-    while isWSChar(s[end]):
-        end += 1
-    return Result(True, end)
-
-
-def isIdentChar(ch: str) -> bool:
-    if not ch:
-        return False
-    if ch in r'''\/(){}<>;[]=,"''':
-        return False
-    if isLinespaceChar(ch):
-        return False
-    cp = ord(ch)
-    if cp <= 0x20:
-        return False
-    if cp > 0x10FFFF:
-        return False
-    return True
-
-
-def isKeyword(ident: str) -> bool:
-    return ident in ("null", "true", "false")
-
-
-def isSign(ch: str) -> bool:
-    return ch != "" and ch in "+-"
-
-
-def isDigit(ch: str) -> bool:
-    return ch != "" and ch in "0123456789"
-
-
-def isBinaryDigit(ch: str) -> bool:
-    return ch != "" and ch in "01"
-
-
-def isOctalDigit(ch: str) -> bool:
-    return ch != "" and ch in "01234567"
-
-
-def isHexDigit(ch: str) -> bool:
-    return ch != "" and ch in "0123456789abcdefABCDEF"
-
-
-def isWSChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    if cp in (0x09, 0x20, 0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF):
-        return True
-    if 0x2000 <= cp <= 0x200A:
-        return True
-    return False
-
-
-def isNewlineChar(ch: str) -> bool:
-    if not ch:
-        return False
-    cp = ord(ch)
-    return cp in (0x0A, 0x0D, 0x85, 0x0C, 0x2028, 0x2029)
-
-
-def isLinespaceChar(ch: str) -> bool:
-    if not ch:
-        return False
-    return isWSChar(ch) or isNewlineChar(ch)
-
-
-def parseSlashDash(s: Stream, start: int) -> Result:
-    if s[start] == "/" and s[start + 1] == "-":
-        _, i = parseNodespace(s, start + 2)
-        return Result(True, i)
-    return Result.fail(start)
-
-
-def parseSingleLineComment(s: Stream, start: int) -> Result:
-    if not (s[start] == "/" and s[start + 1] == "/"):
-        return Result.fail(start)
-    i = start + 2
-    while not isNewlineChar(s[i]) and not s.eof(i):
-        i += 1
-    _, i = parseNewline(s, i)
-    return Result(True, i)
-
-
-def parseBlockComment(s: Stream, start: int) -> Result:
-    if not (s[start] == "/" and s[start + 1] == "*"):
-        return Result.fail(start)
-    i = start + 2
-    while True:
-        if s.eof(i):
-            raise ParseError(s, start, "Hit EOF while inside a multiline comment")
-        if s[i] == "*" and s[i + 1] == "/":
-            return Result(True, i + 2)
-        if s[i] == "/" and s[i + 1] == "*":
-            _, i = parseBlockComment(s, i)
-            continue
-        i += 1
+def parse(input: str, config: t.ParseConfig | None = None) -> Document:
+    if config is None:
+        config = parsing.defaults
+    s = Stream(input, config)
+    if s.length > 128 and not config.valueConverters and not config.nodeConverters:
+        if config.nativeUntaggedValues:
+            return _parseChunkedNative(s)
+        return _parseChunkedRaw(s)
+    return _parseDirect(s)
