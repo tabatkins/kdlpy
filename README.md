@@ -1,8 +1,11 @@
 # KDL-py
 
-A handwritten Python 3.7+ implemenation of a parser
+A handwritten Python 3.7+ implementation of a parser
 for the [KDL Document Language](https://kdl.dev),
-fully compliant with KDL 2.0.0.
+fully compliant with KDL 2.0.0,
+with automatic fallback support for parsing legacy KDL 1.0.0 documents
+(see [`ParseConfig.version`](#customizing-parsing)).
+Printing always produces valid KDL 2.0.0.
 
 [KDL](https://kdl.dev) is, as the name suggests, a document language,
 filling approximately the same niche as JSON/YAML/XML/etc
@@ -55,37 +58,48 @@ The `kdl.parse(str, parseConfig|None)` function parses, you guessed it, a string
 Document(
     nodes=[
         Node(
-            name='node',
-            args=['arg'],
+            name='node_name',
+            tag=None,
+            entries=[
+                (None, 'arg')
+            ],
             nodes=[
                 Node(
-                    name='child',
-                    props=OrderedDict([
+                    name='child_node',
+                    tag=None,
+                    entries=[
                         ('foo', 1.0),
                         ('bar', True)
-                    ])
+                    ],
+                    nodes=[]
                 )
             ]
         )
-    ]
+    ],
+    printConfig=None
 )
 ```
 
 You can also create a `kdl.Parser()` object and call its `.parse()` method; `Parser` objects can set up parsing and printing options that'll apply by default. See below for how to configure parsing options.
 
-Either way, you'll get back a `kdl.Document` object, which is fully mutable. By default, untagged KDL values are represented with native Python objects.
+Either way, you'll get back a `kdl.Document` object, which is fully mutable.
+By default, untagged KDL values are represented with native Python objects.
+Each `kdl.Node` stores its arguments and properties together in a single `.entries` list of `(key, value)` tuples,
+preserving their order from the source document:
+positional arguments have `None` as their key (`(None, 'arg')`),
+while properties have a `str` key (`('foo', 1.0)`).
 
 ```py3
->>> doc.nodes[0].nodes[0].props["foo"] = 2
+>>> doc.nodes[0].nodes[0].entries[0] = ("foo", 2)
 >>>
 >>> print(doc)
 node_name arg {
-        child_node foo=2 bar=#true
+	child_node foo=2 bar=#true
 }
 
 ```
 
-Stringifying a `kdl.Document` object will produce a valid KDL document back. You can also call `doc.print(printConfig|None)` to customize the printing with a `PrintConfig` object, described below.  See below for how to configure printing options.
+Stringifying a `kdl.Document` object will produce a valid KDL 2.0 document back. You can also call `doc.print(printConfig|None)` to customize the printing with a `PrintConfig` object, described below.
 
 ### Inserting Native Values
 
@@ -94,25 +108,26 @@ and allows you to customize your own objects for use.
 
 kdl-py automatically recognizes and correctly serializes the following objects:
 
-* `bool`: as untagged `true` or `false`
-* `None`: as untagged `null`
-* `int`, `float`: as untagged decimal number
-* `str`: as untagged string
+* `bool`: as untagged `#true` or `#false`
+* `None`: as untagged `#null`
+* `int`, `float`: as untagged decimal number (or `#inf`, `#-inf`, `#nan` for non-finite floats)
+* `str`: as untagged string (bare identifier when valid in KDL 2.0, otherwise quoted string)
 * `bytes`: as `(base64)`-tagged string
 * `decimal.Decimal`: as `(decimal)`-tagged string
 * `datetime`, `date`, and `time`: as `(date-time)`, `(date)`, or `(time)`-tagged strings
 * `ipaddress.IPv4Address` and `ipaddress.IPv6Address`: as `(ipv4)` or `(ipv6)`-tagged strings
 * `urllib.parse.ParseResult` (the result of calling `urllib.parse.urlparse()`): as `(url)`-tagged string
 * `uuid.UUID`: as `(uuid)`-tagged string
-* `re.Pattern` (the result of calling `re.compile()`): as `(regex)`-tagged raw string
+* `re.Pattern` (the result of calling `re.compile()`): as `(regex)`-tagged raw string (`#"..."#`)
 
 All of the tags used above are reserved and predefined by the [KDL specification](https://github.com/kdl-org/kdl/blob/main/SPEC.md#reserved-type-annotations-for-numbers-without-decimals).
 
-In addition, any value with a `.to_kdl()` method
+In addition, any object with a `.to_kdl()` method
 can be used in a kdl-py document.
-The method will be called when the document is stringified,
-and must return one of the kdl-py types,
-or any of the native types defined above.
+The method will be called when the document is stringified:
+when used as a value, it must return one of the kdl-py `Value` types
+or any of the native types defined above;
+when used in a node list (`doc.nodes` or `node.nodes`), it must return a `kdl.Node`.
 
 (For *parsing* KDL into these native types,
 or your own types,
@@ -136,7 +151,7 @@ A `ParseConfig` object has the following properties:
 
 * `nativeUntaggedValues: bool = True`
 
-	Controls whether the parser produces native Python objects (`str`, `int`, `float`, `bool`, `None`) when parsing untagged values (those without a `(foo)` prefix), or always produces kdl-py objects (such as `kdl.String`, `kdl.Decimal`, etc).
+	Controls whether the parser produces native Python objects (`str`, `int`, `float` including `inf`/`-inf`/`nan`, `bool`, `None`) when parsing untagged values (those without a `(foo)` prefix), or always produces kdl-py objects (such as `kdl.String`, `kdl.Decimal`, `kdl.Infinity`, `kdl.NaN`, etc).
 
 * `nativeTaggedValues: bool = True`
 
@@ -178,7 +193,7 @@ A `ParseConfig` object has the following properties:
 
 	Whenever the parser encounters a value,
 	it will attempt to find an entry in this dict
-	whose [`ValueKey`](#ValueKey) matches the value.
+	whose [`ValueKey`](#valuekey) matches the value.
 	If it succeeds,
 	it will call the associated converter function with two arguments:
 	the fully-constructed kdl-py object,
@@ -210,7 +225,7 @@ A `ParseConfig` object has the following properties:
 * `nodeConverters: Dict[NodeKey, Callable] = {}`
 
 	Similar to `valueConverters`,
-	except it uses [`NodeKey`s](#NodeKey),
+	except it uses [`NodeKey`s](#nodekey),
 	and it converts `kdl.Node`s instead.
 
 	There is no native conversion of nodes;
@@ -227,14 +242,22 @@ A `ParseConfig` object has the following properties:
 	if a KDL 2.0 parse error looks like a KDL 1.0 construct
 	(such as unprefixed `true`/`false`/`null` keywords, `r"..."`/`r#"..."#` raw strings,
 	multiline single-quoted strings, `\/` escapes, or KDL 1.0 bare identifiers).
-	If fallback also fails, the original KDL 2.0 `ParseError` is raised.
-	Set `version=2` for strict KDL 2.0 parsing, or `version=1` to parse strictly as KDL 1.0.
+	A leading `/- kdl-version 2` marker disables KDL 1.0 fallback;
+	if fallback is attempted and also fails, the original KDL 2.0 `ParseError` is raised.
+
+	Set `version=2` for strict KDL 2.0 parsing,
+	or `version=1` to parse strictly as KDL 1.0
+	(an explicit `1` or `2` overrides any `/- kdl-version` marker in the document;
+	any other value raises `ValueError`).
+	KDL 1.0 documents parse into the exact same `Document`/`Node`/`Value` structure,
+	respecting all the same `ParseConfig` options and converters,
+	and serialize back out as valid KDL 2.0.
 
 
 ### ParseFragment
 
 `kdl.ParseFragment` is passed to your custom converters,
-specified in `kdl.ParseConfig.tags`,
+specified in `kdl.ParseConfig.valueConverters` and `kdl.ParseConfig.nodeConverters`,
 giving you direct access to the input characters
 before any additional processing was done on them.
 This is useful, for example,
@@ -243,7 +266,8 @@ that might have lost precision in the normal parse.
 
 It exposes a `.fragment` property,
 containing the raw text of the value
-(after the tag, if any).
+(after the tag, if any) for value converters,
+or the raw text of the node's tag (if any) and name for node converters.
 
 It also exposes a `.error(str)` method,
 which takes a custom error message
@@ -255,7 +279,7 @@ so your errors look the same as native parse errors.
 
 ## Customizing Printing
 
-Like parsing, printing a kdl-py `Document` back to a KDL string can be controlled by a `kdl.PrintConfig` object,
+Like parsing, printing a kdl-py `Document` back to a KDL 2.0 string can be controlled by a `kdl.PrintConfig` object,
 which can be provided in three ways.
 In order of importance:
 
@@ -281,27 +305,25 @@ A `PrintConfig` object has the following properties:
 	(The printer always ends nodes with a newline anyway,
 	so this is purely a stylistic choice.)
 
-* `printNullArgs: bool = True`
+* `printNulls: bool = True`
 
-	When `False`, automatically skips over any "null"/`None` arguments.
-	This will corrupt documents that use the "null" keyword intentionally,
+	When `False`, automatically skips over any `#null`/`None` entries
+	(both arguments and properties).
+	This will corrupt documents that use the `#null` keyword intentionally,
 	but can be useful if you'd prefer to use a `None` value
-	as a signal that the argument has been removed.
-
-* `printNullProps: bool = True`
-
-	Identical to `printNullArgs`,
-	but applies to properties rather than arguments.
+	as a signal that an entry has been removed.
 
 * `respectStringType: bool = True`
 
-	When `True`, the printer will output strings as the same type they were in the input,
-	either raw (`r#"foo"#`) or normal (`"foo"`).
-	When `False`, the printer always outputs normal strings.
+	When `True`, `kdl.RawString` values are printed as KDL 2.0 raw strings (`#"foo"#`,
+	falling back to quoted strings if the value contains newlines or starts with `"`)
+	rather than normal quoted strings (`"foo"`).
+	When `False`, `kdl.RawString` values always output as normal quoted strings.
 
-	Note that this only has an effect on `kdl.String` and `kdl.RawString` objects;
-	if the document contains Python `str` objects,
-	they will always output as normal strings.
+	Note that this only affects `kdl.RawString` objects
+	(produced by KDL 1.0 raw strings, `re.Pattern` serialization, or manual construction);
+	`kdl.String` and native Python `str` objects always output as bare identifiers when valid in KDL 2.0,
+	or normal quoted strings otherwise.
 
 * `respectRadix: bool = True`
 
@@ -322,40 +344,53 @@ A `PrintConfig` object has the following properties:
 	Like the previous options, this only has an effect on kdl-py objects;
 	native Python numbers are printed as normal for Python.
 
+* `sortEntries: bool = False`
+
+	When `False`, a node's entries (arguments and properties)
+	are printed in the exact order they appear in `node.entries`.
+	When `True`, entries are stably sorted with positional arguments first
+	(preserving their relative order),
+	followed by properties sorted lexicographically by key.
+
 ## Full API Reference
 
 * `kdl.parse(str, config: kdl.ParseConfig|None) -> kdl.Document`
 * `kdl.Parser(parseConfig: kdl.ParseConfig|None, printConfig: kdl.PrintConfig|None)`
 	* `parser.parse(str, config: kdl.ParseConfig|None) -> kdl.Document`
-	* `parser.print(config: kdl.PrintConfig|None) -> str`
 * `kdl.Document(nodes: list[kdl.Node]?, printConfig: kdl.PrintConfig|None)`
 	* `doc.print(PrintConfig|None) -> str`
-	* `doc[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
-	* `doc.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
-	* `doc.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
-* `kdl.Node(name: str, tag: str|None, args: list[Any]?, props: dict[str, Any]?, nodes: list[kdl.Node]?)`
-	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#NodeKey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
-	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#NodeKey). Returns the default value if nothing matches.
-	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#NodeKey)
-	* `node.getProps(ValueKey) -> Iterable[tuple[str, Any]]` returns an iterator of `(name, value)` pairs for the properties whose value matches the [`ValueKey`](#ValueKey)
+	* `doc[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
+	* `doc.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey). Returns the default value if nothing matches.
+	* `doc.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#nodekey)
+* `kdl.Node(name: str, tag: str|None = None, entries: list[tuple[str|None, Any]]?, nodes: list[kdl.Node]?)`
+	* `node.print(PrintConfig|None = None, indentLevel: int = 0) -> str`
+	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
+	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey). Returns the default value if nothing matches.
+	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#nodekey)
+	* `node.getEntries(ValueKey) -> Iterable[tuple[str|None, Any]]` returns an iterator of `(name, value)` pairs for the entries (both arguments with `name=None` and properties) whose value matches the [`ValueKey`](#valuekey)
 		(Note: for this purpose, non-KDL values, such as `int`, have no tag, and can only meaningfully be tested via a `TypeKey`.)
-	* `node.getArgs(ValueKey) -> Iterable[Any]` returns an iterator of the arguments that match the [`ValueKey`](#ValueKey)
-		(Same disclaimer as `.getProps()`.)
-	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#NodeKey)
+	* `node.getProps(ValueKey) -> Iterable[tuple[str, Any]]` returns an iterator of `(name, value)` pairs for the properties whose value matches the [`ValueKey`](#valuekey)
+		(Same disclaimer as `.getEntries()`.)
+	* `node.getArgs(ValueKey) -> Iterable[Any]` returns an iterator of the arguments that match the [`ValueKey`](#valuekey)
+		(Same disclaimer as `.getEntries()`.)
+	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#nodekey)
 
 * `kdl.Value` ‡
-	* `val.matchesKey(ValueKey) -> bool` returns whether the value matches the [`ValueKey`](#ValueKey)
-* `kdl.Binary(value: int, tag: str|None)`
-* `kdl.Octal(value: int, tag: str|None)`
-* `kdl.Decimal(mantissa: int|float, exponent: int|None, tag: str|None)`
-	* `dec.value`: readonly, `mantissa * (10**exponent)`
-* `kdl.Hex(value: int, tag: str|None)`
-* `kdl.Bool(value: bool, tag: str|None)`
-* `kdl.Null(tag: str|None)`
+	* `val.print(PrintConfig|None) -> str`
+	* `val.matchesKey(ValueKey) -> bool` returns whether the value matches the [`ValueKey`](#valuekey)
+* `kdl.Binary(value: int, tag: str|None = None)`
+* `kdl.Octal(value: int, tag: str|None = None)`
+* `kdl.Decimal(mantissa: int|float, exponent: int = 0, tag: str|None = None)`
+	* `dec.value`: readonly `float`, `float(mantissa)` when `exponent == 0` or parsed from `f"{mantissa}e{exponent}"`
+* `kdl.Hex(value: int, tag: str|None = None)`
+* `kdl.Infinity(value: float, tag: str|None = None)`
+* `kdl.NaN(value: float = float("nan"), tag: str|None = None)`
+* `kdl.Bool(value: bool, tag: str|None = None)`
+* `kdl.Null(tag: str|None = None)`
 	* `null.value`: readonly, always `None`
-* `kdl.RawString(value: str, tag: str|None)`
-* `kdl.String(value: str, tag: str|None)`
-* `kdl.ExactValue(chars: str, tag: str|None)` †
+* `kdl.RawString(value: str, tag: str|None = None)`
+* `kdl.String(value: str, tag: str|None = None)`
+* `kdl.ExactValue(chars: str, tag: str|None = None)` †
 * `kdl.Numberish`, `kdl.Stringish` ‡
 * `kdl.ParseConfig(...)` see above for options
 	* `kdl.parsing.defaults`: default `ParseConfig`
@@ -372,7 +407,7 @@ A `PrintConfig` object has the following properties:
 * `kdl.valueMatchesKey(val: Any, key: kdl.ValueKey) -> bool`
 * `kdl.tagMatchesKey(val: str|None, key: kdl.TagKey) -> bool`
 * `kdl.nameMatchesKey(val: str|None, key: kdl.NameKey) -> bool`
-* `kdl.typeMatchesKey(val: str|None, key: kdl.TypeKey) -> bool`
+* `kdl.typeMatchesKey(val: Any, key: kdl.TypeKey) -> bool`
 	* Functions implementing the tag/name/type matching
 		used by the `node.matchesKey()` and `value.matchesKey()` methods,
 		in case you want to use the same filtering yourself.
@@ -383,10 +418,10 @@ if they want to produce a value *precisely* in a particular syntax,
 in a way that the built-in kdl-py classes don't.
 
 ‡ Not produced by the parser.
-These are abstract base classes to help in type testing:
-`Value` matches all eight value classes,
-`Numberish` matches all four numeric value classes,
-and `Stringish` matches both string value classes.
+These are base classes to help in type testing:
+`Value` matches all value classes,
+`Numberish` matches all six numeric value classes (`Binary`, `Octal`, `Decimal`, `Hex`, `Infinity`, `NaN`),
+and `Stringish` matches both string value classes (`String`, `RawString`).
 
 A few type aliases also exist,
 used by the module in a few places
@@ -394,9 +429,10 @@ and potentially useful for your code:
 
 * `kdl.KDLAny`: a `Document`, `Node`, or any of the `Value` subtypes
 * `kdl.KDLValue`: any of the `Value` subtypes
-* `kdl.KDLishValue`: a `KDLValue` or one of the supported Python native types [see "Inserting Native Types"](#inserting-native-types)
+* `kdl.KDLishValue`: a `KDLValue` or one of the supported Python native types ([see "Inserting Native Values"](#inserting-native-values))
+* `kdl.ParseVersion`: `Literal[1, 2, "auto"]`, the type for `ParseConfig.version`
 * `kdl.ValueKey`, `kdl.NodeKey`, `kdl.TagKey`, `kdl.NameKey`, `kdl.TypeKey`:
-	the types for [`ValueKey`s](#ValueKey) and [`NodeKey`s](#NodeKey)
+	the types for [`ValueKey`s](#valuekey) and [`NodeKey`s](#nodekey)
 	(and their individual pieces)
 
 These aliases only exist when `typing.TYPE_CHECKING` is true,
@@ -453,13 +489,13 @@ based on its tag and/or type.
 A `ValueKey` is either a `TagKey` or a `(TagKey, TypeKey)` tuple,
 matching against the value's tag and/or type.
 
-`TagKey` works identically to how it appears in [`NodeKey`](#NodeKey).
+`TagKey` works identically to how it appears in [`NodeKey`](#nodekey).
 `TypeKey` is either `...`, which matches any type,
 or the same sort of argument you'd pass as the second argument to `isinstance()`.
 
 For example,
 a `"foo"` key would match any values with the tag "foo", like `(foo)1` or `(foo)"bar"`.
-A `(..., kdl.Numberish)` will match any value that's a "number" type: a Hex, Octal, Binary, or Decimal, regardless of its tag.
+A `(..., kdl.Numberish)` will match any value that's a "number" type: a `Hex`, `Octal`, `Binary`, `Decimal`, `Infinity`, or `NaN`, regardless of its tag.
 Etc.
 
 
@@ -469,7 +505,9 @@ The `kdlreformat` command-line program is installed by default
 when you install this module from pypi.
 It can also be run manually from the `kdlreformat.py` file
 at the root of this repository
-(or from the `kdl.cli.cli()` function)
+(or from the `kdl.cli.cli()` function).
+Because it uses the default `version="auto"` parser and always prints KDL 2.0,
+it can also be used to upgrade KDL 1.0 files to canonical KDL 2.0.
 
 ```
 usage: kdlreformat [-h] [--indent INDENT] [--semicolons] [--radix]
