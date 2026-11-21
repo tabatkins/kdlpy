@@ -1,114 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [tool.black]
 line-length = 120
+target-version = ["py312"]
 
 [tool.pylint."MESSAGES CONTROL"]
 disable = [
-    "arguments-differ",
-    "broad-except",
-    "broad-exception-raised",            # Only available in later pylint
-    "c-extension-no-member",             # seems to be weird false pos
-    "consider-iterating-dictionary",     # lol no
-    "consider-using-f-string",           # don't care
-    "duplicate-code",                    # dont' care
-    "eval-used",                         # needed
-    "exec-used",                         # needed
+    "cyclic-import",                     # intentional parsing <-> parsefuncs cycle
+    "duplicate-code",                    # kdl1 fast-path loops intentionally duplicate logic
     "fixme",
-    "global-statement",                  # needed
-    "import-outside-toplevel",           # needed
-    "inconsistent-return-statements",    # don't care
-    "invalid-name",                      # SUPER don't care
-    "keyword-arg-before-vararg",         # literally nonsensical
-    "line-too-long",                     # black takes care of my line lengths
+    "import-outside-toplevel",           # lazy kdl1 import
+    "invalid-name",                      # camelCase style
+    "line-too-long",                     # black handles line lengths
     "missing-class-docstring",
     "missing-function-docstring",
     "missing-module-docstring",
-    "missing-timeout",                   # TODO: fix
-    "no-else-break",                     # i prefer this actually
+    "no-else-break",                     # stylistic preference
     "no-else-continue",                  # ditto
     "no-else-raise",                     # ditto
     "no-else-return",                    # ditto
-    "pointless-string-statement",        # fine as alt comment syntax
     "redefined-builtin",
-    "superfluous-parens",                # don't care
-    "too-few-public-methods",            # dumb
-    "too-many-arguments",                # dumb
-    "too-many-boolean-expressions",      # needed
-    "too-many-branches",                 # needed
-    "too-many-instance-attributes",      # dumb
+    "superfluous-parens",                # stylistic preference
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-boolean-expressions",
+    "too-many-branches",
+    "too-many-instance-attributes",
     "too-many-lines",
-    "too-many-locals",                   # dumb
+    "too-many-locals",
     "too-many-nested-blocks",
     "too-many-return-statements",
     "too-many-statements",
-    "unnecessary-lambda",
-    "unsubscriptable-object",            # false positives
-    "unsupported-binary-operation",      # false pos on type sigs, plus mypy catches anyway
-    "use-dict-literal",                  # don't care
-    "useless-import-alias",              # need it for rust
-    "useless-return",                    # need it for mypy
-    "cyclic-import",                     # one single import, not actually a problem
+    "useless-import-alias",              # explicit PEP 484 re-exports in __init__.py
 ]
 
 [tool.ruff]
-target-version = "py37"
+target-version = "py312"
 line-length = 120
 
-[too.ruff.lint]
+[tool.ruff.lint]
 ignore = [
-    "E501",
-    # bare except is fine
-    "E722",
-    # don't care
-    "E741",
-    # don't care
-    "E743",
-    # handling unused imports elsewhere
-    "F401",
-    # ditto
-    "F405",
-    # flake8 doesn't understand typing overloads
-    "F811",
-    # caught by pylint and I'm not silencing two things
-    "F821",
-    "N802",
+    "E501",                              # black handles line lengths
+    "F811",                              # @overload redefinitions
+    "N802",                              # camelCase style
     "N803",
     "N806",
     "N812",
     "N815",
     "N816",
     "N999",
-    # I use Any sparingly and only when necessary already
-    "ANN401",
-    # assert is for type annotations
-    "S101",
-    # Not doing any secure crypto, just hashing
-    "S324",
-    # these are all dumb
-    "PLR2004",
-    "PLC1901",
+    "ANN401",                            # Any is used intentionally for untyped KDL values
+    "S101",                              # assert is used for mypy narrowing
+    "PLC0414",                           # explicit PEP 484 re-exports in __init__.py
     "PLR0911",
     "PLR0912",
     "PLR0913",
     "PLR0915",
+    "PLR2004",
     "PLR5501",
-    # I do this on purpose a lot
-    "PLW2901",
-    # Disable multiline string concatenation entirely
-    "ISC003",
-    # I violate all of these for readability on purpose
-    "SIM102",
+    "ISC003",                            # prefer explicit `+` over implicit multiline concat
+    "SIM102",                            # stylistic readability preferences
     "SIM103",
     "SIM108",
     "SIM114",
-    # I have no idea what these are guarding against.
-    "RUF001",
-    "RUF002",
-    "RUF003",
-    # Nah, I'm fine with it as written.
-    "RUF005",
-    # I'm fine with both of these
-    "S602",
-    "S607",
 ]
 select = [
     "ANN",
@@ -122,7 +78,6 @@ select = [
     "PL",
     "COM",
     "C4",
-    # Activate later: "DTZ",
     "EM",
     "EXE",
     "INP",
@@ -130,12 +85,14 @@ select = [
     "RSE",
     "ISC",
     "SIM",
-    # Activate later: "PTH",
-    # Active later: "TRY",
-    "RUF"
+    "RUF",
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"check_perf.py" = ["T201"]               # CLI performance checker prints reports
+"profiler.py" = ["T201"]                 # CLI profiler prints reports
+"release.py" = ["S603", "S607", "T201"]  # release script prints progress and invokes git/build/twine
+"test_*.py" = ["T201"]                   # test runners print results
 
 [tool.ruff.lint.flake8-implicit-str-concat]
 allow-multiline = false

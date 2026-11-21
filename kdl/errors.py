@@ -18,6 +18,8 @@ class ParseError(Exception):
 # (giving them `.fragment` and `.error(msg)`). Keep this class for backwards compatibility, but do not
 # use it internally (pass `(s, start, end)` instead to avoid slicing and allocating on valid parses).
 class ParseFragment:
+    __slots__ = ("_i", "_s", "fragment")
+
     def __init__(self, fragment: str, s: t.Stream, i: int) -> None:
         self.fragment = fragment
         self._s = s

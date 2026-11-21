@@ -42,6 +42,8 @@ CONFUSABLE_KEYWORDS: frozenset[str] = frozenset(
 
 BARE_IDENT_PATTERN = re.compile(rf"(?![+-]?\.?[0-9]){IDENT_CHAR_RE_STR}+")
 _fullmatchBareIdent = BARE_IDENT_PATTERN.fullmatch
+DISALLOWED_OR_NON_ASCII_NL_RE = rf"[\x0b\x85\u2028\u2029{DISALLOWED_RE}]"
+DISALLOWED_OR_NL_PATTERN = re.compile(rf"[{NL_RE}{DISALLOWED_RE}]")
 
 
 def isBareIdent(chars: str) -> bool:

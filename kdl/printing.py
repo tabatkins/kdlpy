@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(slots=True)
 class PrintConfig:
     indent: str = "\t"
     semicolons: bool = False

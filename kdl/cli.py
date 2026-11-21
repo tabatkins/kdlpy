@@ -1,31 +1,32 @@
+from __future__ import annotations
+
 import argparse
 import sys
 
-from . import parsefuncs, parsing, printing
+from . import errors, parsefuncs, parsing, printing, t
 
 
 def cli() -> None:
     cliParser = argparse.ArgumentParser(
+        prog="kdlreformat",
         description="KDL parser/printer, letting you easily reformat KDL files into a canonical representation.",
     )
     cliParser.add_argument(
         "infile",
         nargs="?",
-        type=argparse.FileType("r", encoding="utf-8"),
-        default=sys.stdin,
+        default="-",
     )
     cliParser.add_argument(
         "outfile",
         nargs="?",
-        type=argparse.FileType("w", encoding="utf-8"),
-        default=sys.stdout,
+        default="-",
     )
     cliParser.add_argument(
         "--indent",
         dest="indent",
         type=int,
         action="store",
-        default="-1",
+        default=-1,
         help="How many spaces for each level of indent. -1 indicates to indent with tabs.",
     )
     cliParser.add_argument(
@@ -67,11 +68,28 @@ def cli() -> None:
         default="e",
         help="What character to use ('e' or 'E') for indicating exponents on scinot numbers.",
     )
+    cliParser.add_argument(
+        "--sort-properties",
+        dest="sortProperties",
+        action="store_true",
+        default=False,
+        help="Sort node properties lexicographically by key instead of preserving insertion order.",
+    )
+    cliParser.add_argument(
+        "--version",
+        dest="version",
+        type=versionFromString,
+        action="store",
+        default="auto",
+        metavar="{1,2,auto}",
+        help="KDL grammar version to parse ('1', '2', or 'auto'). Default is 'auto'.",
+    )
     cliParser.set_defaults(respectRadix=True, respectStringType=True)
     options = cliParser.parse_args()
     parseConfig = parsing.ParseConfig(
         nativeUntaggedValues=False,
         nativeTaggedValues=False,
+        version=options.version,
     )
     printConfig = printing.PrintConfig(
         indent=" " * options.indent if options.indent >= 0 else "\t",
@@ -79,16 +97,43 @@ def cli() -> None:
         respectRadix=options.respectRadix,
         respectStringType=options.respectStringType,
         exponent=options.exponent,
+        sortProperties=options.sortProperties,
     )
 
-    with options.infile as fh:
-        doc = parsefuncs.parse(fh.read(), parseConfig)
-    with options.outfile as fh:
-        fh.write(doc.print(printConfig))
+    try:
+        if options.infile == "-":
+            inputText = sys.stdin.read()
+        else:
+            with open(options.infile, encoding="utf-8") as fh:
+                inputText = fh.read()
+        doc = parsefuncs.parse(inputText, parseConfig)
+        outputText = doc.print(printConfig)
+        if options.outfile == "-":
+            sys.stdout.write(outputText)
+        else:
+            with open(options.outfile, "w", encoding="utf-8") as fh:
+                fh.write(outputText)
+    except errors.ParseError as err:
+        sys.stderr.write(f"ParseError: {err}\n")
+        sys.exit(1)
+    except OSError as err:
+        sys.stderr.write(f"Error: {err}\n")
+        sys.exit(1)
 
 
 def expFromString(s: str) -> str:
     if s in ("e", "E"):
         return s
     msg = f"Expected 'e' or 'E' for an exponent; got '{s}'"
+    raise argparse.ArgumentTypeError(msg)
+
+
+def versionFromString(s: str) -> t.ParseVersion:
+    if s == "1":
+        return 1
+    if s == "2":
+        return 2
+    if s == "auto":
+        return "auto"
+    msg = f"Expected '1', '2', or 'auto' for KDL version; got '{s}'"
     raise argparse.ArgumentTypeError(msg)

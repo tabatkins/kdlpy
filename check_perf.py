@@ -118,23 +118,23 @@ def build_bench_doc(blocks: int = 20) -> str:
         tree = "".join(tree_parts)
         chunks.append(
             f'service "svc-{idx}" (u16){8000 + idx} enabled={bool_lit} '
-            f"mask=0x{idx + 16:x} mode=0o755 flags=0b1010_0101 ratio=1.{idx:02d}e-2 {{\n"
-            f"    // Comment for service {idx}\n"
-            f'    endpoint "/api/v2/items/{idx}" method="POST" timeout=30_000 retries=3 null_prop=#null\n'
-            f'    pattern ##"^[a-z0-9_-]{{1,32}}$"## #"C:\\data\\shard_{idx}"#\n'
-            f'    escaped "line1\\nline2\\t\\"quoted\\"\\u{{00e9}}\\s end"\n'
-            f'    description """\n'
-            f"        Multi-line description for service {idx}.\n"
-            f'        Contains "quotes" and indentation.\n'
-            f'        """\n'
-            f"    limits max-conn=1_024_000 burst=256.5 inf-val=#inf nan-val=#nan \\\n"
-            f'        override="first" override="second"\n'
-            f'    /- disabled "ignored" foo=123 {{ nested #false }}\n'
-            f'    (meta)audit (date)"2026-11-17" (ipv4)"10.0.0.{idx % 256}" (url)"https://example.com/{idx}" {{\n'
-            f"        tag-{idx % 5} /- #null 10 20 30\n"
-            f"    }}\n"
-            f"{tree}"
-            f"}}\n\n",
+            + f"mask=0x{idx + 16:x} mode=0o755 flags=0b1010_0101 ratio=1.{idx:02d}e-2 {{\n"
+            + f"    // Comment for service {idx}\n"
+            + f'    endpoint "/api/v2/items/{idx}" method="POST" timeout=30_000 retries=3 null_prop=#null\n'
+            + f'    pattern ##"^[a-z0-9_-]{{1,32}}$"## #"C:\\data\\shard_{idx}"#\n'
+            + '    escaped "line1\\nline2\\t\\"quoted\\"\\u{00e9}\\s end"\n'
+            + '    description """\n'
+            + f"        Multi-line description for service {idx}.\n"
+            + '        Contains "quotes" and indentation.\n'
+            + '        """\n'
+            + "    limits max-conn=1_024_000 burst=256.5 inf-val=#inf nan-val=#nan \\\n"
+            + '        override="first" override="second"\n'
+            + '    /- disabled "ignored" foo=123 { nested #false }\n'
+            + f'    (meta)audit (date)"2026-11-17" (ipv4)"10.0.0.{idx % 256}" (url)"https://example.com/{idx}" {{\n'
+            + f"        tag-{idx % 5} /- #null 10 20 30\n"
+            + "    }\n"
+            + f"{tree}"
+            + "}\n\n",
         )
     return "".join(chunks)
 
@@ -598,15 +598,15 @@ def main() -> int:
                 continue
             status = "PASS" if r.passed else "FAIL"
             suffix = f" ({r.detail})" if r.detail and not r.passed else ""
-            print(f"  [{status}] {r.name:<38} {r.measured:>10}  (limit {r.limit}){suffix}")  # noqa: T201
+            print(f"  [{status}] {r.name:<38} {r.measured:>10}  (limit {r.limit}){suffix}")
 
     if failures:
-        print(  # noqa: T201
+        print(
             f"Performance check FAILED: {len(failures)}/{len(all_results)} checks exceeded budget ({elapsed:.2f}s).",
         )
         return 1
 
-    print(f"Performance check passed ({len(all_results)} checks in {elapsed:.2f}s).")  # noqa: T201
+    print(f"Performance check passed ({len(all_results)} checks in {elapsed:.2f}s).")
     return 0
 
 

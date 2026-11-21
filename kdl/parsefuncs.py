@@ -7,6 +7,7 @@ from .chars import (
     BARE_IDENT_PATTERN,
     CONFUSABLE_KEYWORDS,
     DIGITS,
+    DISALLOWED_RE,
     LINESPACE_CHAR_SET,
     NAN,
     NATIVE_KEYWORDS,
@@ -39,9 +40,9 @@ if t.TYPE_CHECKING:
     from .t import ParseResult
 
     # (lineStartPos, indent, text)
-    MultilineLine: t.TypeAlias = tuple[int, str, str]
+    type MultilineLine = tuple[int, str, str]
     # (propKeyOrNone, value, nextIndex) with nextIndex < 0 for no-match
-    EntryResult: t.TypeAlias = tuple[str | None, t.Any, int]
+    type EntryResult = tuple[str | None, t.Any, int]
 
 # 1-char lookahead sets used to skip unnecessary scanner calls (and dispatch bare idents in parseEntry).
 _NODESPACE_START = frozenset(WS_CHARS + "/\\")
@@ -50,13 +51,13 @@ _SPECIAL_ENTRY_START = frozenset('"{};\n\r)/(#0123456789+-')
 
 # Precompiled scanner patterns and bound matchers
 _matchUnicodeSpace = re.compile(rf"[{WS_RE}]+").match
-_matchSingleLineComment = re.compile(rf"//[^{NL_RE}]*(?:\r\n|[{NL_RE}])?").match
+_matchSingleLineComment = re.compile(rf"//[^{NL_RE}{DISALLOWED_RE}]*(?:\r\n|[{NL_RE}])?").match
 _matchLinespaceChars = re.compile(rf"[{WS_RE}{NL_RE}]+").match
-_searchBlockCommentToken = re.compile(r"/\*|\*/").search
+_searchBlockCommentToken = re.compile(rf"/\*|\*/|[{DISALLOWED_RE}]").search
 
 _matchBareIdent = BARE_IDENT_PATTERN.match
-_matchPlainQuoteChunk = re.compile(rf'[^"\\{NL_RE}]*').match
-_matchRawQuoteChunk = re.compile(rf'[^"{NL_RE}]*').match
+_matchPlainQuoteChunk = re.compile(rf'[^"\\{NL_RE}{DISALLOWED_RE}]*').match
+_matchRawQuoteChunk = re.compile(rf'[^"{NL_RE}{DISALLOWED_RE}]*').match
 
 _matchDecimal = re.compile(r"([+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?)(?:[eE]([+-]?[0-9][0-9_]*))?").match
 _matchDecDigits = re.compile(r"[0-9][0-9_]*").match
@@ -83,18 +84,19 @@ _ENTRY_FAIL: tuple[None, None, int] = (None, None, -1)
 
 
 def parse(input: str, config: t.ParseConfig | None = None) -> Document:
-    if config is None:
-        config = parsing.defaults
-    version = config.version
-    if version == 1:
-        from . import kdl1
+    config = config or parsing.defaults
+    match config.version:
+        case 1:
+            from . import kdl1
 
-        return kdl1.parse(input, config)
-    if version not in (2, "auto"):
-        msg = f"Invalid KDL version {version!r}; expected 1, 2, or 'auto'."
-        raise ValueError(msg)
-
-    allowFallback = version == "auto"
+            return kdl1.parse(input, config)
+        case 2:
+            allowFallback = False
+        case "auto":
+            allowFallback = True
+        case _:
+            msg = f"Invalid KDL version {config.version!r}; expected 1, 2, or 'auto'."
+            raise ValueError(msg)
     s = Stream(input, config)
     chars = s.chars
     n = s.length
@@ -495,7 +497,7 @@ def _finalizeValue(
         for key, converter in valueConverters.items():
             if val.matchesKey(key):
                 if pf is None:
-                    pf = ParseFragment(s.chars[valueStart:valueEnd], s, valueEnd)
+                    pf = ParseFragment(s.chars[valueStart:valueEnd], s, valueStart)
                 converted = converter(val, pf)
                 if converted == NotImplemented:
                     continue
@@ -565,23 +567,34 @@ def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.An
         if "_" in raw:
             raw = raw.replace("_", "")
         fval = float(raw)
-        # Match Decimal(int("-0"), 0).value (+0.0) while preserving negative zero for `-0.0`.
-        if fval == 0.0 and "." not in raw:
-            return (0.0, end)
+        # Match Decimal(int("-0"), 0).value (+0.0) while preserving negative zero for `-0.0` and underflows.
+        if fval == 0.0 and raw[0] == "-" and "." not in raw:
+            ePos = raw.find("e")
+            if ePos == -1:
+                ePos = raw.find("E")
+            if ePos == -1 or not raw[:ePos].strip("+-0"):
+                return (0.0, end)
         return (fval, end)
 
     mantStr, expStr = mDec.groups()
     if "_" in mantStr:
         mantStr = mantStr.replace("_", "")
-    mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
-
-    if expStr is None:
-        return (Decimal(mantissa, 0), end)
-
-    if "_" in expStr:
-        expStr = expStr.replace("_", "")
-    exponent = int(expStr, 10)
-    return (Decimal(mantissa, exponent), end)
+    try:
+        mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
+        if expStr is None:
+            return (Decimal(mantissa, 0), end)
+        if "_" in expStr:
+            expStr = expStr.replace("_", "")
+        exponent = int(expStr, 10)
+        return (Decimal(mantissa, exponent), end)
+    except ValueError:
+        raw = mDec.group()
+        if "_" in raw:
+            raw = raw.replace("_", "")
+        fval = float(raw)
+        if fval == 0.0 and raw[0] == "-" and "." not in mantStr and not mantStr.strip("+-0"):
+            fval = 0.0
+        return (Decimal(fval, 0), end)
 
 
 def _raiseDecimalError(s: Stream, digitStart: int) -> t.NoReturn:
@@ -614,18 +627,20 @@ def parseKeyword(s: Stream, start: int, native: bool = False) -> ParseResult[t.A
         val = NATIVE_KEYWORDS.get(ident, t.UNSET)
         if val is not t.UNSET:
             return (val, end)
-    elif ident == "true":
-        return (Bool(True), end)
-    elif ident == "false":
-        return (Bool(False), end)
-    elif ident == "null":
-        return (Null(), end)
-    elif ident == "inf":
-        return (Infinity(POS_INF), end)
-    elif ident == "-inf":
-        return (Infinity(NEG_INF), end)
-    elif ident == "nan":
-        return (NaN(NAN), end)
+    else:
+        match ident:
+            case "true":
+                return (Bool(True), end)
+            case "false":
+                return (Bool(False), end)
+            case "null":
+                return (Null(), end)
+            case "inf":
+                return (Infinity(POS_INF), end)
+            case "-inf":
+                return (Infinity(NEG_INF), end)
+            case "nan":
+                return (NaN(NAN), end)
 
     isKdl1PropKey = end < s.length and chars[end] == "="
     if ident in CONFUSABLE_KEYWORDS:
@@ -664,20 +679,14 @@ def parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bo
     if ch == '"':
         strStart = start + 1
         if strStart < n and chars[strStart] != '"':
-            # Fast path for short, plain, single-line strings; longer or escaped strings fall through.
-            # isascii() is an O(1) header check that rules out non-ASCII KDL newlines (\x85, \u2028, \u2029).
+            # Fast path for short, plain, single-line strings; longer, escaped, tab, newline, or disallowed-char
+            # strings fall through (`isprintable()` is False for every KDL newline and disallowed codepoint).
             quotePos = chars.find('"', strStart, strStart + 256)
             if quotePos != -1:
                 end = quotePos + 1
                 if end >= n or chars[end] not in ('"', "#"):
                     sub = chars[strStart:quotePos]
-                    if (
-                        "\\" not in sub
-                        and "\n" not in sub
-                        and "\r" not in sub
-                        and "\x0b" not in sub
-                        and "\x0c" not in sub
-                    ) and (sub.isascii() or ("\x85" not in sub and "\u2028" not in sub and "\u2029" not in sub)):
+                    if "\\" not in sub and sub.isprintable():
                         return (sub, end)
             return parseQuotedString(s, strStart, 0)
         quoteStart = start
@@ -747,12 +756,19 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
                 if m.end() > i:
                     parts.append(chars[i : m.end()])
                     i = m.end()
-            else:
+            elif ch in NL_SET:
                 raise ParseError(
                     s,
                     start,
                     "Saw an unescaped newline in a single-quote string.",
                     maybeKdl1=chars.find('"', i + 1) != -1,
+                )
+            else:
+                raise ParseError(
+                    s,
+                    i,
+                    "Disallowed literal character in string.",
+                    maybeKdl1=ch == "\ufeff",
                 )
 
     # Raw single-line string (`#"..."#`)
@@ -764,7 +780,14 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
         if i >= n:
             raise ParseError(s, start, "Hit EOF while looking for the end of the string")
         if chars[i] != '"':
-            raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
+            if chars[i] in NL_SET:
+                raise ParseError(s, start, "Saw an unescaped newline in a single-quote string.")
+            raise ParseError(
+                s,
+                i,
+                "Disallowed literal character in raw string.",
+                maybeKdl1=chars[i] == "\ufeff",
+            )
         quotePos = i
         i += 1
         hashEnd = i
@@ -909,8 +932,15 @@ def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[s
                 lineParts.append(esc)
             continue
 
-        # Must be a newline character
+        # Must be a newline or disallowed literal character
         nlEnd = skipNewline(chars, i, n)
+        if nlEnd == i:
+            raise ParseError(
+                s,
+                i,
+                "Disallowed literal character in multiline string.",
+                maybeKdl1=ch == "\ufeff",
+            )
         lines.append((lineStart, lineIndent, "".join(lineParts)))
         i = nlEnd
         lineStart = i
@@ -984,6 +1014,13 @@ def skipLinespace(s: Stream, start: int) -> int:
                 mComment = _matchSingleLineComment(chars, i)
                 assert mComment is not None
                 i = mComment.end()
+                if i < n and chars[i - 1] not in NL_SET:
+                    raise ParseError(
+                        s,
+                        i,
+                        "Disallowed literal character in comment.",
+                        maybeKdl1=chars[i] == "\ufeff",
+                    )
                 continue
             if nextCh == "*":
                 i = skipBlockComment(s, i)
@@ -1036,7 +1073,15 @@ def skipEscline(s: Stream, start: int) -> int:
     if chars[i] == "/" and i + 1 < n and chars[i + 1] == "/":
         m = _matchSingleLineComment(chars, i)
         assert m is not None
-        return m.end()
+        end = m.end()
+        if end < n and chars[end - 1] not in NL_SET:
+            raise ParseError(
+                s,
+                end,
+                "Disallowed literal character in comment.",
+                maybeKdl1=chars[end] == "\ufeff",
+            )
+        return end
     return start
 
 
@@ -1058,7 +1103,7 @@ def skipWhitespace(s: Stream, start: int) -> int:
 
 
 def skipBlockComment(s: Stream, start: int) -> int:
-    # Iterative depth scan with a single `/*|*/` search regex avoids recursion and scans bodies in C.
+    # Iterative depth scan with a single `/*|*/|disallowed` search regex avoids recursion and scans bodies in C.
     chars = s.chars
     if not chars.startswith("/*", start):
         return start
@@ -1068,9 +1113,17 @@ def skipBlockComment(s: Stream, start: int) -> int:
         m = _searchBlockCommentToken(chars, i)
         if m is None:
             raise ParseError(s, start, "Hit EOF while inside a multiline comment")
-        if m.group() == "/*":
+        tok = m.group()
+        if tok == "/*":
             depth += 1
-        else:
+        elif tok == "*/":
             depth -= 1
+        else:
+            raise ParseError(
+                s,
+                m.start(),
+                "Disallowed literal character in block comment.",
+                maybeKdl1=tok == "\ufeff",
+            )
         i = m.end()
     return i

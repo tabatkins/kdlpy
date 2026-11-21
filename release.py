@@ -7,8 +7,8 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Mapping, Sequence
 
 PROJECT_NAME = "kdlpy"
 TEST_PYPI_URL = "https://test.pypi.org/legacy/"
@@ -59,14 +59,16 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
     options = parseArgs(argv)
 
     if not inProjectRoot(PROJECT_NAME):
-        raise ReleaseError("Run this command from inside the kdlpy project root folder.")
+        msg = "Run this command from inside the kdlpy project root folder."
+        raise ReleaseError(msg)
 
     projectRoot = Path.cwd()
     semverPath = projectRoot / SEMVER_FILE
     secretsPath = projectRoot / SECRETS_FILE
 
     if not semverPath.is_file():
-        raise ReleaseError(f"Could not find {SEMVER_FILE} in {projectRoot}.")
+        msg = f"Could not find {SEMVER_FILE} in {projectRoot}."
+        raise ReleaseError(msg)
 
     dirtyFiles = getDirtyFiles()
     if dirtyFiles:
@@ -74,9 +76,8 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
         if options.dry_run:
             print(f"Warning: Working tree is dirty (continuing because --dry-run was passed):\n{dirtySummary}")
         else:
-            raise ReleaseError(
-                f"Working tree is dirty. Finish committing files or stash, then try again.\n{dirtySummary}",
-            )
+            msg = f"Working tree is dirty. Finish committing files or stash, then try again.\n{dirtySummary}"
+            raise ReleaseError(msg)
 
     originalSemverContent = semverPath.read_text(encoding="utf-8")
     currentVersion = originalSemverContent.strip()
@@ -85,7 +86,8 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
     tagName = f"v{newVersion}"
 
     if not options.test and not options.dry_run and not options.no_tag and gitTagExists(tagName):
-        raise ReleaseError(f"Git tag {tagName} already exists.")
+        msg = f"Git tag {tagName} already exists."
+        raise ReleaseError(msg)
 
     buildCmd = findToolCommand("build", "pyproject-build")
     twineCmd = findToolCommand("twine", "twine")
@@ -100,14 +102,15 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
 
     if missingTools and (not options.dry_run or buildCmd is None or checkManifestCmd is None):
         packages = " ".join(missingTools)
-        raise ReleaseError(
+        msg = (
             f"Missing required release tool(s): {', '.join(missingTools)}\n"
-            f"Active Python: {sys.executable}\n"
-            f"Install them with:\n"
-            f"  python -m pip install {packages}\n"
-            f"Or install all dev dependencies with:\n"
-            f"  python -m pip install -r requirements-dev.txt",
+            + f"Active Python: {sys.executable}\n"
+            + "Install them with:\n"
+            + f"  python -m pip install {packages}\n"
+            + "Or install all dev dependencies with:\n"
+            + "  python -m pip install -r requirements-dev.txt"
         )
+        raise ReleaseError(msg)
 
     token, tokenFromEnv = loadPyPiToken(secretsPath, isTest=options.test, required=not options.dry_run)
 
@@ -118,15 +121,15 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
     if not options.skip_lint:
         lintScript = projectRoot / "lint"
         if not lintScript.is_file():
-            raise ReleaseError("Could not find ./lint script. Pass --skip-lint to bypass.")
+            msg = "Could not find ./lint script. Pass --skip-lint to bypass."
+            raise ReleaseError(msg)
         runCommand(["sh", str(lintScript)], "Running ./lint")
         if not options.dry_run:
             postLintDirty = getDirtyFiles()
             if postLintDirty:
                 dirtySummary = "\n".join(f"  {line}" for line in postLintDirty)
-                raise ReleaseError(
-                    f"./lint modified the working tree. Commit those changes before releasing:\n{dirtySummary}",
-                )
+                msg = f"./lint modified the working tree. Commit those changes before releasing:\n{dirtySummary}"
+                raise ReleaseError(msg)
     else:
         assert checkManifestCmd is not None
         runCommand([*checkManifestCmd, "--no-build-isolation"], "Checking MANIFEST.in")
@@ -143,7 +146,8 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
         distDir = projectRoot / "dist"
         distFiles = sorted(distDir.iterdir()) if distDir.is_dir() else []
         if not distFiles:
-            raise ReleaseError("Build succeeded, but no distribution files were created in dist/.")
+            msg = "Build succeeded, but no distribution files were created in dist/."
+            raise ReleaseError(msg)
 
         if twineCmd is not None:
             runCommand(
@@ -206,11 +210,12 @@ def createRelease(argv: Sequence[str] | None = None) -> None:
         pushCmd = ["git", "push"] if options.no_tag else ["git", "push", "--follow-tags"]
         runCommand(pushCmd, "Pushing release commit")
     except subprocess.CalledProcessError as exc:
-        raise ReleaseError(
+        msg = (
             f"Version {newVersion} was ALREADY uploaded to {targetRepo}, "
-            f"but the git step failed (exit code {exc.returncode}).\n"
-            f"Do NOT re-upload; finish committing/tagging/pushing manually.",
-        ) from exc
+            + f"but the git step failed (exit code {exc.returncode}).\n"
+            + "Do NOT re-upload; finish committing/tagging/pushing manually."
+        )
+        raise ReleaseError(msg) from exc
 
     print(f"Successfully released {newVersion}!")
 
@@ -261,13 +266,16 @@ def gitTagExists(tagName: str) -> bool:
 def parseSemver(s: str) -> tuple[int, int, int]:
     parts = s.strip().split(".")
     if len(parts) != 3:
-        raise ReleaseError(f"Invalid semver '{s.strip()}': expected MAJOR.MINOR.PATCH.")
+        msg = f"Invalid semver '{s.strip()}': expected MAJOR.MINOR.PATCH."
+        raise ReleaseError(msg)
     try:
         major, minor, patch = (int(part) for part in parts)
     except ValueError as exc:
-        raise ReleaseError(f"Invalid semver '{s.strip()}': version components must be integers.") from exc
+        msg = f"Invalid semver '{s.strip()}': version components must be integers."
+        raise ReleaseError(msg) from exc
     if major < 0 or minor < 0 or patch < 0:
-        raise ReleaseError(f"Invalid semver '{s.strip()}': version components must be non-negative.")
+        msg = f"Invalid semver '{s.strip()}': version components must be non-negative."
+        raise ReleaseError(msg)
     return (major, minor, patch)
 
 
@@ -279,7 +287,8 @@ def bumpSemver(semver: tuple[int, int, int], bumpType: str) -> str:
         return f"{major}.{minor + 1}.0"
     if bumpType == "bugfix":
         return f"{major}.{minor}.{patch + 1}"
-    raise ReleaseError(f"Unknown bump type: {bumpType}")
+    msg = f"Unknown bump type: {bumpType}"
+    raise ReleaseError(msg)
 
 
 def findToolCommand(moduleName: str, executableName: str) -> list[str] | None:
@@ -311,18 +320,21 @@ def loadPyPiToken(secretsPath: Path, isTest: bool, required: bool) -> tuple[str 
         try:
             rawData = json.loads(secretsPath.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ReleaseError(f"Error loading {secretsPath.name}: {exc}") from exc
+            msg = f"Error loading {secretsPath.name}: {exc}"
+            raise ReleaseError(msg) from exc
         if not isinstance(rawData, dict):
-            raise ReleaseError(f"Invalid {secretsPath.name}: expected a JSON object.")
+            msg = f"Invalid {secretsPath.name}: expected a JSON object."
+            raise ReleaseError(msg)
         token = rawData.get(secretKey)
         if isinstance(token, str) and token.strip():
             return (token.strip(), False)
         if required:
-            raise ReleaseError(
+            msg = (
                 f"Missing or empty '{secretKey}' in {secretsPath.name}.\n"
-                f"Expected format:\n"
-                f'  {{"pypi.org release key": "pypi-...", "test.pypi.org release key": "pypi-..."}}',
+                + "Expected format:\n"
+                + '  {"pypi.org release key": "pypi-...", "test.pypi.org release key": "pypi-..."}'
             )
+            raise ReleaseError(msg)
         print(f"Warning: '{secretKey}' not found in {secretsPath.name} (required for actual upload).")
         return (None, False)
 
@@ -331,11 +343,12 @@ def loadPyPiToken(secretsPath: Path, isTest: bool, required: bool) -> tuple[str 
         return (envToken, True)
 
     if required:
-        raise ReleaseError(
+        msg = (
             f"Could not find {secretsPath.name} (and TWINE_PASSWORD is not set).\n"
-            f"Create {secretsPath.name} with:\n"
-            f'  {{"{secretKey}": "pypi-..."}}',
+            + f"Create {secretsPath.name} with:\n"
+            + f'  {{"{secretKey}": "pypi-..."}}'
         )
+        raise ReleaseError(msg)
     print(f"Warning: {secretsPath.name} not found and TWINE_PASSWORD is not set (required for actual upload).")
     return (None, False)
 

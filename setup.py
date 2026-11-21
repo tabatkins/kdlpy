@@ -4,10 +4,6 @@ with open("README.md", encoding="utf-8") as fh:
     long_description = fh.read()
 with open("semver.txt", encoding="utf-8") as fh:
     semver = fh.read().strip()
-"""
-with open("requirements.txt") as fh:
-    install_requires = [x.strip() for x in fh.read().strip().split("\n")]
-"""
 
 setup(
     name="kdl-py",
@@ -23,11 +19,14 @@ setup(
     package_data={"kdl": ["py.typed"]},
     include_package_data=True,
     install_requires=[],
-    python_requires=">=3.7",
+    python_requires=">=3.12",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Topic :: Software Development :: Documentation",
     ],
     entry_points={"console_scripts": ["kdlreformat = kdl:cli"]},

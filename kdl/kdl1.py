@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import datetime
 import decimal
 import ipaddress
 import itertools
 import operator
 import re
+import sys
 import urllib.parse
 import uuid
 
@@ -28,7 +30,7 @@ from .types import (
 )
 
 if t.TYPE_CHECKING:
-    _FastFrame: t.TypeAlias = tuple[
+    type _FastFrame = tuple[
         list[Node],  # parentNodes
         str,  # name
         str | None,  # tag
@@ -42,7 +44,7 @@ if t.TYPE_CHECKING:
         int,  # blockTokIdx (token index within chunk if blockEnd >= 0)
     ]
 
-    _GenFrame: t.TypeAlias = tuple[
+    type _GenFrame = tuple[
         list[Node],  # parentNodes
         int,  # nodeStart
         int,  # nameEnd
@@ -84,15 +86,21 @@ _NATIVE_TAGS = converters.NATIVE_TAGS
 _UNSET = t.UNSET
 _lengthHint = operator.length_hint
 
+_ISIZE_LIMIT = sys.maxsize + 1
+
 _INT_TAG_BOUNDS: dict[str, tuple[int, int]] = {
     "i8": (-(2**7), 2**7),
     "i16": (-(2**15), 2**15),
     "i32": (-(2**31), 2**31),
     "i64": (-(2**63), 2**63),
+    "i128": (-(2**127), 2**127),
     "u8": (0, 2**8),
     "u16": (0, 2**16),
     "u32": (0, 2**32),
     "u64": (0, 2**64),
+    "u128": (0, 2**128),
+    "isize": (-_ISIZE_LIMIT, _ISIZE_LIMIT),
+    "usize": (0, 2 * _ISIZE_LIMIT),
 }
 
 _SIMPLE_ESCAPES: dict[str, str] = {
@@ -111,13 +119,13 @@ _SIMPLE_ESCAPES: dict[str, str] = {
 # The trailing `(?s:.+)` in `fallback` stops `findall` immediately on any complex/error byte
 # and lets us compute its exact offset in O(1) as `endPos - len(fb)`.
 _TOK_RE = re.compile(
-    rf" (?:"
-    rf"({_ID_EQ})=({_DEC}(?![.eExob])|(?:true|false|null)(?!{_ID_CH})|{_QSTR}|{_RADIX})"
-    rf"|(\{{|{_QSTR}(?!=)|{_DEC}(?![.eExob])|\({_ID_EQ}\)(?:{_QSTR}|{_DEC}(?![.eExob]))"
-    rf"|{_RAW}|{_SLASH}|\}}|\\[ \t]*\n[ \t]*(?= )|{_RADIX}|{_ID_END})"
-    rf")"
-    rf"|\n(?:[ \t]*(?://[^{_NL_RE}]*)?\n)*[ \t]*(\}}|{_ID_END}|/- {_ID_END}|\({_ID_EQ}\){_ID_END}|)"
-    rf"|(\{{|;|(?s:.+))",
+    r" (?:"
+    + rf"({_ID_EQ})=({_DEC}(?![.eExob])|(?:true|false|null)(?!{_ID_CH})|{_QSTR}|{_RADIX})"
+    + rf"|(\{{|{_QSTR}(?!=)|{_DEC}(?![.eExob])|\({_ID_EQ}\)(?:{_QSTR}|{_DEC}(?![.eExob]))"
+    + rf"|{_RAW}|{_SLASH}|\}}|\\[ \t]*\n[ \t]*(?= )|{_RADIX}|{_ID_END})"
+    + r")"
+    + rf"|\n(?:[ \t]*(?://[^{_NL_RE}]*)?\n)*[ \t]*(\}}|{_ID_END}|/- {_ID_END}|\({_ID_EQ}\){_ID_END}|)"
+    + r"|(\{|;|(?s:.+))",
 )
 _tokFindall = _TOK_RE.findall
 _tokFinditer = _TOK_RE.finditer
@@ -133,29 +141,30 @@ _ipv6Cls = ipaddress.IPv6Address
 _urlparse = urllib.parse.urlparse
 _uuidCls = uuid.UUID
 _reCompile = re.compile
+_a85decode = base64.a85decode
 _b64decode = base64.b64decode
 _decCls = decimal.Decimal
 
 # Exact regex matchers for fallback, tiny docs, and custom-converter path
 _matchNodeHead = re.compile(
     rf"(?:[{_WS_RE}{_NL_RE}]+|//[^{_NL_RE}]*)*(?:"
-    rf"({_BARE_CORE})"  # 1: bare node name
-    rf'|"([^"\\]*)"'  # 2: plain quoted node name
-    rf"|(\}})"  # 3: closing brace
-    rf"|(/-)"  # 4: slashdash
-    rf"|(\()"  # 5: tag start
-    rf"|(/\*)"  # 6: block comment
-    rf'|(")'  # 7: escaped/unclosed quoted node name
-    rf'|(r#*")'  # 8: raw string node name
-    rf")?",
+    + rf"({_BARE_CORE})"  # 1: bare node name
+    + r'|"([^"\\]*)"'  # 2: plain quoted node name
+    + r"|(\})"  # 3: closing brace
+    + r"|(/-)"  # 4: slashdash
+    + r"|(\()"  # 5: tag start
+    + r"|(/\*)"  # 6: block comment
+    + r'|(")'  # 7: escaped/unclosed quoted node name
+    + r'|(r#*")'  # 8: raw string node name
+    + r")?",
 ).match
 
 _matchEntry = re.compile(
-    rf"(?:"
-    rf'({_BARE_PROP_KEY})(?:=(?:"([^"\\]*)"|({_DEC})(?![.eExob])|(true|false|null)(?!{_ID_CH})|()))?'
-    rf'|"([^"\\]*)"(?!=)'
-    rf"|({_DEC})(?![.eExob])"
-    rf")",
+    r"(?:"
+    + rf'({_BARE_PROP_KEY})(?:=(?:"([^"\\]*)"|({_DEC})(?![.eExob])|(true|false|null)(?!{_ID_CH})|()))?'
+    + r'|"([^"\\]*)"(?!=)'
+    + rf"|({_DEC})(?![.eExob])"
+    + r")",
 ).match
 
 _matchBareIdent = re.compile(_BARE_CORE).match
@@ -251,19 +260,28 @@ def _skipNodespace(s: Stream, start: int) -> int:
     chars = s.chars
     n = s.length
     i = start
+    nlSet = _NL_SET
     while i < n:
         i = _skipWhitespace(s, i)
         if i >= n or chars[i] != "\\":
             return i
         j = _skipWhitespace(s, i + 1)
-        if j < n and chars[j] == "\n":
-            i = j + 1
-            continue
-        if j + 1 < n and chars[j] == "/" and chars[j + 1] == "/":
-            m = _matchSingleLineComment(chars, j)
-            assert m is not None
-            i = m.end()
-            continue
+        if j < n:
+            ch = chars[j]
+            if ch == "\n":
+                i = j + 1
+                continue
+            if ch == "\r":
+                i = j + 2 if (j + 1 < n and chars[j + 1] == "\n") else j + 1
+                continue
+            if ch in nlSet:
+                i = j + 1
+                continue
+            if ch == "/" and j + 1 < n and chars[j + 1] == "/":
+                m = _matchSingleLineComment(chars, j)
+                assert m is not None
+                i = m.end()
+                continue
         return i
     return i
 
@@ -412,13 +430,16 @@ def _decimalFromStr(raw: str) -> Decimal:
     ePos = raw.find("e")
     if ePos == -1:
         ePos = raw.find("E")
-    if ePos == -1:
-        mantissa: int | float = float(raw) if "." in raw else int(raw, 10)
-        return Decimal(mantissa, 0)
-    mantStr = raw[:ePos]
-    expVal = int(raw[ePos + 1 :], 10)
-    mantissa = float(mantStr) if "." in mantStr else int(mantStr, 10)
-    return Decimal(mantissa, expVal)
+    try:
+        if ePos == -1:
+            mantissa: int | float = float(raw) if "." in raw else int(raw, 10)
+            return Decimal(mantissa, 0)
+        mantStr = raw[:ePos]
+        expVal = int(raw[ePos + 1 :], 10)
+        mantissa = float(mantStr) if "." in mantStr else int(mantStr, 10)
+        return Decimal(mantissa, expVal)
+    except ValueError:
+        return Decimal(_floatFromDecStr(raw), 0)
 
 
 def _floatFromDecStr(raw: str) -> float:
@@ -429,7 +450,7 @@ def _floatFromDecStr(raw: str) -> float:
         ePos = raw.find("e")
         if ePos == -1:
             ePos = raw.find("E")
-        if ePos == -1 or int(raw[:ePos], 10) == 0:
+        if ePos == -1 or not raw[:ePos].strip("+-0"):
             return 0.0
     return fval
 
@@ -502,75 +523,97 @@ def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.
     mantStr = mDec.group(1)
     if "_" in mantStr:
         mantStr = mantStr.replace("_", "")
-    mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
     expStr = mDec.group(2)
-    if expStr is None:
-        return (Decimal(mantissa, 0), end)
-    if "_" in expStr:
-        expStr = expStr.replace("_", "")
-    return (Decimal(mantissa, int(expStr, 10)), end)
+    try:
+        mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
+        if expStr is None:
+            return (Decimal(mantissa, 0), end)
+        if "_" in expStr:
+            expStr = expStr.replace("_", "")
+        return (Decimal(mantissa, int(expStr, 10)), end)
+    except ValueError:
+        return (Decimal(_floatFromDecStr(mDec.group()), 0), end)
 
 
 def _convertTaggedStringFast(tag: str, text: str) -> t.Any:
-    if tag == "date":
-        try:
-            return _dateFromIso(text)
-        except ValueError:
-            return _UNSET
-    if tag == "ipv4":
-        try:
-            return _ipv4Cls(text)
-        except ipaddress.AddressValueError:
-            return _UNSET
-    if tag == "url":
-        try:
-            return _urlparse(text)
-        except ValueError:
-            return _UNSET
-    if tag == "date-time":
-        try:
-            return _dtFromIso(text)
-        except ValueError:
-            return _UNSET
-    if tag == "time":
-        try:
-            return _timeFromIso(text)
-        except ValueError:
-            return _UNSET
-    if tag == "ipv6":
-        try:
-            return _ipv6Cls(text)
-        except ipaddress.AddressValueError:
-            return _UNSET
-    if tag == "uuid":
-        try:
-            return _uuidCls(text)
-        except Exception:
-            return _UNSET
-    if tag == "regex":
-        try:
-            return _reCompile(text)
-        except Exception:
-            return _UNSET
-    if tag == "base64":
-        try:
-            return _b64decode(text.encode("utf-8"), validate=True)
-        except Exception:
-            return _UNSET
-    if tag == "decimal":
-        try:
-            return _decCls(text)
-        except decimal.InvalidOperation:
-            return _UNSET
-    return String(text, tag)
+    match tag:
+        case "date":
+            try:
+                return _dateFromIso(text)
+            except ValueError:
+                return _UNSET
+        case "ipv4":
+            try:
+                return _ipv4Cls(text)
+            except ipaddress.AddressValueError:
+                return _UNSET
+        case "url" | "url-reference" | "irl" | "irl-reference":
+            try:
+                return _urlparse(text)
+            except ValueError:
+                return _UNSET
+        case "date-time":
+            try:
+                return _dtFromIso(text)
+            except ValueError:
+                return _UNSET
+        case "time":
+            try:
+                return _timeFromIso(text)
+            except ValueError:
+                return _UNSET
+        case "ipv6":
+            try:
+                return _ipv6Cls(text)
+            except ipaddress.AddressValueError:
+                return _UNSET
+        case "uuid":
+            try:
+                return _uuidCls(text)
+            except ValueError:
+                return _UNSET
+        case "regex":
+            try:
+                return _reCompile(text)
+            except re.error:
+                return _UNSET
+        case "base64":
+            try:
+                return _b64decode(text.encode("utf-8"), validate=True)
+            except (binascii.Error, ValueError):
+                return _UNSET
+        case "base85":
+            try:
+                return _a85decode(text.encode("utf-8"), adobe=text.startswith("<~") and text.endswith("~>"))
+            except ValueError:
+                return _UNSET
+        case "decimal":
+            try:
+                return _decCls(text)
+            except decimal.InvalidOperation:
+                return _UNSET
+        case _:
+            return String(text, tag)
 
 
 def _convertTaggedDecFast(tag: str, raw: str) -> t.Any:
     bounds = _INT_TAG_BOUNDS.get(tag)
     if bounds is not None:
-        fval = _floatFromDecStr(raw)
-        if bounds[0] <= fval < bounds[1]:
-            return int(fval)
+        cleaned = raw.replace("_", "") if "_" in raw else raw
+        if "." not in cleaned and "e" not in cleaned and "E" not in cleaned:
+            try:
+                iv = int(cleaned, 10)
+            except ValueError:
+                return _UNSET
+            if bounds[0] <= iv < bounds[1]:
+                return iv
+            return _UNSET
+        try:
+            dv = _decCls(cleaned)
+        except decimal.InvalidOperation:
+            return _UNSET
+        if dv.is_finite() and dv == dv.to_integral_value() and bounds[0] <= dv < bounds[1]:
+            return int(dv)
         return _UNSET
     if tag in ("f32", "f64"):
         return _floatFromDecStr(raw)
@@ -593,7 +636,7 @@ def _finalizeValue(s: Stream, val: Value, tag: str | None, valStart: int, valEnd
         for key, converter in valueConverters.items():
             if val.matchesKey(key):
                 if pf is None:
-                    pf = ParseFragment(s.chars[valStart:valEnd], s, valEnd)
+                    pf = ParseFragment(s.chars[valStart:valEnd], s, valStart)
                 converted = converter(val, pf)
                 if converted == NotImplemented:
                     continue
@@ -2654,8 +2697,7 @@ def _parseDirect(s: Stream) -> Document:
 
 
 def parse(input: str, config: t.ParseConfig | None = None) -> Document:
-    if config is None:
-        config = parsing.defaults
+    config = config or parsing.defaults
     s = Stream(input, config)
     if s.length > 128 and not config.valueConverters and not config.nodeConverters:
         if config.nativeUntaggedValues:

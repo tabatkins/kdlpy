@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
+import decimal
+import io
 import ipaddress
 import math
 import os
+import re
 import sys
+import tempfile
 import typing as t
+import urllib.parse
 
 # Force the local kdl module into the environment
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import kdl
-from kdl import kdl1
+import kdl  # pylint: disable=wrong-import-position
+from kdl import kdl1  # pylint: disable=wrong-import-position
 
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 V1_TEST_DIR = os.path.join(THIS_DIR, "upstream_tests_v1", "test_cases", "input")
@@ -128,7 +134,7 @@ def runV1UpstreamSuite(verbose: int) -> tuple[int, int, list[str]]:
             if verbose >= 2:
                 print(
                     f"KDL2 roundtrip mismatch in {filename}:\n  printed: {v1Doc.print(printCfg)!r}\n"
-                    f"  rawPrinted: {v1Doc.print()!r}",
+                    + f"  rawPrinted: {v1Doc.print()!r}",
                 )
             continue
         good += 1
@@ -293,6 +299,24 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         ),
         ("mid_doc_bom", 'node \ufeff"x"\n', lambda d: _assert(d.nodes[0].args == ["x"])),
         ("double_leading_bom", '\ufeff\ufeffnode "x"\n', lambda d: _assert(d.nodes[0].name == "node")),
+        ("comment_bom", "// comment\ufeff\nnode 1\n", lambda d: _assert(d.nodes[0].args == [1.0])),
+        ("string_bom", 'node "a\ufeffb"\n', lambda d: _assert(d.nodes[0].args == ["a\ufeffb"])),
+        ("slashdash_hash_node", "/- #node 1\nok 2\n", lambda d: _assert(len(d.nodes) == 1 and d.nodes[0].name == "ok")),
+        ("slashdash_dot_node", "/- .0 1\nok 2\n", lambda d: _assert(len(d.nodes) == 1 and d.nodes[0].name == "ok")),
+        (
+            "slashdash_hash_tag_node",
+            "/- (#tag)node 1\nok 2\n",
+            lambda d: _assert(len(d.nodes) == 1 and d.nodes[0].name == "ok"),
+        ),
+        (
+            "slashdash_dot_tag_node",
+            "/- (.0)node 1\nok 2\n",
+            lambda d: _assert(len(d.nodes) == 1 and d.nodes[0].name == "ok"),
+        ),
+        ("slashdash_dot_prop", "node /- .0=1 2\n", lambda d: _assert(d.nodes[0].args == [2.0])),
+        ("slashdash_bare_hash_prop", "node /- #=1 2\n", lambda d: _assert(d.nodes[0].args == [2.0])),
+        ("slashdash_hash_tag_arg", "node /- (#tag)1 2\n", lambda d: _assert(d.nodes[0].args == [2.0])),
+        ("slashdash_dot_tag_arg", "node /- (.0)1 2\n", lambda d: _assert(d.nodes[0].args == [2.0])),
     ]
 
     for name, src, verify in kdl1FallbackCases:
@@ -427,7 +451,8 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
             # Should be the KDL1 ParseError ("Junk after node, before terminator.")
             _assert("Junk after node" in err.msg, f"Expected KDL1 error, got: {err.msg}")
             return
-        raise AssertionError("Expected ParseError for KDL2 syntax under /- kdl-version 1")
+        msg = "Expected ParseError for KDL2 syntax under /- kdl-version 1"
+        raise AssertionError(msg)
 
     def _testMarkerV1BrokenRawStringRaisesV1Error() -> None:
         try:
@@ -435,7 +460,8 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         except kdl.ParseError as err:
             _assert("raw string" in err.msg, f"Expected KDL1 raw string error, got: {err.msg}")
             return
-        raise AssertionError("Expected ParseError")
+        msg = "Expected ParseError"
+        raise AssertionError(msg)
 
     def _testMarkerV2DisablesFallback() -> None:
         calls, restore = _spyKdl1Parse()
@@ -473,7 +499,8 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
             kdl.parse("node 1\n", kdl.ParseConfig(version=t.cast("t.Any", 3)))
         except ValueError:
             return
-        raise AssertionError("Expected ValueError for invalid version")
+        msg = "Expected ValueError for invalid version"
+        raise AssertionError(msg)
 
     # 4. Error selection when opportunistic fallback also fails
     def _testFallbackFailureReraisesV2Error() -> None:
@@ -489,7 +516,8 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
                 _assert(err.line == 2, f"Expected KDL2 error on line 2, got line {err.line}: {err.msg}")
                 _assert("confusable with keywords" in err.msg, f"Expected KDL2 message, got: {err.msg}")
                 return
-            raise AssertionError("Expected ParseError for mixed KDL2/KDL1 doc")
+            msg = "Expected ParseError for mixed KDL2/KDL1 doc"
+            raise AssertionError(msg)
         finally:
             restore()
 
@@ -502,7 +530,8 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
                 _assert(calls[0] == 1, f"Expected 1 KDL1 call, got {calls[0]}")
                 _assert("Expected a node terminator" in err.msg, f"Expected KDL2 error, got: {err.msg}")
                 return
-            raise AssertionError("Expected ParseError")
+            msg = "Expected ParseError"
+            raise AssertionError(msg)
         finally:
             restore()
 
@@ -542,8 +571,8 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         parser = kdl.Parser(cfg, printCfg)
         doc = parser.parse(
             '(wrap)item true (date)"2026-11-19" (ipv4)"10.0.0.1" (f64)1.5 (custom)"hi" (skip)"keep" '
-            'dup=1 dup=2 /- (custom)"ignored"\n'
-            "/- kdl-version 1\n",
+            + 'dup=1 dup=2 /- (custom)"ignored"\n'
+            + "/- kdl-version 1\n",
         )
         _assert(doc.printConfig is printCfg)
         _assert(len(doc.nodes) == 1)
@@ -579,6 +608,363 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         )
         _assert(doc.print(kdl.PrintConfig(sortProperties=True)) == "n #null 1.0 #null a=#null b=2.0 c=3.0\n")
 
+    def _testDisallowedLiteralCodepoints() -> None:
+        v2Cfg = kdl.ParseConfig(version=2)
+        cases = [
+            'node "a\x00b"\n',
+            'node "a\x7fb"\n',
+            'node "a\u202eb"\n',
+            'node "a\ufeffb"\n',
+            'node #"a\x00b"#\n',
+            'node #"a\ufeffb"#\n',
+            'node """\na\x00b\n"""\n',
+            'node #"""\na\u202eb\n"""#\n',
+            "node // comment\x00here\n",
+            "node \\ // comment\x00here\n 1\n",
+            "node /* block\x00comment */\n",
+            "node /* block\ufeffcomment */\n",
+        ]
+        for src in cases:
+            raised = False
+            try:
+                kdl.parse(src, v2Cfg)
+            except kdl.ParseError:
+                raised = True
+            _assert(raised, f"Expected ParseError for disallowed codepoint in {src!r}")
+
+    def _testDecimalSciMantissaAndOverflow() -> None:
+        rawCfg = kdl.ParseConfig(nativeUntaggedValues=False)
+        d1 = kdl.parse("n 0.00001e3\n", rawCfg)
+        _assert(d1.print() == "n 1e-2\n", f"Got {d1.print()!r}")
+        _assert(d1.nodes[0].args[0].value == 0.01)
+        _assert(kdl.parse("n (f64)0.00001e3\n").nodes[0].args[0] == 0.01)
+        d2 = kdl.parse("n 10000000000000000.0e5\n", rawCfg)
+        _assert(d2.print() == "n 1e+21\n", f"Got {d2.print()!r}")
+        _assert(d2.nodes[0].args[0].value == 1e21)
+        d3 = kdl.parse("n 0.00001\n", rawCfg)
+        _assert(
+            d3.print(kdl.PrintConfig(exponent="E")) == "n 1E-5\n",
+            f"Got {d3.print(kdl.PrintConfig(exponent='E'))!r}",
+        )
+        _assert(math.isinf(kdl.Decimal(10**400).value))
+        _assert(kdl.Decimal(float("nan")).print() == "#nan")
+        _assert(kdl.Decimal(float("inf"), 2).print() == "#inf")
+        # Negative zero underflow parity between native and raw Decimal
+        negUnder = kdl.parse("n -1e-500\n").nodes[0].args[0]
+        _assert(negUnder == 0.0 and math.copysign(1.0, negUnder) == -1.0)
+        # Enormous integers (> 4300 digits) fall back to float cleanly instead of raising ValueError
+        big = "9" * 5000
+        bigDoc = kdl.parse(f"n {big} -{big} {'0' * 5000} -{'0' * 5000} 1{'0' * 5000}e-5000 1e{big} 1e-{big}\n", rawCfg)
+        bigArgs = bigDoc.nodes[0].args
+        _assert(bigArgs[0].value == float("inf") and bigArgs[0].print() == "#inf")
+        _assert(bigArgs[1].value == float("-inf") and bigArgs[1].print() == "#-inf")
+        _assert(bigArgs[2].value == 0.0 and math.copysign(1.0, bigArgs[2].value) == 1.0)
+        _assert(bigArgs[3].value == 0.0 and math.copysign(1.0, bigArgs[3].value) == 1.0)
+        _assert(bigArgs[4].value == 1.0)
+        _assert(bigArgs[5].value == float("inf"))
+        _assert(bigArgs[6].value == 0.0)
+        # Native huge underflow and huge tagged decimals/ints
+        bigUnder = kdl.parse(f"n -1{'0' * 5000}e-6000\n").nodes[0].args[0]
+        _assert(bigUnder == 0.0 and math.copysign(1.0, bigUnder) == -1.0)
+        _assert(kdl.parse(f"n (decimal64){big}\n").nodes[0].args[0] == decimal.Decimal(big))
+        _assert(kdl.parse(f"n (u64){'0' * 5000}42\n").nodes[0].args[0] == 42)
+        hugeHexDoc = kdl.parse(f"n 0x{'f' * 5000}\n", rawCfg)
+        _assert(hugeHexDoc.print(kdl.PrintConfig(respectRadix=False)) == "n #inf\n")
+        _assert(kdl.parse(f"n 0x{'f' * 5000}\n").print() == "n #inf\n")
+        _assert(kdl.parse(f"n (f64)0x{'f' * 5000}\n").nodes[0].args[0] == float("inf"))
+        _assert(kdl.parse(f"n (f64)-0x{'f' * 5000}\n").nodes[0].args[0] == float("-inf"))
+        # Also verify KDL1 direct and chunked paths on enormous integers
+        pad = "// " + ("x" * 140) + "\n"
+        for src in (f"n {big} 1e{big}\n", f"{pad}n {big} 1e{big}\n"):
+            dV1 = kdl.parse(src, kdl.ParseConfig(version=1, nativeUntaggedValues=False))
+            _assert(dV1.nodes[0].args[0].value == float("inf") and dV1.nodes[0].args[1].value == float("inf"))
+        for cfg in (kdl.ParseConfig(version=2), kdl.ParseConfig(version=1)):
+            for src in (f"{pad}n (u64){big}\n", f"{pad}n (u64)0x{'f' * 5000}\n"):
+                raised = False
+                try:
+                    kdl.parse(src, cfg)
+                except kdl.ParseError:
+                    raised = True
+                _assert(raised, f"Expected ParseError for {src[:30]!r} under {cfg}")
+
+    def _testIntAndDecimalConverters() -> None:
+        u64Max = (2**64) - 1
+        i64Max = (2**63) - 1
+        i64Min = -(2**63)
+        u128Max = (2**128) - 1
+        i128Max = (2**127) - 1
+        i128Min = -(2**127)
+        isizeMax = sys.maxsize
+        isizeMin = -(sys.maxsize + 1)
+        usizeMax = (2 * (sys.maxsize + 1)) - 1
+        aboveF64 = (2**53) + 1
+        _assert(kdl.parse(f"n (u64){u64Max}\n").nodes[0].args[0] == u64Max)
+        _assert(kdl.parse(f"n (i64){i64Max}\n").nodes[0].args[0] == i64Max)
+        _assert(kdl.parse(f"n (i64){i64Min}\n").nodes[0].args[0] == i64Min)
+        _assert(kdl.parse(f"n (u128){u128Max}\n").nodes[0].args[0] == u128Max)
+        _assert(kdl.parse(f"n (i128){i128Max}\n").nodes[0].args[0] == i128Max)
+        _assert(kdl.parse(f"n (i128){i128Min}\n").nodes[0].args[0] == i128Min)
+        _assert(kdl.parse(f"n (isize){isizeMax}\n").nodes[0].args[0] == isizeMax)
+        _assert(kdl.parse(f"n (isize){isizeMin}\n").nodes[0].args[0] == isizeMin)
+        _assert(kdl.parse(f"n (usize){usizeMax}\n").nodes[0].args[0] == usizeMax)
+        _assert(kdl.parse(f"n (i64){aboveF64}\n").nodes[0].args[0] == aboveF64)
+        _assert(kdl.parse(f"n (u64){u64Max}.0\n").nodes[0].args[0] == u64Max)
+        _assert(kdl.parse("n (i8)1.5e1\n").nodes[0].args[0] == 15)
+        _assert(kdl.parse("n (decimal64)0x10\n").nodes[0].args[0] == decimal.Decimal(16))
+        _assert(kdl.parse("n (decimal64)#inf\n").nodes[0].args[0] == decimal.Decimal("Infinity"))
+        # Additional reserved string tags: url-reference, irl, irl-reference, base85; unsupported stay kdl.String
+        _assert(
+            kdl.parse('n (url-reference)"/a/b?x=1#f"\n').nodes[0].args[0] == urllib.parse.urlparse("/a/b?x=1#f"),
+        )
+        _assert(
+            kdl.parse('n (irl)"https://例え.jp/パス"\n').nodes[0].args[0]
+            == urllib.parse.urlparse("https://例え.jp/パス"),
+        )
+        _assert(
+            kdl.parse('n (irl-reference)"/パス?q=値"\n').nodes[0].args[0] == urllib.parse.urlparse("/パス?q=値"),
+        )
+        _assert(kdl.parse('n (base85)"BOu!rDZ"\n').nodes[0].args[0] == b"hello")
+        _assert(kdl.parse('n (base85)"<~BOu!rDZ~>"\n').nodes[0].args[0] == b"hello")
+        for unsup in ("duration", "currency", "country-2", "email", "hostname", "url-template"):
+            v = kdl.parse(f'n ({unsup})"val"\n').nodes[0].args[0]
+            _assert(isinstance(v, kdl.String) and v.tag == unsup and v.value == "val")
+        # Out-of-range huge int and fractional values must raise ParseError, not OverflowError or truncate
+        for src in (
+            f"n (u64){u64Max + 1}\n",
+            f"n (i64){i64Max + 1}\n",
+            f"n (u128){u128Max + 1}\n",
+            f"n (i128){i128Max + 1}\n",
+            f"n (i128){i128Min - 1}\n",
+            f"n (isize){isizeMax + 1}\n",
+            f"n (isize){isizeMin - 1}\n",
+            f"n (usize){usizeMax + 1}\n",
+            "n (usize)-1\n",
+            'n (base85)"~~~bad~~~"\n',
+            f"n (i64){'9' * 400}\n",
+            "n (u64)1e1000\n",
+            "n (i8)1.5\n",
+            "n (i8)-1.5\n",
+            "n (u8)1e-1\n",
+            f"n (u64){u64Max}.5\n",
+            "n (u8)1e-10000000000000000000\n",
+            "n (u8)#inf\n",
+            "n (u8)#nan\n",
+        ):
+            raised = False
+            try:
+                kdl.parse(src)
+            except kdl.ParseError:
+                raised = True
+            _assert(raised, f"Expected ParseError for {src!r}")
+        # Also verify KDL1 chunked (> 128 chars) and direct paths
+        pad = "// " + ("x" * 140) + "\n"
+        _assert(kdl.parse(f"{pad}n (u64){u64Max}\n", kdl.ParseConfig(version=1)).nodes[0].args[0] == u64Max)
+        _assert(kdl.parse(f"{pad}n (u128){u128Max}\n", kdl.ParseConfig(version=1)).nodes[0].args[0] == u128Max)
+        _assert(kdl.parse(f"{pad}n (isize){isizeMin}\n", kdl.ParseConfig(version=1)).nodes[0].args[0] == isizeMin)
+        _assert(kdl.parse(f"{pad}n (i64){aboveF64}\n", kdl.ParseConfig(version=1)).nodes[0].args[0] == aboveF64)
+        _assert(kdl.parse(f'{pad}n (base85)"BOu!rDZ"\n', kdl.ParseConfig(version=1)).nodes[0].args[0] == b"hello")
+        _assert(
+            kdl.parse(f'{pad}n (url-reference)"/a"\n', kdl.ParseConfig(version=1)).nodes[0].args[0]
+            == urllib.parse.urlparse("/a"),
+        )
+        for src in ("n (i8)1.5\n", f"{pad}n (i8)1.5\n", f"{pad}n (u8)1e-1\n"):
+            raised = False
+            try:
+                kdl.parse(src, kdl.ParseConfig(version=1))
+            except kdl.ParseError:
+                raised = True
+            _assert(raised, f"Expected KDL1 ParseError for {src!r}")
+        # Converter error locations must point to the start of the value (not end)
+        for src, expectedLoc in (
+            ("node (u8)999\n", (1, 10)),
+            ('node (date)"""\nnot-a-date\n"""\n', (1, 12)),
+            ('node (uuid)"bad"\n', (1, 12)),
+            ('node (regex)"[unclosed"\n', (1, 13)),
+            ('node (base64)"***"\n', (1, 14)),
+        ):
+            try:
+                kdl.parse(src)
+                msg = f"Expected ParseError for {src!r}"
+                raise AssertionError(msg)
+            except kdl.ParseError as err:
+                _assert(
+                    (err.line, err.col) == expectedLoc,
+                    f"Expected {expectedLoc} for {src!r}, got {(err.line, err.col)}: {err.msg}",
+                )
+
+        def failConv(_val: kdl.Value, pf: kdl.ParseFragment) -> t.Any:
+            msg = "custom fail"
+            raise pf.error(msg)
+
+        for cfg in (
+            kdl.ParseConfig(version=2, valueConverters={"bad": failConv}),
+            kdl.ParseConfig(version=1, valueConverters={"bad": failConv}),
+        ):
+            try:
+                kdl.parse('node (bad)"abc"\n', cfg)
+                msg = f"Expected ParseError for version={cfg.version}"
+                raise AssertionError(msg)
+            except kdl.ParseError as err:
+                _assert(
+                    (err.line, err.col) == (1, 11),
+                    f"Expected (1, 11) for version={cfg.version}, got {(err.line, err.col)}",
+                )
+
+    def _testStringEscapingAndRawRoundtrip() -> None:
+        v2Cfg = kdl.ParseConfig(version=2)
+        for ch in ("\x0b", "\x85", "\u2028", "\u2029", "\x00", "\x1f", "\x7f", "\u202e", "\ufeff"):
+            val = f"a{ch}b"
+            for item in (val, kdl.RawString(val)):
+                printed = kdl.Document([kdl.Node("n", args=[item])]).print()
+                reparsed = kdl.parse(printed, v2Cfg)
+                _assert(reparsed.nodes[0].args[0] == val, f"Roundtrip failed for {item!r}: {printed!r}")
+        manyHashes = 'a"' + ("#" * 120) + "b"
+        printedRaw = kdl.Document([kdl.Node("n", args=[kdl.RawString(manyHashes)])]).print()
+        _assert(kdl.parse(printedRaw, v2Cfg).nodes[0].args[0] == manyHashes)
+        # Bytes regex patterns cannot be serialized as KDL strings
+        raised = False
+        try:
+            kdl.Node("n", args=[re.compile(b"abc")]).print()
+        except TypeError:
+            raised = True
+        _assert(raised, "Expected TypeError serializing bytes re.Pattern")
+        # Regex patterns with inline flags round-trip cleanly; external non-default flags raise ValueError
+        for pat in (re.compile("foo"), re.compile("foo", re.UNICODE), re.compile("(?i)foo"), re.compile("(?a)foo")):
+            printedPat = kdl.Document([kdl.Node("n", args=[pat])]).print()
+            reparsedPat = kdl.parse(printedPat, v2Cfg).nodes[0].args[0]
+            _assert(reparsedPat == pat, f"Regex roundtrip mismatch for {pat!r}: {printedPat!r} -> {reparsedPat!r}")
+        for badPat in (
+            re.compile("foo", re.IGNORECASE),
+            re.compile("foo", re.ASCII),
+            re.compile("(?i)foo", re.MULTILINE),
+        ):
+            raised = False
+            try:
+                kdl.Node("n", args=[badPat]).print()
+            except ValueError:
+                raised = True
+            _assert(raised, f"Expected ValueError serializing {badPat!r}")
+
+    def _testTypeErrorsForInvalidKeysAndObjects() -> None:
+        class BadToKdl:
+            def to_kdl(self) -> object:
+                return object()
+
+        badChecks: list[tuple[str, t.Callable[[], t.Any]]] = [
+            ("unserializable_val", lambda: kdl.Node("n", args=[object()]).print()),
+            ("bad_val_to_kdl", lambda: kdl.Node("n", args=[BadToKdl()]).print()),
+            ("unserializable_node", lambda: kdl.Document([t.cast("kdl.Node", object())]).print()),
+            ("bad_node_to_kdl", lambda: kdl.Document([t.cast("kdl.Node", BadToKdl())]).print()),
+            ("node_matches_non_node", lambda: kdl.nodeMatchesKey(object(), "a")),
+            ("node_matches_bad_to_kdl", lambda: kdl.nodeMatchesKey(BadToKdl(), "a")),
+            ("node_key_tuple_short", lambda: kdl.nodeMatchesKey(kdl.Node("a"), t.cast("t.Any", ("a",)))),
+            ("node_key_tuple_long", lambda: kdl.nodeMatchesKey(kdl.Node("a"), t.cast("t.Any", ("t", "a", "x")))),
+            ("value_key_tuple_short", lambda: kdl.valueMatchesKey(kdl.String("a"), t.cast("t.Any", ("t",)))),
+            ("value_key_tuple_long", lambda: kdl.valueMatchesKey(kdl.String("a"), t.cast("t.Any", ("t", str, "x")))),
+            ("invalid_tag_key", lambda: kdl.tagMatchesKey("a", t.cast("t.Any", 123))),
+            ("invalid_name_key", lambda: kdl.nameMatchesKey("a", t.cast("t.Any", 123))),
+            ("invalid_type_key", lambda: kdl.typeMatchesKey("a", t.cast("t.Any", 123))),
+        ]
+        for label, fn in badChecks:
+            raised = False
+            try:
+                fn()
+            except TypeError:
+                raised = True
+            _assert(raised, f"Expected TypeError for {label}")
+
+        for badInf in (0.0, 1.0, float("nan")):
+            raised = False
+            try:
+                kdl.Infinity(badInf)
+            except ValueError:
+                raised = True
+            _assert(raised, f"Expected ValueError for Infinity({badInf!r})")
+        _assert(kdl.Infinity(float("inf")).print() == "#inf")
+        _assert(kdl.Infinity(float("-inf")).print() == "#-inf")
+        for badNan in (0.0, 1.0, float("inf"), float("-inf")):
+            raised = False
+            try:
+                kdl.NaN(badNan)
+            except ValueError:
+                raised = True
+            _assert(raised, f"Expected ValueError for NaN({badNan!r})")
+        _assert(kdl.NaN().print() == "#nan")
+        _assert(kdl.NaN(float("nan")).print() == "#nan")
+
+    def _testCustomNodeGetItem() -> None:
+        class CustomNode:
+            def to_kdl(self) -> kdl.Node:
+                return kdl.Node("custom", args=[42])
+
+        custom = CustomNode()
+        doc = kdl.Document([t.cast("kdl.Node", custom)])
+        _assert(doc["custom"] is custom)
+        _assert(doc.get("custom") is custom)
+        parent = kdl.Node("p", nodes=[t.cast("kdl.Node", custom)])
+        _assert(parent["custom"] is custom)
+        _assert(parent.get("custom") is custom)
+
+    def _testKdl1CrlfEscline() -> None:
+        v1Cfg = kdl.ParseConfig(version=1)
+        pad = "// " + ("x" * 140) + "\n"
+        for src in ("node 1 \\\r\n 2\n", "node 1 \\\r 2\n", pad + "node 1 \\\r\n 2\n"):
+            doc = kdl.parse(src, v1Cfg)
+            _assert(doc.nodes[0].args == [1.0, 2.0], f"Unexpected args for {src!r}: {doc.nodes[0].args!r}")
+
+    def _testStreamLocCr() -> None:
+        sCr = kdl.stream.Stream("a\rb\rc", kdl.ParseConfig())
+        _assert([sCr.loc(i) for i in range(5)] == [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1)])
+        sCrlf = kdl.stream.Stream("a\r\nb", kdl.ParseConfig())
+        _assert(sCrlf.loc(0) == (1, 1) and sCrlf.loc(3) == (2, 1))
+        _assert(sCr.loc(-5) == (1, 1))
+
+    def _testCliInPlaceAndParseError() -> None:
+        origArgv = sys.argv
+        with tempfile.TemporaryDirectory() as tmpDir:
+            path = os.path.join(tmpDir, "in.kdl")
+            outPath = os.path.join(tmpDir, "out.kdl")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('node  "hello"  b=2 a=1\n')
+            try:
+                sys.argv = ["kdlreformat", "--sort-properties", path, path]
+                kdl.cli()
+            finally:
+                sys.argv = origArgv
+            with open(path, encoding="utf-8") as fh:
+                _assert(fh.read() == "node hello a=1 b=2\n")
+
+            # --version 2 rejects KDL1 syntax with concise stderr + exit 1; --version 1 accepts it
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("node true\n")
+            with open(outPath, "w", encoding="utf-8") as fh:
+                fh.write("keep-me\n")
+            stderrBuf = io.StringIO()
+            exitCode: int | str | None = None
+            try:
+                sys.argv = ["kdlreformat", "--version", "2", path, outPath]
+                with contextlib.redirect_stderr(stderrBuf):
+                    kdl.cli()
+            except SystemExit as exc:
+                exitCode = exc.code
+            finally:
+                sys.argv = origArgv
+            _assert(exitCode == 1, f"Expected exit code 1, got {exitCode!r}")
+            _assert(
+                "ParseError:" in stderrBuf.getvalue(),
+                f"Expected ParseError on stderr, got {stderrBuf.getvalue()!r}",
+            )
+            with open(outPath, encoding="utf-8") as fh:
+                _assert(fh.read() == "keep-me\n", "outfile should not be truncated on parse error")
+
+            try:
+                sys.argv = ["kdlreformat", "--version", "1", path, outPath]
+                kdl.cli()
+            finally:
+                sys.argv = origArgv
+            with open(outPath, encoding="utf-8") as fh:
+                _assert(fh.read() == "node #true\n")
+
     extraChecks: list[tuple[str, t.Callable[[], None]]] = [
         ("marker_v1_direct", _testMarkerV1Direct),
         ("marker_v1_bom", _testMarkerV1Bom),
@@ -592,6 +978,15 @@ def runFallbackTests(verbose: int) -> tuple[int, int, list[str]]:
         ("broken_raw_fallback_reraises_v2", _testBrokenRawStringFallbackReraisesV2Error),
         ("config_converters_and_native_in_kdl1", _testConfigConvertersAndNativeTypesInKdl1),
         ("node_args_props_and_print_config", _testNodeArgsPropsAndPrintConfig),
+        ("disallowed_literal_codepoints", _testDisallowedLiteralCodepoints),
+        ("decimal_sci_mantissa_and_overflow", _testDecimalSciMantissaAndOverflow),
+        ("int_and_decimal_converters", _testIntAndDecimalConverters),
+        ("string_escaping_and_raw_roundtrip", _testStringEscapingAndRawRoundtrip),
+        ("type_errors_for_invalid_keys_and_objects", _testTypeErrorsForInvalidKeysAndObjects),
+        ("custom_node_getitem", _testCustomNodeGetItem),
+        ("kdl1_crlf_escline", _testKdl1CrlfEscline),
+        ("stream_loc_cr", _testStreamLocCr),
+        ("cli_inplace_and_parse_error", _testCliInPlaceAndParseError),
     ]
     for name, fn in extraChecks:
         check(name, fn)

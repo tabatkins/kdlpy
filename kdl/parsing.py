@@ -8,11 +8,13 @@ if t.TYPE_CHECKING:
     from .errors import ParseFragment
     from .types import Node, Value
 
-    ValueConverterT: t.TypeAlias = t.Callable[[Value, ParseFragment], t.Any]
-    NodeConverterT: t.TypeAlias = t.Callable[[Node, ParseFragment], t.Any]
+    type ValueConverterT = t.Callable[[Value, ParseFragment], t.Any]
+    type NodeConverterT = t.Callable[[Node, ParseFragment], t.Any]
 
 
 class Parser:
+    __slots__ = ("parseConfig", "printConfig")
+
     def __init__(
         self,
         parseConfig: ParseConfig | None = None,
@@ -27,7 +29,7 @@ class Parser:
         return doc
 
 
-@dataclass
+@dataclass(slots=True)
 class ParseConfig:
     nativeUntaggedValues: bool = True
     nativeTaggedValues: bool = True

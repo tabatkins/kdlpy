@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 
+from __future__ import annotations
+
 import argparse
 import os
 import pprint
 import sys
-from typing import Set, Tuple
 
 # Force the local kdl module into the environment
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import kdl
+import kdl  # pylint: disable=wrong-import-position
 
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 TEST_DIR = os.path.join(THIS_DIR, "upstream_tests", "test_cases", "input")
@@ -39,11 +40,11 @@ def main() -> bool:
             singleTestName = options.test
         else:
             singleTestName = options.test + ".kdl"
-        inputs = set([singleTestName])
-        if options.test.endswith("_fail"):
+        inputs = {singleTestName}
+        if singleTestName.endswith("_fail.kdl"):
             goldens = set()
         else:
-            goldens = set([singleTestName])
+            goldens = {singleTestName}
     else:
         inputs, goldens = findTestFiles()
 
@@ -73,7 +74,7 @@ def main() -> bool:
             else:
                 # FAILURE: unexpected parse failure
                 bad.append(filename)
-                if options.verbose == 2:
+                if options.verbose >= 2:
                     print(f"Unexpected parse failure in {filename}")
                     print(e)
                     print("Input:")
@@ -82,22 +83,11 @@ def main() -> bool:
                     print(goldenText)
                     print("================")
             continue
-        except Exception as e:
-            raise
-            # FAILURE: unexpected runtime error
-            bad.append(filename)
-            if options.verbose == 2:
-                print(f"BIG BAD: Internal error in {filename}")
-                print(e)
-                print("Input:")
-                print(inputText)
-                print("================")
-            continue
         # Successful parse!
         if goldenText is None:
             # FAILURE: successful parse, but should be a parse failure
             bad.append(filename)
-            if options.verbose == 2:
+            if options.verbose >= 2:
                 try:
                     print(f"Unexpected successful parse in {filename}.")
                     print("Input:")
@@ -107,8 +97,8 @@ def main() -> bool:
                     print("Doc:")
                     print(pprint.pformat(outputDoc))
                     print("================")
-                except Exception as e:
-                    print(f"While attempting to report an unexpected successful")
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    print("While attempting to report an unexpected successful")
                     print(f"parse in {filename}, encountered a Python error:")
                     print(e)
             continue
@@ -117,7 +107,7 @@ def main() -> bool:
             good.append(filename)
             continue
         bad.append(filename)
-        if options.verbose == 2:
+        if options.verbose >= 2:
             # FAILURE: successful parse, but didn't match golden
             print(f"Output didn't match golden in {filename}.")
             print("Input:")
@@ -135,20 +125,20 @@ def main() -> bool:
         return True
     else:
         print(f"Failure, {len(good)}/{len(inputs)} tests passed.")
-        if options.verbose == 1:
+        if options.verbose >= 1:
             for badfilename in bad:
                 print("* " + badfilename)
         return False
 
 
-def findTestFiles() -> Tuple[Set[str], Set[str]]:
+def findTestFiles() -> tuple[set[str], set[str]]:
     inputs = set()
     goldens = set()
-    for root, _, filenames in os.walk(TEST_DIR):
+    for _, _, filenames in os.walk(TEST_DIR):
         for filename in filenames:
             if os.path.splitext(filename)[1] == ".kdl":
                 inputs.add(filename)
-    for root, _, filenames in os.walk(GOLDEN_DIR):
+    for _, _, filenames in os.walk(GOLDEN_DIR):
         for filename in filenames:
             if os.path.splitext(filename)[1] == ".kdl":
                 goldens.add(filename)

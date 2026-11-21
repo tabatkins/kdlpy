@@ -1,6 +1,6 @@
 # KDL-py
 
-A handwritten Python 3.7+ implementation of a parser
+A handwritten Python 3.12+ implementation of a parser
 for the [KDL Document Language](https://kdl.dev),
 fully compliant with KDL 2.0.0,
 with automatic fallback support for parsing legacy KDL 1.0.0 documents
@@ -113,9 +113,11 @@ kdl-py automatically recognizes and correctly serializes the following objects:
 * `ipaddress.IPv4Address` and `ipaddress.IPv6Address`: as `(ipv4)` or `(ipv6)`-tagged strings
 * `urllib.parse.ParseResult` (the result of calling `urllib.parse.urlparse()`): as `(url)`-tagged string
 * `uuid.UUID`: as `(uuid)`-tagged string
-* `re.Pattern` (the result of calling `re.compile()`): as `(regex)`-tagged raw string (`#"..."#`)
+* `re.Pattern` (the result of calling `re.compile()` on a `str`): as `(regex)`-tagged raw string (`#"..."#`).
+	Must not have non-default external flags (such as `re.IGNORECASE` passed to `re.compile()`);
+	use inline flags in the pattern string (such as `(?i)`) instead, otherwise serialization raises a `ValueError`.
 
-All of the tags used above are reserved and predefined by the [KDL specification](https://github.com/kdl-org/kdl/blob/main/SPEC.md#reserved-type-annotations-for-numbers-without-decimals).
+All of the tags used above are reserved and predefined by the [KDL specification](https://github.com/kdl-org/kdl/blob/main/SPEC.md#type-annotations).
 
 In addition, any object with a `.to_kdl()` method
 can be used in a kdl-py document.
@@ -138,7 +140,7 @@ In order of importance:
 	or `parser.parse(str, ParseConfig|None)`
 	(if you've constructed a `kdl.Parser`).
 2. Creating a `kdl.Parser(parseConfig|None, printConfig|None)`,
-	which automatically applies it to its `.parse()` method if not overriden.
+	which automatically applies it to its `.parse()` method if not overridden.
 3. Fiddling with the `kdl.parsing.defaults` object,
 	which is used if nothing else provides a config.
 
@@ -152,10 +154,12 @@ A `ParseConfig` object has the following properties:
 
 	Controls whether the parser produces native Python objects
 	when parsing *tagged* values,
-	for some of [KDL's predefined tags](https://github.com/kdl-org/kdl/blob/main/SPEC.md#reserved-type-annotations-for-numbers-without-decimals):
+	for [KDL's reserved type annotations](https://github.com/kdl-org/kdl/blob/main/SPEC.md#type-annotations):
 
-	* `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64` on numbers:
-		Checks that the value is in the specified range,
+	* `i8`, `i16`, `i32`, `i64`, `i128`, `u8`, `u16`, `u32`, `u64`, `u128`, `isize`, `usize` on numbers:
+		Checks that the value is an integer in the specified range
+		(`isize`/`usize` use the current Python platform's pointer width via `sys.maxsize`),
+		raising `ParseError` on out-of-range or fractional values,
 		then converts it to an `int`.
 		(It will serialize back out as an ordinary untagged number.)
 	* `f32`, `f64` on numbers:
@@ -165,21 +169,35 @@ A `ParseConfig` object has the following properties:
 		Converts it to a `decimal.Decimal` object.
 		(Always reserializes to a `(decimal)`-tagged string.)
 	* `date-time`, `date`, `time` on strings:
-		Converts to a `datetime`, `time`, or `date` object.
+		Converts to a `datetime`, `date`, or `time` object.
 	* `ipv4`, `ipv6` on strings:
 		Converts it to an `ipaddress.IPv4Address` or `ipaddress.IPv6Address` object.
-	* `url` on strings:
+	* `url`, `url-reference`, `irl`, `irl-reference` on strings:
 		Converts it to a `urllib.parse.ParseResult` tuple.
+		(Always reserializes to a `(url)`-tagged string.)
 	* `uuid` on strings:
 		Converts it to a `uuid.UUID` object.
 	* `regex` on strings:
 		Converts it to a `re.Pattern` object.
-		(It will serialize back out as a raw string.)
+		(It will serialize back out as a `(regex)`-tagged raw string.)
 	* `base64` on strings:
-		Converts it to a `bytes` object.
+		Converts it to a `bytes` object using standard Base64 decoding.
+	* `base85` on strings:
+		Converts it to a `bytes` object using Ascii85 decoding (both plain and Adobe `<~...~>`-delimited).
+		(Reserializes to a `(base64)`-tagged string.)
+
+	The remaining KDL reserved string annotations do not have an appropriate native type or validator
+	in the Python standard library, so kdl-py leaves them as tagged `kdl.String` objects
+	(you can handle them via custom `valueConverters` if needed):
+
+	* `duration`: Python's `datetime.timedelta` cannot represent ISO 8601 calendar years or months and has no ISO 8601 duration parser.
+	* `currency`, `country-2`, `country-3`, `country-subdivision`: no built-in ISO 4217 or ISO 3166 types or code tables.
+	* `email`, `idn-email`: no standard-library RFC 5322 / RFC 6531 email address value type.
+	* `hostname`, `idn-hostname`: no standard-library RFC 1123 / RFC 5890 hostname type.
+	* `url-template`: no standard-library RFC 6570 URI Template parser or type.
 
 
-* `valueConverters: Dict[ValueKey, Callable] = {}`
+* `valueConverters: dict[ValueKey, Callable] = {}`
 
 	A dictionary of ValueKey->converter functions,
 	letting you parse values
@@ -217,7 +235,7 @@ A `ParseConfig` object has the following properties:
 	it will continue looking for a matching converter.
 
 
-* `nodeConverters: Dict[NodeKey, Callable] = {}`
+* `nodeConverters: dict[NodeKey, Callable] = {}`
 
 	Similar to `valueConverters`,
 	except it uses [`NodeKey`s](#nodekey),
@@ -456,7 +474,7 @@ matching against the node's name and/or tag.
 	like `("my-tag", ...)`.
 * a `str`:
 	Succeeds if the tag/name is that exact string.
-* a `re.Pattern` (a regex, such as `re.compile(r".*foo")`:
+* a `re.Pattern` (a regex, such as `re.compile(r".*foo")`):
 	Succeeds if the regex matches the tag/name.
 	Note that this uses `.match()` semantics,
 	automatically anchoring against the start of the string;
@@ -506,7 +524,8 @@ it can also be used to upgrade KDL 1.0 files to canonical KDL 2.0.
 ```
 usage: kdlreformat [-h] [--indent INDENT] [--semicolons] [--radix]
                    [--no-radix] [--raw-strings] [--no-raw-strings]
-                   [--exponent EXPONENT]
+                   [--exponent EXPONENT] [--sort-properties]
+                   [--version {1,2,auto}]
                    [infile] [outfile]
 
 KDL parser/printer, letting you easily reformat KDL files into a canonical
@@ -516,18 +535,22 @@ positional arguments:
   infile
   outfile
 
-optional arguments:
-  -h, --help           show this help message and exit
-  --indent INDENT      How many spaces for each level of indent. -1 indicates
-                       to indent with tabs.
-  --semicolons         Whether to end nodes with semicolons or not.
-  --radix              Output numeric values in the radix used by the input.
-                       (0x1a outputs as 0x1a)
-  --no-radix           Convert all numeric arguments to decimal. (0x1a outputs
-                       as 26)
-  --raw-strings        Output string values in the string type used by the
-                       input.
-  --no-raw-strings     Convert all string arguments into plain strings.
-  --exponent EXPONENT  What character to use ('e' or 'E') for indicating
-                       exponents on scinot numbers.
+options:
+  -h, --help            show this help message and exit
+  --indent INDENT       How many spaces for each level of indent. -1 indicates
+                        to indent with tabs.
+  --semicolons          Whether to end nodes with semicolons or not.
+  --radix               Output numeric values in the radix used by the input.
+                        (0x1a outputs as 0x1a)
+  --no-radix            Convert all numeric arguments to decimal. (0x1a
+                        outputs as 26)
+  --raw-strings         Output string values in the string type used by the
+                        input.
+  --no-raw-strings      Convert all string arguments into plain strings.
+  --exponent EXPONENT   What character to use ('e' or 'E') for indicating
+                        exponents on scinot numbers.
+  --sort-properties     Sort node properties lexicographically by key instead
+                        of preserving insertion order.
+  --version {1,2,auto}  KDL grammar version to parse ('1', '2', or 'auto').
+                        (Printing is always KDL2.) Default is 'auto'.
 ```

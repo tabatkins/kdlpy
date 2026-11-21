@@ -558,7 +558,7 @@ def build_call_tree(
 
 
 def say(text: str = "") -> None:
-    print(text)  # noqa: T201
+    print(text)
 
 
 def print_terminal_report(
@@ -1577,7 +1577,8 @@ def generate_synthetic_kdl(section_count: int = 25) -> str:
 def load_upstream_inputs(filters: list[str] | None = None) -> list[InputDoc]:
     docs: list[InputDoc] = []
     if not os.path.isdir(TEST_DIR):
-        raise FileNotFoundError(f"Upstream test directory not found: {TEST_DIR}")
+        msg = f"Upstream test directory not found: {TEST_DIR}"
+        raise FileNotFoundError(msg)
     for root, _, filenames in os.walk(TEST_DIR):
         for filename in sorted(filenames):
             if os.path.splitext(filename)[1] != ".kdl":
@@ -2003,7 +2004,7 @@ def main() -> None:
             leaf_filter=options.leaf,
         )
     except kdl.ParseError as err:
-        print(f"ParseError while profiling {target_name}:\n{err}", file=sys.stderr)  # noqa: T201
+        print(f"ParseError while profiling {target_name}:\n{err}", file=sys.stderr)
         sys.exit(1)
 
     if options.pstatsFile:
@@ -2029,7 +2030,7 @@ def main() -> None:
         json_str = json.dumps(export_json(analysis), indent=2)
         if options.jsonFile == "-":
             with contextlib.suppress(BrokenPipeError):
-                print(json_str)  # noqa: T201
+                print(json_str)
             return
         with open(options.jsonFile, "w", encoding="utf-8") as fh:
             fh.write(json_str)

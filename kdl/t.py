@@ -3,23 +3,28 @@
 # Module for holding types, for easy importing into the rest of the codebase
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast, Generic, overload, TypeVar
+from typing import TYPE_CHECKING, cast, overload, override
 
 from .unset import UNSET as UNSET
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    import datetime
+    import decimal
+    import ipaddress
     import re
-    import sys
     from types import EllipsisType, UnionType
     from typing import (
         Any,
-        Callable,
-        Iterable,
         Literal,
         NoReturn,
-        TypeAlias,
     )
+    import urllib.parse
+    import uuid
 
+    from .parsing import ParseConfig
+    from .printing import PrintConfig
+    from .stream import Stream
     from .types import (
         Binary,
         Bool,
@@ -38,30 +43,21 @@ if TYPE_CHECKING:
         Stringish,
         Value,
     )
-
-    from .parsing import ParseConfig
-    from .printing import PrintConfig
-    from .stream import Stream
     from .unset import UnsetT as UnsetT
 
-    ParseVersion: TypeAlias = Literal[1, 2, "auto"]
+    type ParseVersion = Literal[1, 2, "auto"]
+    type ParseResult[T] = tuple[T | None, int]
 
-    _ParseT = TypeVar("_ParseT")
-    ParseResult: TypeAlias = tuple[_ParseT | None, int]
+    type TagKey = str | None | EllipsisType | re.Pattern[str] | Callable[[str | None], bool]
+    type NameKey = str | None | EllipsisType | re.Pattern[str] | Callable[[str | None], bool]
+    type NodeKey = NameKey | tuple[TagKey, NameKey]
 
-    TagKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
-    NameKey = str | None | EllipsisType | re.Pattern | Callable[[str | None], bool]
-    NodeKey = NameKey | tuple[TagKey, NameKey]
+    type _ClassInfo = type | UnionType | tuple[_ClassInfo, ...]
+    type TypeKey = EllipsisType | _ClassInfo
+    type ValueKey = TagKey | tuple[TagKey, TypeKey]
 
-    if sys.version_info >= (3, 10):
-        _ClassInfo: TypeAlias = type | UnionType | tuple["_ClassInfo", ...]
-    else:
-        _ClassInfo: TypeAlias = type | tuple["_ClassInfo", ...]
-    TypeKey: TypeAlias = EllipsisType | _ClassInfo
-    ValueKey = TagKey | tuple[TagKey, TypeKey]
-
-    KDLAny: TypeAlias = Document | Node | "KDLValue"
-    KDLValue: TypeAlias = (
+    type KDLAny = Document | Node | KDLValue
+    type KDLValue = (
         Value
         | Binary
         | Bool
@@ -78,17 +74,11 @@ if TYPE_CHECKING:
         | Stringish
     )
 
-    import datetime
-    import decimal
-    import ipaddress
-    import urllib
-    import uuid
-
-    KDLishValue: TypeAlias = (
+    type KDLishValue = (
         KDLValue
         | None
         | bool
-        | String
+        | str
         | int
         | float
         | decimal.Decimal
@@ -99,6 +89,6 @@ if TYPE_CHECKING:
         | ipaddress.IPv6Address
         | urllib.parse.ParseResult
         | uuid.UUID
-        | re.Pattern
+        | re.Pattern[str]
         | bytes
     )

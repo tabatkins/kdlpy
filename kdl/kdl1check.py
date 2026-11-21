@@ -14,6 +14,19 @@ _matchKdl2IdentChar = re.compile(IDENT_CHAR_RE_STR).match
 _matchKdl1Ident = re.compile(
     r'[^\x00-\x20\\/(){}<>;\[\]=,"\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+',
 ).match
+_matchKdl1Ws = re.compile(rf"[{WS_RE}\ufeff]+").match
+
+
+def _afterSlashdash(chars: str, pos: int, n: int) -> int:
+    """If `pos` starts a `/-` token, return the index after `/-` and any following KDL1 whitespace; else -1."""
+    if pos + 1 >= n or chars[pos] != "/" or chars[pos + 1] != "-":
+        return -1
+    j = pos + 2
+    if j < n:
+        m = _matchKdl1Ws(chars, j)
+        if m is not None:
+            j = m.end()
+    return j
 
 
 def detectVersionMarker(chars: str, pos: int) -> int | None:
@@ -91,6 +104,18 @@ def looksLikeAfterNode(chars: str, pos: int, n: int) -> bool:
         return isHashKeywordPropAt(chars, pos, n)
     if ch == "(":
         return isTagStartAt(chars, pos, n)
+    if ch == "/":
+        j = _afterSlashdash(chars, pos, n)
+        if 0 <= j < n:
+            ch2 = chars[j]
+            if ch2 == "\ufeff":
+                return True
+            if ch2 == "#":
+                return isPropKeyAt(chars, j, n)
+            if ch2 == "(":
+                return isTagStartAt(chars, j, n)
+            return startsWithDotIdent(chars, j, n) and isPropKeyAt(chars, j, n)
+        return False
     return startsWithDotIdent(chars, pos, n) and isPropKeyAt(chars, pos, n)
 
 
@@ -99,6 +124,12 @@ def looksLikeNodeStart(chars: str, pos: int, n: int) -> bool:
     if pos >= n:
         return False
     ch = chars[pos]
+    if ch == "/":
+        j = _afterSlashdash(chars, pos, n)
+        if j < 0 or j >= n:
+            return False
+        ch = chars[j]
+        pos = j
     return ch in ("\ufeff", "#") or isTagStartAt(chars, pos, n) or startsWithDotIdent(chars, pos, n)
 
 
