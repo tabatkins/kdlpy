@@ -92,10 +92,14 @@ select = [
 "check_perf.py" = ["T201"]               # CLI performance checker prints reports
 "profiler.py" = ["T201"]                 # CLI profiler prints reports
 "release.py" = ["S603", "S607", "T201"]  # release script prints progress and invokes git/build/twine
-"test_*.py" = ["T201"]                   # test runners print results
+"tests/*.py" = ["INP001"]                # pytest test directory intentionally omits __init__.py
 
 [tool.ruff.lint.flake8-implicit-str-concat]
 allow-multiline = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.check-manifest]
 ignore = [
@@ -108,8 +112,7 @@ ignore = [
     "release.py",
     "requirements-dev.txt",
     "requirements.txt",
-    "test_kdl1.py",
-    "test_upstream.py",
+    "tests/**",
     "upstream_tests/**",
     "upstream_tests_v1/**",
 ]
