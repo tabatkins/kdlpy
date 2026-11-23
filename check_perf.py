@@ -214,8 +214,10 @@ def measure_peak_kb(fn: t.Callable[[], t.Any]) -> float:
 
 
 def clear_ident_cache() -> None:
-    # Accessing the internal cache ensures deterministic cold-start print call counts.
+    # Accessing the internal caches ensures deterministic cold-start print call counts.
     kdl_types._IDENT_CACHE.clear()  # pylint: disable=protected-access
+    kdl_types._AUTO_STR_CACHE.clear()  # pylint: disable=protected-access
+    kdl_types._QUOTED_STR_CACHE.clear()  # pylint: disable=protected-access
 
 
 def check_max_int(name: str, value: int, limit: int, detail: str = "") -> CheckResult:
@@ -293,17 +295,21 @@ def run_call_count_checks(doc_text: str) -> list[CheckResult]:
             check_max_int("calls.print_native.total", prof_tn.total_calls, MAX_PRINT_NATIVE_TOTAL_CALLS),
             check_max_int(
                 "calls.print_native.printIdent",
-                prof_tn.by_func.get("printIdent", 0),
+                prof_tn.by_func.get("printIdent", 0)
+                + prof_tn.by_func.get("printAutoString", 0)
+                + prof_tn.by_func.get("printQuotedString", 0),
                 MAX_PRINT_NATIVE_IDENT_CALLS,
-                "_IDENT_CACHE inline lookups should avoid repeated printIdent calls",
+                "string cache inline lookups should avoid repeated string formatting calls",
             ),
             check_max_int("calls.print_raw.kdl", prof_tr.kdl_calls, MAX_PRINT_RAW_KDL_CALLS),
             check_max_int("calls.print_raw.total", prof_tr.total_calls, MAX_PRINT_RAW_TOTAL_CALLS),
             check_max_int(
                 "calls.print_raw.printIdent",
-                prof_tr.by_func.get("printIdent", 0),
+                prof_tr.by_func.get("printIdent", 0)
+                + prof_tr.by_func.get("printAutoString", 0)
+                + prof_tr.by_func.get("printQuotedString", 0),
                 MAX_PRINT_RAW_IDENT_CALLS,
-                "_IDENT_CACHE inline lookups should avoid repeated printIdent calls",
+                "string cache inline lookups should avoid repeated string formatting calls",
             ),
             check_max_int(
                 "calls.print_raw.abc",

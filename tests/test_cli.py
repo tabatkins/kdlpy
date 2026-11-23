@@ -25,15 +25,15 @@ def test_cli_stdin_to_stdout_and_formatting_flags(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    src = "parent  b=2 a=1 {\n  child 0x1a 1e-5\n}\n"
+    src = 'parent  b=2 a=1 {\n  child 0x1a 1e-5 bare "quoted" "a\\\\b" #"raw"# #"a\\nb"#\n}\n'
 
-    # Default flags: tab indent, preserve radix, lowercase e, keep prop order
+    # Default flags: tab indent, preserve radix, --string-type=auto, lowercase e, keep prop order
     _runCli(monkeypatch, [], stdinText=src)
     captured = capsys.readouterr()
-    assert captured.out == "parent b=2 a=1 {\n\tchild 0x1a 1e-5\n}\n"
+    assert captured.out == 'parent b=2 a=1 {\n\tchild 0x1a 1e-5 bare quoted #"a\\b"# #"raw"# #"a\\nb"#\n}\n'
     assert captured.err == ""
 
-    # Explicit formatting flags
+    # Explicit --string-type=plain and other formatting flags
     _runCli(
         monkeypatch,
         [
@@ -41,6 +41,8 @@ def test_cli_stdin_to_stdout_and_formatting_flags(
             "2",
             "--semicolons",
             "--no-radix",
+            "--string-type",
+            "plain",
             "--exponent",
             "E",
             "--sort-properties",
@@ -50,23 +52,27 @@ def test_cli_stdin_to_stdout_and_formatting_flags(
         stdinText=src,
     )
     captured = capsys.readouterr()
-    assert captured.out == "parent a=1 b=2 {\n  child 26 1E-5;\n};\n"
+    assert captured.out == 'parent a=1 b=2 {\n  child 26 1E-5 bare quoted "a\\\\b" raw "a\\\\nb";\n};\n'
 
-    # Explicit positive flags and --indent 0
+    # --string-type=exact preserves exact string value types while printing node/prop names as idents when possible
     _runCli(
         monkeypatch,
-        ["--indent", "0", "--radix", "--exponent", "e"],
+        ["--indent", "0", "--radix", "--string-type", "exact", "--exponent", "e"],
         stdinText=src,
     )
     captured = capsys.readouterr()
-    assert captured.out == "parent b=2 a=1 {\nchild 0x1a 1e-5\n}\n"
+    assert captured.out == 'parent b=2 a=1 {\nchild 0x1a 1e-5 bare "quoted" "a\\\\b" #"raw"# #"a\\nb"#\n}\n'
 
-    # --raw-strings (default) vs --no-raw-strings on RawString values (from KDL 1.0 raw strings)
-    rawSrc = 'node r#"a\\nb"#\n'
+    # --string-type=auto explicit flag
+    _runCli(monkeypatch, ["--string-type", "auto"], stdinText=src)
+    assert capsys.readouterr().out == 'parent b=2 a=1 {\n\tchild 0x1a 1e-5 bare quoted #"a\\b"# #"raw"# #"a\\nb"#\n}\n'
+
+    # --raw-strings (alias for exact) and --no-raw-strings (alias for plain)
+    rawSrc = 'node "q" r#"a\\nb"#\n'
     _runCli(monkeypatch, ["--raw-strings"], stdinText=rawSrc)
-    assert capsys.readouterr().out == 'node #"a\\nb"#\n'
+    assert capsys.readouterr().out == 'node "q" #"a\\nb"#\n'
     _runCli(monkeypatch, ["--no-raw-strings"], stdinText=rawSrc)
-    assert capsys.readouterr().out == 'node "a\\\\nb"\n'
+    assert capsys.readouterr().out == 'node q "a\\\\nb"\n'
 
 
 def test_cli_file_io_and_inplace(
@@ -141,6 +147,12 @@ def test_cli_invalid_arguments_and_os_errors(
         _runCli(monkeypatch, ["--version", "3"])
     assert excInfo.value.code == 2
     assert "Expected '1', '2', or 'auto'" in capsys.readouterr().err
+
+    # Invalid --string-type
+    with pytest.raises(SystemExit) as excInfo:
+        _runCli(monkeypatch, ["--string-type", "bogus"])
+    assert excInfo.value.code == 2
+    assert "Expected 'auto', 'exact', or 'plain'" in capsys.readouterr().err
 
     # Missing input file -> concise OSError on stderr, exit 1
     missing = tmp_path / "does_not_exist.kdl"

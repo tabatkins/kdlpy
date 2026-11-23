@@ -330,17 +330,30 @@ A `PrintConfig` object has the following properties:
 	Identical to `printNullArgs`,
 	but applies to properties rather than arguments.
 
-* `respectStringType: bool = True`
+* `respectStringType: bool | Literal["auto"] = "auto"`
 
-	When `True`, `kdl.RawString` values are printed as KDL 2.0 raw strings (`#"foo"#`,
-	falling back to quoted strings if the value contains newlines or starts with `"`)
-	rather than normal quoted strings (`"foo"`).
-	When `False`, `kdl.RawString` values always output as normal quoted strings.
+	Controls how string values (as well as native Python `str` values, node names, property keys, and tags)
+	are formatted in KDL 2.0 output:
 
-	Note that this only affects `kdl.RawString` objects
-	(produced by KDL 1.0 raw strings, `re.Pattern` serialization, or manual construction);
-	`kdl.String` and native Python `str` objects always output as bare identifiers when valid in KDL 2.0,
-	or normal quoted strings otherwise.
+	* `"auto"` (default): preserves `kdl.RawString` values as raw strings 
+		(falling back to escaped quoted strings if the value can't be printed as a single-line raw string). 
+		For all other strings (`kdl.IdentString`, `kdl.String`, native `str`, node names, property keys, and tags), 
+		picks the cleanest representation in order:
+		1. bare identifier string if valid in KDL 2.0,
+		2. normal quoted string if it contains no characters requiring escapes,
+		3. single-line raw string (`#"..."#`) if representable without escapes,
+		4. quoted string with escapes as a final fallback.
+	* `True`: preserves each string's exact type as much as reasonably possible: 
+		* `kdl.IdentString` (as well as native Python `str` values, node names, property keys, and tags) outputs as a bare identifier when valid in KDL 2.0, falling back to a quoted string otherwise
+		* `kdl.RawString` outputs as a raw string (falling back to quoted if manually constructed to not be a valid single-line raw string)
+		* `kdl.String` always outputs as a normal quoted string
+	* `False`: ignores input string types and always prints bare identifiers when valid in KDL 2.0,
+		or normal quoted strings otherwise (never raw strings).
+
+	> [!NOTE]
+	> If using the default `nativeUntaggedValues=True` ParseConfig option,
+	> all strings become native Python `str` objects,
+	> so the type can't be exactly preserved.
 
 * `respectRadix: bool = True`
 
@@ -400,6 +413,7 @@ A `PrintConfig` object has the following properties:
 * `kdl.Bool(value: bool, tag: str|None = None)`
 * `kdl.Null(tag: str|None = None)`
 	* `null.value`: readonly, always `None`
+* `kdl.IdentString(value: str, tag: str|None = None)`
 * `kdl.RawString(value: str, tag: str|None = None)`
 * `kdl.String(value: str, tag: str|None = None)`
 * `kdl.ExactValue(chars: str, tag: str|None = None)` †
@@ -433,7 +447,7 @@ in a way that the built-in kdl-py classes don't.
 These are base classes to help in type testing:
 `Value` matches all value classes,
 `Numberish` matches all six numeric value classes (`Binary`, `Octal`, `Decimal`, `Hex`, `Infinity`, `NaN`),
-and `Stringish` matches both string value classes (`String`, `RawString`).
+and `Stringish` matches all three string value classes (`IdentString`, `String`, `RawString`).
 
 A few type aliases also exist,
 used by the module in a few places
@@ -443,6 +457,7 @@ and potentially useful for your code:
 * `kdl.KDLValue`: any of the `Value` subtypes
 * `kdl.KDLishValue`: a `KDLValue` or one of the supported Python native types ([see "Inserting Native Values"](#inserting-native-values))
 * `kdl.ParseVersion`: `Literal[1, 2, "auto"]`, the type for `ParseConfig.version`
+* `kdl.StringTypeMode`: `bool | Literal["auto"]`, the type for `PrintConfig.respectStringType`
 * `kdl.ValueKey`, `kdl.NodeKey`, `kdl.TagKey`, `kdl.NameKey`, `kdl.TypeKey`:
 	the types for [`ValueKey`s](#valuekey) and [`NodeKey`s](#nodekey)
 	(and their individual pieces)
@@ -523,9 +538,9 @@ it can also be used to upgrade KDL 1.0 files to canonical KDL 2.0.
 
 ```
 usage: kdlreformat [-h] [--indent INDENT] [--semicolons] [--radix]
-                   [--no-radix] [--raw-strings] [--no-raw-strings]
-                   [--exponent EXPONENT] [--sort-properties]
-                   [--version {1,2,auto}]
+                   [--no-radix] [--string-type {auto,exact,plain}]
+                   [--raw-strings] [--no-raw-strings] [--exponent EXPONENT]
+                   [--sort-properties] [--version {1,2,auto}]
                    [infile] [outfile]
 
 KDL parser/printer, letting you easily reformat KDL files into a canonical
@@ -544,9 +559,14 @@ options:
                         (0x1a outputs as 0x1a)
   --no-radix            Convert all numeric arguments to decimal. (0x1a
                         outputs as 26)
-  --raw-strings         Output string values in the string type used by the
-                        input.
-  --no-raw-strings      Convert all string arguments into plain strings.
+  --string-type {auto,exact,plain}
+                        How to format strings: 'auto' (preserve raw strings,
+                        pick cleanest form otherwise; default), 'exact'
+                        (preserve input ident/quoted/raw string types), or
+                        'plain' (always output ident or quoted strings, never
+                        raw).
+  --raw-strings         Alias for --string-type=exact.
+  --no-raw-strings      Alias for --string-type=plain.
   --exponent EXPONENT   What character to use ('e' or 'E') for indicating
                         exponents on scinot numbers.
   --sort-properties     Sort node properties lexicographically by key instead

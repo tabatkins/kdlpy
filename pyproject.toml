@@ -94,6 +94,9 @@ select = [
 "release.py" = ["S603", "S607", "T201"]  # release script prints progress and invokes git/build/twine
 "tests/*.py" = ["INP001"]                # pytest test directory intentionally omits __init__.py
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.ruff.lint.flake8-implicit-str-concat]
 allow-multiline = false
 

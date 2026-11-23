@@ -27,11 +27,13 @@ from .types import (
     Decimal,
     Document,
     Hex,
+    IdentString,
     Infinity,
     NaN,
     Node,
     Null,
     Octal,
+    RawString,
     String,
     Value,
 )
@@ -430,7 +432,8 @@ def parseEntry(s: Stream, start: int, discard: bool = False) -> EntryResult:
         return (None, None, strEnd)
     if s.fastUntagged:
         return (None, text, strEnd)
-    return (None, _finalizeValue(s, String(text), None, start, strEnd), strEnd)
+    valObj: Value = RawString(text) if ch == "#" else (String(text) if ch == '"' else IdentString(text))
+    return (None, _finalizeValue(s, valObj, None, start, strEnd), strEnd)
 
 
 def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.Any]:
@@ -475,7 +478,10 @@ def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.An
     if text is not None:
         if discard:
             return (None, end)
-        return (text, end) if native else (_finalizeValue(s, String(text), tag, valueStart, end), end)
+        if native:
+            return (text, end)
+        valObj: Value = RawString(text) if ch == "#" else (String(text) if ch == '"' else IdentString(text))
+        return (_finalizeValue(s, valObj, tag, valueStart, end), end)
 
     if tag is not None:
         raise ParseError(s, i, "Found a tag, but no value following it.")

@@ -49,16 +49,30 @@ def cli() -> None:
         help="Convert all numeric arguments to decimal. (0x1a outputs as 26)",
     )
     cliParser.add_argument(
+        "--string-type",
+        dest="respectStringType",
+        type=stringTypeFromString,
+        action="store",
+        metavar="{auto,exact,plain}",
+        help=(
+            "How to format strings: 'auto' (preserve raw strings, pick cleanest form otherwise; default), "
+            + "'exact' (preserve input ident/quoted/raw string types), "
+            + "or 'plain' (always output ident or quoted strings, never raw)."
+        ),
+    )
+    cliParser.add_argument(
         "--raw-strings",
         dest="respectStringType",
-        action="store_true",
-        help="Output string values in the string type used by the input.",
+        action="store_const",
+        const=True,
+        help="Alias for --string-type=exact.",
     )
     cliParser.add_argument(
         "--no-raw-strings",
         dest="respectStringType",
-        action="store_false",
-        help="Convert all string arguments into plain strings.",
+        action="store_const",
+        const=False,
+        help="Alias for --string-type=plain.",
     )
     cliParser.add_argument(
         "--exponent",
@@ -84,7 +98,7 @@ def cli() -> None:
         metavar="{1,2,auto}",
         help="KDL grammar version to parse ('1', '2', or 'auto'). Default is 'auto'.",
     )
-    cliParser.set_defaults(respectRadix=True, respectStringType=True)
+    cliParser.set_defaults(respectRadix=True, respectStringType="auto")
     options = cliParser.parse_args()
     parseConfig = parsing.ParseConfig(
         nativeUntaggedValues=False,
@@ -125,6 +139,17 @@ def expFromString(s: str) -> str:
     if s in ("e", "E"):
         return s
     msg = f"Expected 'e' or 'E' for an exponent; got '{s}'"
+    raise argparse.ArgumentTypeError(msg)
+
+
+def stringTypeFromString(s: str) -> t.StringTypeMode:
+    if s == "auto":
+        return "auto"
+    if s == "exact":
+        return True
+    if s == "plain":
+        return False
+    msg = f"Expected 'auto', 'exact', or 'plain' for string type; got '{s}'"
     raise argparse.ArgumentTypeError(msg)
 
 

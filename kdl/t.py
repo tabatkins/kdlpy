@@ -3,7 +3,7 @@
 # Module for holding types, for easy importing into the rest of the codebase
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast, overload, override
+from typing import TYPE_CHECKING, NamedTuple, cast, overload, override
 
 from .unset import UNSET as UNSET
 
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         Document,
         ExactValue,
         Hex,
+        IdentString,
         Infinity,
         NaN,
         Node,
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from .unset import UnsetT as UnsetT
 
     type ParseVersion = Literal[1, 2, "auto"]
+    type StringTypeMode = bool | Literal["auto"]
     type ParseResult[T] = tuple[T | None, int]
 
     type TagKey = str | None | EllipsisType | re.Pattern[str] | Callable[[str | None], bool]
@@ -64,6 +66,7 @@ if TYPE_CHECKING:
         | Decimal
         | ExactValue
         | Hex
+        | IdentString
         | Infinity
         | NaN
         | Null

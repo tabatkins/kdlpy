@@ -8,8 +8,7 @@ import typing as t
 import pytest
 
 import kdl
-from kdl import stream as kdl_stream
-from kdl import types as kdl_types
+from kdl import stream as kdl_stream, types as kdl_types
 
 # ---------------------------------------------------------------------------
 # Parser & ParseConfig (KDL 2.0 & KDL 1.0)
@@ -401,11 +400,28 @@ def test_value_subclasses_printing_and_base_methods() -> None:
     assert str(nullVal) == "#null"
     assert str(kdl.Null("opt")) == "(opt)#null"
 
+    assert str(kdl.IdentString("bare")) == "bare"
+    assert str(kdl.IdentString("bare", tag="t")) == "(t)bare"
+    assert kdl.IdentString("bare", tag="t").print(kdl.PrintConfig(respectStringType=True)) == "(t)bare"
+    assert kdl.IdentString("has space").print(kdl.PrintConfig(respectStringType=True)) == '"has space"'
+    assert kdl.IdentString(r"a\b").print(kdl.PrintConfig(respectStringType=True)) == '"a\\\\b"'
+    assert kdl.IdentString(r"a\b").print(kdl.PrintConfig(respectStringType="auto")) == '#"a\\b"#'
+
     assert str(kdl.String("bare")) == "bare"
     assert str(kdl.String("has space", tag="my tag")) == '("my tag")"has space"'
+    assert kdl.String("bare").print(kdl.PrintConfig(respectStringType=True)) == '"bare"'
+    assert kdl.String("bare", tag="t").print(kdl.PrintConfig(respectStringType=True)) == '(t)"bare"'
+    assert kdl.String(r"a\b").print(kdl.PrintConfig(respectStringType="auto")) == '#"a\\b"#'
+    assert kdl.String(r"a\b").print(kdl.PrintConfig(respectStringType=True)) == '"a\\\\b"'
+    assert kdl.String(r"a\b").print(kdl.PrintConfig(respectStringType=False)) == '"a\\\\b"'
+
     assert str(kdl.RawString('a"b', tag="raw")) == '(raw)#"a"b"#'
     assert str(kdl.RawString('a"#b', tag="raw")) == '(raw)##"a"#b"##'
+    assert kdl.RawString('a"b', tag="raw").print(kdl.PrintConfig(respectStringType=True)) == '(raw)#"a"b"#'
     assert kdl.RawString('a"b').print(kdl.PrintConfig(respectStringType=False)) == '"a\\"b"'
+    assert kdl.RawString("bare").print(kdl.PrintConfig(respectStringType=False)) == "bare"
+    assert kdl.RawString("").print() == '#""#'
+    assert kdl.RawString("").print(kdl.PrintConfig(respectStringType=False)) == '""'
     assert kdl.RawString('"starts-with-quote').print() == '"\\"starts-with-quote"'
 
     # Native Python float specials and huge ints in Node args & props
@@ -547,6 +563,138 @@ def test_string_escaping_raw_roundtrip_and_regex_flags() -> None:
     ):
         with pytest.raises(ValueError, match="non-default flags"):
             kdl.Node("n", args=[badPat]).print()
+
+
+def test_kdl2_string_types_and_respect_string_type_modes() -> None:
+    rawCfg = kdl.ParseConfig(nativeUntaggedValues=False, nativeTaggedValues=False, version=2)
+    doc = kdl.parse(
+        'n bare "quoted" #"raw"# ##"a"#b"## #""# (t)#"tagged"# (t)"quoted" (t)ident '
+        + '#"""\n  line1\n  line2\n  """# '
+        + 'p1=#"praw"# p2=(t)#"ptagged"# p3="pquoted" p4=pident\n',
+        rawCfg,
+    )
+    node = doc.nodes[0]
+    assert node.args == [
+        kdl.IdentString("bare"),
+        kdl.String("quoted"),
+        kdl.RawString("raw"),
+        kdl.RawString('a"#b'),
+        kdl.RawString(""),
+        kdl.RawString("tagged", tag="t"),
+        kdl.String("quoted", tag="t"),
+        kdl.IdentString("ident", tag="t"),
+        kdl.RawString("line1\nline2"),
+    ]
+    assert node.props == {
+        "p1": kdl.RawString("praw"),
+        "p2": kdl.RawString("ptagged", tag="t"),
+        "p3": kdl.String("pquoted"),
+        "p4": kdl.IdentString("pident"),
+    }
+
+    # Default ("auto"): preserves RawString, picks ident/unescaped-quoted/raw/escaped-quoted otherwise
+    assert doc.print() == (
+        'n bare quoted #"raw"# ##"a"#b"## #""# (t)#"tagged"# (t)quoted (t)ident "line1\\nline2" '
+        + 'p1=#"praw"# p2=(t)#"ptagged"# p3=pquoted p4=pident\n'
+    )
+    # Exact (True): IdentString -> ident, RawString -> raw, String -> quoted; node/prop/tag -> ident when possible
+    assert doc.print(kdl.PrintConfig(respectStringType=True)) == (
+        'n bare "quoted" #"raw"# ##"a"#b"## #""# (t)#"tagged"# (t)"quoted" (t)ident "line1\\nline2" '
+        + 'p1=#"praw"# p2=(t)#"ptagged"# p3="pquoted" p4=pident\n'
+    )
+    # Plain (False): canonical ident-or-quoted everywhere, never raw
+    assert doc.print(kdl.PrintConfig(respectStringType=False)) == (
+        'n bare quoted raw "a\\"#b" "" (t)tagged (t)quoted (t)ident "line1\\nline2" '
+        + "p1=praw p2=(t)ptagged p3=pquoted p4=pident\n"
+    )
+
+    # All 4 "auto" fallback steps on native Python str, node name, prop key, and tag:
+    # 1. ident -> bare, 2. no escapes -> quoted, 3. escapes & raw-representable -> raw, 4. fallback -> escaped quoted
+    autoDoc = kdl.Document(
+        [
+            kdl.Node(
+                r"C:\node",
+                tag='my"tag',
+                args=["ident", "has space", r"C:\path", 'say "hi"', '"leading', "line1\nline2"],
+                props={r"k\1": "v 1", "k2": 'a"#b', "k3": "a\x00b"},
+            ),
+        ],
+    )
+    assert autoDoc.print() == (
+        '(#"my"tag"#)#"C:\\node"# ident "has space" #"C:\\path"# #"say "hi""# "\\"leading" "line1\\nline2" '
+        + '#"k\\1"#="v 1" k2=##"a"#b"## k3="a\\u{0}b"\n'
+    )
+    # Under True, native str / node name / prop key / tag print as idents when possible, else quoted (never raw)
+    assert autoDoc.print(kdl.PrintConfig(respectStringType=True)) == (
+        '("my\\"tag")"C:\\\\node" ident "has space" "C:\\\\path" "say \\"hi\\"" "\\"leading" "line1\\nline2" '
+        + '"k\\\\1"="v 1" k2="a\\"#b" k3="a\\u{0}b"\n'
+    )
+    # Under False, canonical ident-or-quoted everywhere
+    assert autoDoc.print(kdl.PrintConfig(respectStringType=False)) == (
+        '("my\\"tag")"C:\\\\node" ident "has space" "C:\\\\path" "say \\"hi\\"" "\\"leading" "line1\\nline2" '
+        + '"k\\\\1"="v 1" k2="a\\"#b" k3="a\\u{0}b"\n'
+    )
+    # Round-trip under all 3 modes preserves all values identically
+    modes: tuple[kdl.StringTypeMode, ...] = ("auto", True, False)
+    for mode in modes:
+        reparsed = kdl.parse(autoDoc.print(kdl.PrintConfig(respectStringType=mode)), kdl.ParseConfig(version=2))
+        assert reparsed.nodes[0] == autoDoc.nodes[0]
+
+    # Native str subclasses (e.g. StrEnum) and .to_kdl() returning str also print as idents when possible under True
+    class MyStrEnum(enum.StrEnum):
+        ALPHA = "alpha"
+
+    class StrWrapper:
+        def to_kdl(self) -> str:
+            return "beta"
+
+    exactCfg = kdl.PrintConfig(respectStringType=True)
+    assert kdl.Node("n", args=[MyStrEnum.ALPHA, StrWrapper(), "gamma"]).print(exactCfg) == "n alpha beta gamma\n"
+
+    # Tags on non-string Value subclasses respect respectStringType (ident under True/False, raw if escaped under auto)
+    autoCfg = kdl.PrintConfig(respectStringType="auto")
+    assert kdl.Binary(5, tag="t").print(exactCfg) == "(t)0b101"
+    assert kdl.Octal(8, tag="t").print(exactCfg) == "(t)0o10"
+    assert kdl.Hex(10, tag="t").print(exactCfg) == "(t)0xa"
+    assert kdl.Decimal(1, tag="t").print(exactCfg) == "(t)1"
+    assert kdl.Infinity(float("inf"), tag="t").print(exactCfg) == "(t)#inf"
+    assert kdl.NaN(tag="t").print(exactCfg) == "(t)#nan"
+    assert kdl.Bool(True, tag="t").print(exactCfg) == "(t)#true"
+    assert kdl.Null(tag="t").print(exactCfg) == "(t)#null"
+    assert kdl.ExactValue("42", tag="t").print(exactCfg) == "(t)42"
+    assert kdl.Decimal(1, tag=r"a\b").print(autoCfg) == '(#"a\\b"#)1'
+    assert kdl.Decimal(1, tag=r"a\b").print(exactCfg) == '("a\\\\b")1'
+
+    # Invalid respectStringType raises ValueError
+    badCfg = kdl.PrintConfig(respectStringType=t.cast("t.Any", "invalid"))
+    for obj in (kdl.Document(), kdl.Node("n"), kdl.String("a"), kdl.IdentString("a"), kdl.RawString("a")):
+        with pytest.raises(ValueError, match="Invalid respectStringType"):
+            obj.print(badCfg)
+
+    # Custom tags with default nativeUntaggedValues=True preserve IdentString vs String vs RawString
+    taggedDoc = kdl.parse(
+        'n (custom)#"raw"# (custom)"plain" (custom)bare k=(custom)pbare\n',
+        kdl.ParseConfig(version=2),
+    )
+    assert taggedDoc.nodes[0].args == [
+        kdl.RawString("raw", tag="custom"),
+        kdl.String("plain", tag="custom"),
+        kdl.IdentString("bare", tag="custom"),
+    ]
+    assert taggedDoc.nodes[0].props == {"k": kdl.IdentString("pbare", tag="custom")}
+
+    # valueConverters can distinguish IdentString, String, RawString, and Stringish
+    convCfg = kdl.ParseConfig(
+        version=2,
+        valueConverters={
+            (..., kdl.RawString): lambda val, _pf: f"RAW:{val.value}",
+            (..., kdl.IdentString): lambda val, _pf: f"IDENT:{val.value}",
+            (..., kdl.String): lambda val, _pf: f"STR:{val.value}",
+        },
+    )
+    convDoc = kdl.parse('n #"a"# "b" bare p=#"c"# q=d\n', convCfg)
+    assert convDoc.nodes[0].args == ["RAW:a", "STR:b", "IDENT:bare"]
+    assert convDoc.nodes[0].props == {"p": "RAW:c", "q": "IDENT:d"}
 
 
 def test_stream_loc_line_endings() -> None:

@@ -36,14 +36,15 @@ class Document:
 
     def print(self, config: t.PrintConfig | None = None) -> str:
         cfg = config or self.printConfig or printing.defaults
+        strCache, strFmt = _getStrPrinter(cfg.respectStringType)
         if not self.nodes:
             # always end a kdl doc with a newline
             return "\n"
         out: list[str] = []
-        indents = _getIndents(cfg.indent)
+        state = _PrintState(out, cfg, _getIndents(cfg.indent), strCache, strFmt)
         for node in self.nodes:
             childNode = node if isinstance(node, Node) else toKdlNode(node)
-            _printNodeInto(childNode, out, cfg, 0, indents)
+            _printNodeInto(childNode, 0, state)
         return "".join(out)
 
     @t.overload
@@ -90,10 +91,11 @@ class Node:
         indentLevel: int = 0,
     ) -> str:
         cfg = config or printing.defaults
+        strCache, strFmt = _getStrPrinter(cfg.respectStringType)
         level = max(0, indentLevel)
         out: list[str] = []
-        indents = _getIndents(cfg.indent, level)
-        _printNodeInto(self, out, cfg, level, indents)
+        state = _PrintState(out, cfg, _getIndents(cfg.indent, level), strCache, strFmt)
+        _printNodeInto(self, level, state)
         return "".join(out)
 
     @t.overload
@@ -139,22 +141,24 @@ class Node:
         return self.print()
 
 
-def _printNodeInto(
-    node: Node,
-    out: list[str],
-    config: t.PrintConfig,
-    indentLevel: int,
-    indents: list[str],
-) -> None:
+class _PrintState(t.NamedTuple):
+    out: list[str]
+    config: t.PrintConfig
+    indents: list[str]
+    strCache: dict[str, str]
+    strFmt: t.Callable[[str], str]
+
+
+def _printNodeInto(node: Node, indentLevel: int, state: _PrintState) -> None:
     # Appends chunks into a single shared list to avoid O(N^2) string concatenation across subtrees.
+    out, config, indents, strCache, strFmt = state
     append = out.append
-    identCache = _IDENT_CACHE
     indentStr = indents[indentLevel]
 
-    # Inline cache lookup is safe with `or` because printIdent() never returns "".
-    nameStr = identCache.get(node.name) or printIdent(node.name)
+    # Inline cache lookup is safe with `or` because string formatters never return "".
+    nameStr = strCache.get(node.name) or strFmt(node.name)
     if node.tag is not None:
-        tagStr = identCache.get(node.tag) or printIdent(node.tag)
+        tagStr = strCache.get(node.tag) or strFmt(node.tag)
         append(f"{indentStr}({tagStr}){nameStr}")
     else:
         append(f"{indentStr}{nameStr}" if indentStr else nameStr)
@@ -166,7 +170,7 @@ def _printNodeInto(
             # subclasses (e.g. IntEnum) still fall through to toKdlValue().
             valType = type(value)
             if valType is str:
-                valStr = identCache.get(value) or printIdent(value)
+                valStr = strCache.get(value) or strFmt(value)
             elif value is True:
                 valStr = "#true"
             elif value is False:
@@ -206,7 +210,7 @@ def _printNodeInto(
         for name, value in propsIter:
             valType = type(value)
             if valType is str:
-                valStr = identCache.get(value) or printIdent(value)
+                valStr = strCache.get(value) or strFmt(value)
             elif value is True:
                 valStr = "#true"
             elif value is False:
@@ -236,7 +240,7 @@ def _printNodeInto(
                 if not printNullProps and isinstance(kdlVal, Null):
                     continue
                 valStr = kdlVal.print(config)
-            keyStr = identCache.get(name) or printIdent(name)
+            keyStr = strCache.get(name) or strFmt(name)
             append(f" {keyStr}={valStr}")
 
     if node.nodes:
@@ -247,7 +251,7 @@ def _printNodeInto(
             indents.extend(unit * i for i in range(len(indents), childLevel + _INITIAL_INDENT_DEPTH))
         for child in node.nodes:
             childNode = child if isinstance(child, Node) else toKdlNode(child)
-            _printNodeInto(childNode, out, config, childLevel, indents)
+            _printNodeInto(childNode, childLevel, state)
         if config.semicolons:
             append(f"{indentStr}}};\n" if indentStr else "};\n")
         else:
@@ -291,7 +295,8 @@ class ExactValue(Value):
     def print(self, config: t.PrintConfig | None = None) -> str:
         if self.tag is None:
             return self.chars
-        return f"({printIdent(self.tag)}){self.chars}"
+        cfg = config or printing.defaults
+        return f"({_printStr(self.tag, cfg.respectStringType)}){self.chars}"
 
     def __str__(self) -> str:
         return self.print()
@@ -318,7 +323,7 @@ class Binary(Numberish):
                 numStr = "#inf" if self.value > 0 else "#-inf"
         if self.tag is None:
             return numStr
-        return f"({printIdent(self.tag)}){numStr}"
+        return f"({_printStr(self.tag, cfg.respectStringType)}){numStr}"
 
     def __str__(self) -> str:
         return self.print()
@@ -341,7 +346,7 @@ class Octal(Numberish):
                 numStr = "#inf" if self.value > 0 else "#-inf"
         if self.tag is None:
             return numStr
-        return f"({printIdent(self.tag)}){numStr}"
+        return f"({_printStr(self.tag, cfg.respectStringType)}){numStr}"
 
     def __str__(self) -> str:
         return self.print()
@@ -397,7 +402,7 @@ class Decimal(Numberish):
                     s = f"{s}{cfg.exponent}{exp:+}"
         if self.tag is None:
             return s
-        return f"({printIdent(self.tag)}){s}"
+        return f"({_printStr(self.tag, cfg.respectStringType)}){s}"
 
     def __str__(self) -> str:
         return self.print()
@@ -421,7 +426,8 @@ class Infinity(Numberish):
         kw = "#inf" if self.value > 0 else "#-inf"
         if self.tag is None:
             return kw
-        return f"({printIdent(self.tag)}){kw}"
+        cfg = config or printing.defaults
+        return f"({_printStr(self.tag, cfg.respectStringType)}){kw}"
 
     def __str__(self) -> str:
         return self.print()
@@ -441,7 +447,8 @@ class NaN(Numberish):
     def print(self, config: t.PrintConfig | None = None) -> str:
         if self.tag is None:
             return "#nan"
-        return f"({printIdent(self.tag)})#nan"
+        cfg = config or printing.defaults
+        return f"({_printStr(self.tag, cfg.respectStringType)})#nan"
 
     def __str__(self) -> str:
         return self.print()
@@ -464,7 +471,7 @@ class Hex(Numberish):
                 numStr = "#inf" if self.value > 0 else "#-inf"
         if self.tag is None:
             return numStr
-        return f"({printIdent(self.tag)}){numStr}"
+        return f"({_printStr(self.tag, cfg.respectStringType)}){numStr}"
 
     def __str__(self) -> str:
         return self.print()
@@ -480,7 +487,8 @@ class Bool(Value):
         kw = "#true" if self.value else "#false"
         if self.tag is None:
             return kw
-        return f"({printIdent(self.tag)}){kw}"
+        cfg = config or printing.defaults
+        return f"({_printStr(self.tag, cfg.respectStringType)}){kw}"
 
     def __str__(self) -> str:
         return self.print()
@@ -499,7 +507,8 @@ class Null(Value):
     def print(self, config: t.PrintConfig | None = None) -> str:
         if self.tag is None:
             return "#null"
-        return f"({printIdent(self.tag)})#null"
+        cfg = config or printing.defaults
+        return f"({_printStr(self.tag, cfg.respectStringType)})#null"
 
     def __str__(self) -> str:
         return self.print()
@@ -521,20 +530,27 @@ class RawString(Stringish):
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
         cfg = config or printing.defaults
-        tagStr = f"({printIdent(self.tag)})" if self.tag is not None else ""
-        # Leading quotes (e.g. `"` -> `#"""#`), newlines, or disallowed codepoints can't be represented as
-        # single-line KDL2 raw strings, so fall back to escaped quoted strings.
-        if (
-            cfg.respectStringType
-            and not self.value.startswith('"')
-            and (self.value.isprintable() or _searchRawDisallowed(self.value) is None)
-        ):
-            hashes = "#" * findRequiredHashCount(self.value)
-            return f'{tagStr}{hashes}"{self.value}"{hashes}'
-        return f'{tagStr}"{escapedFromRaw(self.value)}"'
+        strMode = cfg.respectStringType
+        tagStr = f"({_printStr(self.tag, strMode)})" if self.tag is not None else ""
+        if strMode == "auto" or strMode is True:
+            if isPrintableRawString(self.value):
+                hashes = "#" * findRequiredHashCount(self.value)
+                return f'{tagStr}{hashes}"{self.value}"{hashes}'
+            return f'{tagStr}"{escapedFromRaw(self.value)}"'
+        if strMode is False:
+            body = _IDENT_CACHE.get(self.value) or printIdent(self.value)
+            return f"{tagStr}{body}"
+        msg = f"Invalid respectStringType {strMode!r}; expected True, False, or 'auto'."
+        raise ValueError(msg)
 
     def __str__(self) -> str:
         return self.print()
+
+
+def isPrintableRawString(chars: str) -> bool:
+    # Leading quotes (e.g. `"` -> `#"""#`), newlines, or disallowed codepoints can't be represented as
+    # single-line KDL2 raw strings.
+    return not chars.startswith('"') and (chars.isprintable() or _searchRawDisallowed(chars) is None)
 
 
 def findRequiredHashCount(chars: str) -> int:
@@ -544,17 +560,44 @@ def findRequiredHashCount(chars: str) -> int:
 
 
 @dataclass(slots=True)
+class IdentString(Stringish):
+    value: str
+    tag: str | None = None
+
+    @t.override
+    def print(self, config: t.PrintConfig | None = None) -> str:
+        cfg = config or printing.defaults
+        strMode = cfg.respectStringType
+        body = _printStr(self.value, strMode)
+        if self.tag is None:
+            return body
+        return f"({_printStr(self.tag, strMode)}){body}"
+
+    def __str__(self) -> str:
+        return self.print()
+
+
+@dataclass(slots=True)
 class String(Stringish):
     value: str
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
-        body = _IDENT_CACHE.get(self.value) or printIdent(self.value)
+        cfg = config or printing.defaults
+        strMode = cfg.respectStringType
+        if strMode == "auto":
+            body = _AUTO_STR_CACHE.get(self.value) or printAutoString(self.value)
+        elif strMode is True:
+            body = _QUOTED_STR_CACHE.get(self.value) or printQuotedString(self.value)
+        elif strMode is False:
+            body = _IDENT_CACHE.get(self.value) or printIdent(self.value)
+        else:
+            msg = f"Invalid respectStringType {strMode!r}; expected True, False, or 'auto'."
+            raise ValueError(msg)
         if self.tag is None:
             return body
-        tagStr = _IDENT_CACHE.get(self.tag) or printIdent(self.tag)
-        return f"({tagStr}){body}"
+        return f"({_printStr(self.tag, strMode)}){body}"
 
     def __str__(self) -> str:
         return self.print()
@@ -606,7 +649,7 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
     if isinstance(val, bool):
         return Bool(val)
     if isinstance(val, str):
-        return String(val)
+        return IdentString(val)
     if isinstance(val, int):
         return Decimal(val)
     if isinstance(val, float):
@@ -755,8 +798,28 @@ def escapedFromRaw(chars: str) -> str:
     return res
 
 
-# Bounded cache of formatted idents (always non-empty strings, so callers can use `cache.get(s) or printIdent(s)`).
+# Bounded caches of formatted strings per mode (always non-empty, so callers can use `cache.get(s) or fmt(s)`).
 _IDENT_CACHE: dict[str, str] = {}
+_AUTO_STR_CACHE: dict[str, str] = {}
+_QUOTED_STR_CACHE: dict[str, str] = {}
+
+
+def _getStrPrinter(mode: t.StringTypeMode) -> tuple[dict[str, str], t.Callable[[str], str]]:
+    if mode == "auto":
+        return (_AUTO_STR_CACHE, printAutoString)
+    if mode is True or mode is False:
+        return (_IDENT_CACHE, printIdent)
+    msg = f"Invalid respectStringType {mode!r}; expected True, False, or 'auto'."
+    raise ValueError(msg)
+
+
+def _printStr(chars: str, mode: t.StringTypeMode) -> str:
+    if mode == "auto":
+        return _AUTO_STR_CACHE.get(chars) or printAutoString(chars)
+    if mode is True or mode is False:
+        return _IDENT_CACHE.get(chars) or printIdent(chars)
+    msg = f"Invalid respectStringType {mode!r}; expected True, False, or 'auto'."
+    raise ValueError(msg)
 
 
 def printIdent(chars: str) -> str:
@@ -769,4 +832,38 @@ def printIdent(chars: str) -> str:
         if len(_IDENT_CACHE) >= 4096:
             _IDENT_CACHE.clear()
         _IDENT_CACHE[chars] = res
+    return res
+
+
+def printQuotedString(chars: str) -> str:
+    cached = _QUOTED_STR_CACHE.get(chars)
+    if cached is not None:
+        return cached
+    res = f'"{escapedFromRaw(chars)}"'
+    if len(chars) <= 64:
+        if len(_QUOTED_STR_CACHE) >= 4096:
+            _QUOTED_STR_CACHE.clear()
+        _QUOTED_STR_CACHE[chars] = res
+    return res
+
+
+def printAutoString(chars: str) -> str:
+    cached = _AUTO_STR_CACHE.get(chars)
+    if cached is not None:
+        return cached
+    if isBareIdent(chars):
+        res = chars
+    else:
+        escaped = escapedFromRaw(chars)
+        if escaped == chars:
+            res = f'"{chars}"'
+        elif isPrintableRawString(chars):
+            hashes = "#" * findRequiredHashCount(chars)
+            res = f'{hashes}"{chars}"{hashes}'
+        else:
+            res = f'"{escaped}"'
+    if len(chars) <= 64:
+        if len(_AUTO_STR_CACHE) >= 4096:
+            _AUTO_STR_CACHE.clear()
+        _AUTO_STR_CACHE[chars] = res
     return res
