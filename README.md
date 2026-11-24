@@ -7,7 +7,7 @@ with automatic fallback support for parsing legacy KDL 1.0.0 documents
 (see [`ParseConfig.version`](#customizing-parsing)).
 Printing always produces valid KDL 2.0.0.
 
-[KDL](https://kdl.dev) is, as the name suggests, a document language,
+[KDL](https://kdl.dev) is a *data/document* language,
 filling approximately the same niche as JSON/YAML/XML/etc
 to be a simple but powerful language for config files.
 It combines the best of several of these languages,
@@ -25,6 +25,11 @@ or doing the reverse and letting you build KDL document trees
 with these values directly,
 and automatically and safely serializing them into KDL text
 for later parsing!
+
+That's not to say that kdl-py isn't focused on performance either, though;
+the library has been optimized fairly heavily for perf
+while keeping a focus on maintainability.
+Performance regressions are tracked as part of the linting suite, too.
 
 You can customize parsing and serialization further for your application very easily,
 by providing node or value "converters"
@@ -445,9 +450,10 @@ A `PrintConfig` object has the following properties:
 	* `node.getArgs(key: kdl.ValueKey) -> Iterable[Any]` returns an iterator of the arguments matching the [`ValueKey`](#valuekey).
 		(Same note as `.getProps()`.)
 
-* `kdl.Value` ‡
+* ‡`kdl.Value`
 	* `val.print(config: kdl.PrintConfig | None = None) -> str`
 	* `val.matchesKey(key: kdl.ValueKey) -> bool` returns whether the value matches the [`ValueKey`](#valuekey).
+* ‡`kdl.Numberish`, `kdl.Stringish`
 * `kdl.Binary(value: int, tag: str | None = None)`
 * `kdl.Octal(value: int, tag: str | None = None)`
 * `kdl.Decimal(mantissa: int | float, exponent: int = 0, tag: str | None = None)`
@@ -461,8 +467,7 @@ A `PrintConfig` object has the following properties:
 * `kdl.IdentString(value: str, tag: str | None = None)`: bare identifier string (e.g. `foo`)
 * `kdl.RawString(value: str, tag: str | None = None)`: raw string (e.g. `#"foo"#`)
 * `kdl.String(value: str, tag: str | None = None)`: quoted string (e.g. `"foo"`)
-* `kdl.ExactValue(chars: str, tag: str | None = None)` †: emits `chars` verbatim (with optional tag); `exact.value` returns `chars`
-* `kdl.Numberish`, `kdl.Stringish` ‡
+* †`kdl.ExactValue(chars: str, tag: str | None = None)`: emits `chars` verbatim (with optional tag); `exact.value` returns `chars`
 * `kdl.ParseConfig(...)`: see [Customizing Parsing](#customizing-parsing)
 	* `kdl.parsing.defaults`: default `ParseConfig`
 * `kdl.PrintConfig(...)`: see [Customizing Printing](#customizing-printing)
@@ -498,8 +503,8 @@ A few type aliases also exist,
 used by the module in a few places
 and potentially useful for your code:
 
-* `kdl.KDLAny`: a `Document`, `Node`, or any of the `Value` subtypes
-* `kdl.KDLValue`: any of the `Value` subtypes
+* `kdl.KDLAny`: a `Document`, `Node`, or `KDLValue` (a `typing.Union`)
+* `kdl.KDLValue`: any of the `Value` subtypes (a `typing.Union`, not a superclass like `Value`)
 * `kdl.KDLishValue`: a `KDLValue` or one of the supported Python native types (see [Built-in Types & Tags](#built-in-types--tags))
 * `kdl.ParseVersion`: `Literal[1, 2, "auto"]`, the type for `ParseConfig.version`
 * `kdl.StringTypeMode`: `bool | Literal["auto"]`, the type for `PrintConfig.respectStringType`
