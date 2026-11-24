@@ -196,6 +196,135 @@ def test_document_and_node_lookup_methods() -> None:
     assert not srv.matchesKey(("other", "server"))
 
 
+def test_node_key_int_indexing_on_document_and_node() -> None:
+    doc = kdl.parse(
+        """
+        (t1)first 1
+        second 2 {
+            (a)c0
+            c1
+            (a)c2
+            (b)c3
+        }
+        (t1)third 3
+        (t2)fourth 4
+        fifth 5
+        """,
+    )
+    # Direct int indexing on Document: [], get(), getAll()
+    assert doc[0].name == "first"
+    assert doc[1].name == "second"
+    assert doc[-1].name == "fifth"
+    assert doc[-2].name == "fourth"
+    with pytest.raises(IndexError):
+        _ = doc[5]
+    with pytest.raises(IndexError):
+        _ = doc[-6]
+    assert doc.get(0) is doc.nodes[0]
+    assert doc.get(-1) is doc.nodes[-1]
+    assert doc.get(5) is None
+    assert doc.get(5, "fallback") == "fallback"
+    assert doc.get(-6, "fallback") == "fallback"
+    assert [n.name for n in doc.getAll(0)] == ["first"]
+    assert [n.name for n in doc.getAll(-1)] == ["fifth"]
+    assert not list(doc.getAll(5))
+    assert not list(doc.getAll(-6))
+
+    # Empty Document
+    emptyDoc = kdl.Document()
+    with pytest.raises(IndexError):
+        _ = emptyDoc[0]
+    assert emptyDoc.get(0) is None
+    assert emptyDoc.get(0, "none") == "none"
+    assert not list(emptyDoc.getAll(0))
+
+    # (TagKey, int) indexing on Document
+    assert doc[("t1", 0)].name == "first"
+    assert doc[("t1", 1)].name == "third"
+    assert doc[("t1", -1)].name == "third"
+    assert doc[("t1", -2)].name == "first"
+    with pytest.raises(IndexError):
+        _ = doc[("t1", 2)]
+    with pytest.raises(IndexError):
+        _ = doc[("t1", -3)]
+    with pytest.raises(IndexError):
+        _ = doc[("missing", 0)]
+    assert doc.get(("t1", 1)) is doc.nodes[2]
+    assert doc.get(("t1", 2)) is None
+    assert doc.get(("t1", 2), "fallback") == "fallback"
+    assert doc.get(("missing", 0), "fallback") == "fallback"
+    assert [n.name for n in doc.getAll(("t1", 1))] == ["third"]
+    assert [n.name for n in doc.getAll(("t1", -1))] == ["third"]
+    assert not list(doc.getAll(("t1", 2)))
+
+    # Other TagKey forms paired with int: None (untagged), ..., regex, callable
+    assert doc[(None, 0)].name == "second"
+    assert doc[(None, 1)].name == "fifth"
+    assert doc[(None, -1)].name == "fifth"
+    assert doc[(..., 0)].name == "first"
+    assert doc[(..., -1)].name == "fifth"
+    assert doc[(re.compile(r"^t\d$"), 0)].name == "first"
+    assert doc[(re.compile(r"^t\d$"), 2)].name == "fourth"
+    assert doc[(re.compile(r"^t\d$"), -1)].name == "fourth"
+    assert doc[(lambda tag: tag is not None, 1)].name == "third"
+
+    # Node child list indexing (both plain int and (TagKey, int))
+    parent = doc["second"]
+    assert parent[0].name == "c0"
+    assert parent[-1].name == "c3"
+    assert parent[("a", 0)].name == "c0"
+    assert parent[("a", 1)].name == "c2"
+    assert parent[("a", -1)].name == "c2"
+    assert parent[(None, 0)].name == "c1"
+    with pytest.raises(IndexError):
+        _ = parent[4]
+    with pytest.raises(IndexError):
+        _ = parent[("a", 2)]
+    assert parent.get(4, "fallback") == "fallback"
+    assert parent.get(("a", 2), "fallback") == "fallback"
+    assert [n.name for n in parent.getAll(0)] == ["c0"]
+    assert [n.name for n in parent.getAll(("a", 1))] == ["c2"]
+    assert not list(parent.getAll(("a", 2)))
+
+    # Custom .to_kdl() nodes in child lists preserve the original object
+    class TaggedCustom:
+        def __init__(self, name: str, tag: str | None) -> None:
+            self.name = name
+            self.tag = tag
+
+        def to_kdl(self) -> kdl.Node:
+            return kdl.Node(self.name, tag=self.tag)
+
+    cA = TaggedCustom("a", "k")
+    cB = TaggedCustom("b", None)
+    cC = TaggedCustom("c", "k")
+    customDoc = kdl.Document([t.cast("kdl.Node", cA), t.cast("kdl.Node", cB), t.cast("kdl.Node", cC)])
+    assert customDoc[0] is cA
+    assert customDoc[("k", 1)] is cC
+    assert customDoc[("k", -1)] is cC
+    assert list(customDoc.getAll(("k", 0))) == [cA]
+
+    # bool keys, invalid TagKey with int, and int on single-node matchers raise TypeError
+    for target in (doc, parent, emptyDoc):
+        for badKey in (True, False, ("t1", True), ("t1", False)):
+            with pytest.raises(TypeError, match="Invalid NameKey"):
+                _ = target[badKey]
+            with pytest.raises(TypeError, match="Invalid NameKey"):
+                target.get(badKey)
+            with pytest.raises(TypeError, match="Invalid NameKey"):
+                list(target.getAll(badKey))
+    with pytest.raises(TypeError, match="Invalid TagKey"):
+        _ = doc[t.cast("t.Any", (123, 0))]
+    with pytest.raises(TypeError, match="only valid when searching a node list"):
+        parent.matchesKey(0)
+    with pytest.raises(TypeError, match="only valid when searching a node list"):
+        parent.matchesKey(("other", 0))
+    with pytest.raises(TypeError, match="only valid when searching a node list"):
+        kdl.nodeMatchesKey(parent, 0)
+    with pytest.raises(TypeError, match="only valid when searching a node list"):
+        kdl.nameMatchesKey("second", 0)
+
+
 def test_node_call_get_entry_and_set_entry() -> None:
     node = kdl.parse('server "primary" #null port=8080 opt=#null\n').nodes[0]
 

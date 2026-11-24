@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     type ParseResult[T] = tuple[T | None, int]
 
     type TagKey = str | None | EllipsisType | re.Pattern[str] | Callable[[str | None], bool]
-    type NameKey = str | None | EllipsisType | re.Pattern[str] | Callable[[str | None], bool]
+    type NameKey = str | int | None | EllipsisType | re.Pattern[str] | Callable[[str | None], bool]
     type NodeKey = NameKey | tuple[TagKey, NameKey]
 
     type _ClassInfo = type | UnionType | tuple[_ClassInfo, ...]

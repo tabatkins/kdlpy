@@ -27,7 +27,7 @@ from .types import (
     RawString,
     String,
     Value,
-    scaleInt,
+    _scaleInt,
 )
 
 if t.TYPE_CHECKING:
@@ -473,7 +473,7 @@ def _numFromDecStr(raw: str) -> float | int:
                 expInt = int(raw[ePos + 1 :], 10)
                 if expInt >= 0:
                     mInt = int(raw[:ePos], 10)
-                    return mInt if expInt == 0 else scaleInt(mInt, expInt)
+                    return mInt if expInt == 0 else _scaleInt(mInt, expInt)
             except ValueError:
                 pass
     return _floatFromDecStr(raw)

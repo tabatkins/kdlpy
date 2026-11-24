@@ -57,22 +57,17 @@ class Document:
     def get[VT](self, key: t.NodeKey, default: VT | None = None) -> Node | VT | None:
         try:
             return self[key]
-        except KeyError:
+        except (KeyError, IndexError):
             return default
 
     def __getitem__(self, key: t.NodeKey) -> Node:
-        for node in self.nodes:
-            if nodeMatchesKey(node, key):
-                return node
-        raise KeyError(key)
+        return _getNodeByKey(self.nodes, key)
 
     def getAll(
         self,
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
-        for node in self.nodes:
-            if nodeMatchesKey(node, key):
-                yield node
+        return _iterNodesByKey(self.nodes, key)
 
     def __str__(self) -> str:
         return self.print()
@@ -108,22 +103,17 @@ class Node:
     def get[VT](self, key: t.NodeKey, default: VT | None = None) -> Node | VT | None:
         try:
             return self[key]
-        except KeyError:
+        except (KeyError, IndexError):
             return default
 
     def __getitem__(self, key: t.NodeKey) -> Node:
-        for node in self.nodes:
-            if nodeMatchesKey(node, key):
-                return node
-        raise KeyError(key)
+        return _getNodeByKey(self.nodes, key)
 
     def getAll(
         self,
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
-        for node in self.nodes:
-            if nodeMatchesKey(node, key):
-                yield node
+        return _iterNodesByKey(self.nodes, key)
 
     def matchesKey(self, key: t.NodeKey) -> bool:
         return nodeMatchesKey(self, key)
@@ -777,6 +767,82 @@ def isKdlishValue(val: t.Any) -> bool:
     return isinstance(val, _KDLISH_TYPES)
 
 
+def _findIndexedNode(nodes: list[Node], tagKey: t.TagKey, idx: int) -> Node:
+    if tagKey is Ellipsis:
+        return nodes[idx]
+    if idx >= 0:
+        seen = 0
+        for child in nodes:
+            kdlNode = child if isinstance(child, Node) else toKdlNode(child)
+            if tagMatchesKey(kdlNode.tag, tagKey):
+                if seen == idx:
+                    return child
+                seen += 1
+    else:
+        seen = 0
+        for child in reversed(nodes):
+            kdlNode = child if isinstance(child, Node) else toKdlNode(child)
+            if tagMatchesKey(kdlNode.tag, tagKey):
+                seen -= 1
+                if seen == idx:
+                    return child
+    msg = f"Node index {idx} out of range for tag key {tagKey!r}."
+    raise IndexError(msg)
+
+
+def _getNodeByKey(nodes: list[Node], key: t.NodeKey) -> Node:
+    if isinstance(key, bool):
+        msg = f"Invalid NameKey {key!r}"
+        raise TypeError(msg)
+    if isinstance(key, int):
+        return nodes[key]
+    if isinstance(key, tuple):
+        if len(key) != 2:
+            msg = f"Invalid NodeKey {key!r}"
+            raise TypeError(msg)
+        tagKey, nameKey = key
+        if isinstance(nameKey, bool):
+            msg = f"Invalid NameKey {nameKey!r}"
+            raise TypeError(msg)
+        if isinstance(nameKey, int):
+            return _findIndexedNode(nodes, tagKey, nameKey)
+    for node in nodes:
+        if nodeMatchesKey(node, key):
+            return node
+    raise KeyError(key)
+
+
+def _iterNodesByKey(nodes: list[Node], key: t.NodeKey) -> t.Iterable[Node]:
+    if isinstance(key, bool):
+        msg = f"Invalid NameKey {key!r}"
+        raise TypeError(msg)
+    if isinstance(key, int):
+        try:
+            node = nodes[key]
+        except IndexError:
+            return
+        yield node
+        return
+    if isinstance(key, tuple):
+        if len(key) != 2:
+            msg = f"Invalid NodeKey {key!r}"
+            raise TypeError(msg)
+        tagKey, nameKey = key
+        if isinstance(nameKey, bool):
+            msg = f"Invalid NameKey {nameKey!r}"
+            raise TypeError(msg)
+        if isinstance(nameKey, int):
+            try:
+                node = _findIndexedNode(nodes, tagKey, nameKey)
+            except IndexError:
+                return
+            yield node
+            return
+    for node in nodes:
+        if nodeMatchesKey(node, key):
+            yield node
+
+
 def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
     if not isinstance(node, Node):
         node = toKdlNode(node)
@@ -785,6 +851,9 @@ def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
             msg = f"Invalid NodeKey {key!r}"
             raise TypeError(msg)
         tagKey, nameKey = key
+        if isinstance(nameKey, int) and not isinstance(nameKey, bool):
+            msg = f"Integer NameKey {nameKey!r} is only valid when searching a node list."
+            raise TypeError(msg)
         return tagMatchesKey(node.tag, tagKey) and nameMatchesKey(node.name, nameKey)
     return nameMatchesKey(node.name, key)
 
@@ -830,6 +899,9 @@ def nameMatchesKey(val: str | None, key: t.NameKey) -> bool:
         return bool(key.match(val))
     if callable(key):
         return bool(key(val))
+    if isinstance(key, int) and not isinstance(key, bool):
+        msg = f"Integer NameKey {key!r} is only valid when searching a node list."
+        raise TypeError(msg)
     msg = f"Invalid NameKey {key!r}"
     raise TypeError(msg)
 

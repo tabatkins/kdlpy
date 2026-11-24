@@ -37,7 +37,7 @@ from .types import (
     RawString,
     String,
     Value,
-    scaleInt,
+    _scaleInt,
 )
 
 if t.TYPE_CHECKING:
@@ -679,7 +679,7 @@ def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.An
                     expInt = int(cleanExp, 10)
                     if expInt >= 0:
                         mInt = int(cleanMant, 10)
-                        return (mInt if expInt == 0 else scaleInt(mInt, expInt), end)
+                        return (mInt if expInt == 0 else _scaleInt(mInt, expInt), end)
                 except ValueError:
                     pass
         raw = mDec.group()

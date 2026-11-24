@@ -112,7 +112,7 @@ A `kdl.Document` is fully mutable.
 In addition to raw `.nodes`, `.args`, and `.props` attributes,
 documents and nodes provide convenient lookup and mutation shortcuts:
 
-* Index children with `doc[key]` / `node[key]` (or `.get(key, default)` / `.getAll(key)`), using any [`NodeKey`](#nodekey).
+* Index children with `doc[key]` / `node[key]` (or `.get(key, default)` / `.getAll(key)`), using any [`NodeKey`](#nodekey) — including `int` indices like `doc[0]` or `doc[("tag", -1)]`.
 * Call a node directly to access an argument by `int` index or a property by `str` key: `node(0)` or `node("foo")`.
 * Use `node.getEntry(key, default)` for lookups with a fallback, and `node.setEntry(key, value)` to update/append entries.
 
@@ -425,15 +425,15 @@ A `PrintConfig` object has the following properties:
 	* `parser.parse(chars: str, config: kdl.ParseConfig | None = None) -> kdl.Document`
 * `kdl.Document(nodes: list[kdl.Node] = [], printConfig: kdl.PrintConfig | None = None)`
 	* `doc.print(config: kdl.PrintConfig | None = None) -> str`
-	* `doc[key: kdl.NodeKey] -> kdl.Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches, similar to a `dict`.
-	* `doc.get(key: kdl.NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey), or `default` if nothing matches.
-	* `doc.getAll(key: kdl.NodeKey) -> Iterable[kdl.Node]` returns an iterator of all child nodes matching the [`NodeKey`](#nodekey).
+	* `doc[key: kdl.NodeKey] -> kdl.Node` returns the first child node matching the [`NodeKey`](#nodekey) (or the nth child / nth tagged child when the `NameKey` is an `int`). Raises `IndexError` if an `int` index is out of range, or `KeyError` if nothing matches.
+	* `doc.get(key: kdl.NodeKey, default: T = None) -> kdl.Node | T` returns the child node matching the [`NodeKey`](#nodekey), or `default` if nothing matches (including out-of-range `int` indices).
+	* `doc.getAll(key: kdl.NodeKey) -> Iterable[kdl.Node]` returns an iterator of all child nodes matching the [`NodeKey`](#nodekey) (for an `int` `NameKey`, yields either the single matching node or nothing).
 * `kdl.Node(name: str, tag: str | None = None, args: list[Any] = [], props: dict[str, Any] = {}, nodes: list[kdl.Node] = [])`
 	* `node.print(config: kdl.PrintConfig | None = None, indentLevel: int = 0) -> str`
-	* `node[key: kdl.NodeKey] -> kdl.Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches, similar to a `dict`.
-	* `node.get(key: kdl.NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey), or `default` if nothing matches.
-	* `node.getAll(key: kdl.NodeKey) -> Iterable[kdl.Node]` returns an iterator of all child nodes matching the [`NodeKey`](#nodekey).
-	* `node.matchesKey(key: kdl.NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#nodekey).
+	* `node[key: kdl.NodeKey] -> kdl.Node` returns the first child node matching the [`NodeKey`](#nodekey) (or the nth child / nth tagged child when the `NameKey` is an `int`). Raises `IndexError` if an `int` index is out of range, or `KeyError` if nothing matches.
+	* `node.get(key: kdl.NodeKey, default: T = None) -> kdl.Node | T` returns the child node matching the [`NodeKey`](#nodekey), or `default` if nothing matches (including out-of-range `int` indices).
+	* `node.getAll(key: kdl.NodeKey) -> Iterable[kdl.Node]` returns an iterator of all child nodes matching the [`NodeKey`](#nodekey) (for an `int` `NameKey`, yields either the single matching node or nothing).
+	* `node.matchesKey(key: kdl.NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#nodekey) (integer `NameKey`s are not valid on a single node and raise `TypeError`).
 	* `node(key: int | str) -> Any`:
 		callable shorthand for `node.getEntry(key)` without a default (e.g. `node(0)` or `node("prop")`).
 		Gets an argument by `int` index (from `node.args`) or a property by `str` key (from `node.props`),
@@ -548,11 +548,18 @@ matching against the node's name and/or tag.
 	Succeeds if the function,
 	when called with the tag/name,
 	returns `True`.
+* an `int` (`NameKey` only, not `bool`, and only when searching a child list via `[]`, `.get()`, or `.getAll()`):
+	Indexes directly into the child list (supporting negative indices like `-1`).
+	When paired with a `TagKey` in a `(TagKey, int)` tuple,
+	selects the nth child whose tag matches the `TagKey` (e.g. `("my-tag", 0)` for the first child tagged `"my-tag"`, or `("my-tag", -1)` for the last).
+	Using an `int` with single-node matching (`node.matchesKey()`, `nodeMatchesKey()`, `nameMatchesKey()`, or `nodeConverters`) raises `TypeError`.
 
-So, for example,
-`doc.getAll("foo")` returns all nodes whose name is `"foo"`, regardless of tag;
-`doc.getAll(("my-tag", ...))` returns all nodes whose tag is `"my-tag"`, regardless of node name;
-`doc.getAll(re.compile(r"-"))` returns all nodes whose name starts with `"-"`.
+So, for example:
+* `doc.getAll("foo")` returns all nodes whose name is `"foo"`, regardless of tag;
+* `doc.getAll(("my-tag", ...))` returns all nodes whose tag is `"my-tag"`, regardless of node name;
+* `doc.getAll(re.compile(r"-"))` returns all nodes whose name starts with `"-"`;
+* `doc[0]` returns the first child node (and `doc.getAll(0)` yields either just that first node or nothing if empty);
+* `doc[("my-tag", 1)]` returns the second child node whose tag is `"my-tag"` (and `doc[("my-tag", -1)]` returns the last).
 
 ### `ValueKey`
 
