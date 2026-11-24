@@ -97,11 +97,6 @@ Document(
 )
 ```
 
-> [!NOTE]
-> Plain integers (no decimal point, and either no exponent or a non-negative exponent, such as `1`, `-42`, `1e3`),
-> as well as radix literals (`0x1a`, `0o755`, `0b101`) and integer-tagged numbers (`(i64)1`), parse as Python `int`.
-> Numbers with a decimal point or a negative exponent (such as `1.0`, `1.5e2`, `1e-2`), along with `#inf`, `#-inf`, and `#nan`, parse as `float`.
-
 You can also create a `kdl.Parser()` object and call its `.parse()` method; `Parser` objects can set up parsing and printing options that'll apply by default. See [Customizing Parsing](#customizing-parsing) and [Customizing Printing](#customizing-printing) below.
 
 If parsing fails, `kdl.parse()` raises a `kdl.ParseError` with 1-indexed `.line` and `.col` attributes and a formatted `.msg`.
