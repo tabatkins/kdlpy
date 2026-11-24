@@ -137,6 +137,37 @@ class Node:
             if valueMatchesKey(val, key):
                 yield val
 
+    def __call__(self, key: int | str) -> t.Any:
+        return self.getEntry(key)
+
+    def getEntry(self, key: int | str, default: t.Any = t.UNSET) -> t.Any:
+        if isinstance(key, str):
+            if default is t.UNSET:
+                return self.props[key]
+            return self.props.get(key, default)
+        if isinstance(key, int) and not isinstance(key, bool):
+            try:
+                return self.args[key]
+            except IndexError:
+                if default is t.UNSET:
+                    raise
+                return default
+        msg = f"Entry key must be an int or str; got {type(key).__name__}."
+        raise TypeError(msg)
+
+    def setEntry(self, key: int | str, value: t.Any) -> None:
+        if isinstance(key, str):
+            self.props[key] = value
+            return
+        if isinstance(key, int) and not isinstance(key, bool):
+            if key == len(self.args):
+                self.args.append(value)
+            else:
+                self.args[key] = value
+            return
+        msg = f"Entry key must be an int or str; got {type(key).__name__}."
+        raise TypeError(msg)
+
     def __str__(self) -> str:
         return self.print()
 

@@ -394,11 +394,21 @@ A `PrintConfig` object has the following properties:
 	* `node[NodeKey] -> Node` returns the first child node matching the [`NodeKey`](#nodekey). Raises a `KeyError` if nothing matches the `NodeKey`, similar to a `dict`.
 	* `node.get(NodeKey, default: T = None) -> kdl.Node | T` returns the first child node matching the [`NodeKey`](#nodekey). Returns the default value if nothing matches.
 	* `node.getAll(NodeKey) -> Iterable[kdl.Node]` returns all child nodes matching the [`NodeKey`](#nodekey)
+	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#nodekey)
+	* `node(key: int|str) -> Any` / `node.getEntry(key: int|str, default = UNSET) -> Any`:
+		(Note: that is, the node is callable directly, as `node(0)` or `node("prop")`.)
+		Gets an argument by `int` index (from `node.args`) or a property by `str` key (from `node.props`).
+		If the index/key is missing, returns `default` when provided (in `.getEntry()`, only), 
+		or raises `IndexError` / `KeyError` otherwise.
+		Passing a `bool` or other non-`int`/`str` key raises `TypeError`.
+	* `node.setEntry(key: int|str, value: Any) -> None`:
+		sets an argument by `int` index (appending if `key == len(node.args)`, raising `IndexError` if out of range)
+		or sets/inserts a property by `str` key.
+		Passing a `bool` or other non-`int`/`str` key raises `TypeError`.
 	* `node.getProps(ValueKey) -> Iterable[tuple[str, Any]]` returns an iterator of `(name, value)` pairs for the properties whose value matches the [`ValueKey`](#valuekey)
 		(Note: for this purpose, non-KDL values, such as `int`, have no tag, and can only meaningfully be tested via a `TypeKey`.)
 	* `node.getArgs(ValueKey) -> Iterable[Any]` returns an iterator of the arguments that match the [`ValueKey`](#valuekey)
 		(Same disclaimer as `.getProps()`.)
-	* `node.matchesKey(NodeKey) -> bool` returns whether the node matches the [`NodeKey`](#nodekey)
 
 * `kdl.Value` ‡
 	* `val.print(PrintConfig|None) -> str`

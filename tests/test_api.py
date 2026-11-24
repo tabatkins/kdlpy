@@ -193,6 +193,73 @@ def test_document_and_node_lookup_methods() -> None:
     assert not srv.matchesKey(("other", "server"))
 
 
+def test_node_call_get_entry_and_set_entry() -> None:
+    node = kdl.parse('server "primary" #null port=8080 opt=#null\n').nodes[0]
+
+    # Single-arg __call__ and getEntry behave identically for int args (positive/negative) and str props
+    for getter in (node, node.getEntry):
+        assert getter(0) == "primary"
+        assert getter(1) is None
+        assert getter(-1) is None
+        assert getter(-2) == "primary"
+        with pytest.raises(IndexError):
+            getter(2)
+        with pytest.raises(IndexError):
+            getter(-3)
+
+        assert getter("port") == 8080.0
+        assert getter("opt") is None
+        with pytest.raises(KeyError):
+            getter("missing")
+
+        for badKey in (True, False, None, 1.5, ("port", int), slice(0, 1)):
+            with pytest.raises(TypeError, match="Entry key must be an int or str"):
+                getter(t.cast("t.Any", badKey))
+
+    # Default argument is supported by getEntry() only (not direct node(...) calls)
+    assert node.getEntry(1, "fallback") is None  # present #null is NOT treated as missing
+    assert node.getEntry(2, "fallback") == "fallback"
+    assert node.getEntry(2, None) is None
+    assert node.getEntry(-3, "fallback") == "fallback"
+    assert node.getEntry("opt", "fallback") is None  # present #null is NOT treated as missing
+    assert node.getEntry("missing", "fallback") == "fallback"
+    assert node.getEntry("missing", None) is None
+    for badKey in (True, False, None, 1.5, ("port", int), slice(0, 1)):
+        with pytest.raises(TypeError, match="Entry key must be an int or str"):
+            node.getEntry(t.cast("t.Any", badKey), "default")
+    with pytest.raises(TypeError):
+        t.cast("t.Any", node)("missing", "fallback")
+
+    # setEntry updates existing args/props, appends when int == len(args), and inserts new props
+    node.setEntry(0, "secondary")
+    assert node(0) == "secondary"
+    node.setEntry(-1, "last")
+    assert node(1) == "last"
+    node.setEntry(2, "appended")
+    assert node.args == ["secondary", "last", "appended"]
+    with pytest.raises(IndexError):
+        node.setEntry(4, "too-far")
+    with pytest.raises(IndexError):
+        node.setEntry(-4, "too-far-neg")
+
+    node.setEntry("port", 9090)
+    node.setEntry("tls", True)
+    assert node("port") == 9090
+    assert node("tls") is True
+
+    empty = kdl.Node("empty")
+    with pytest.raises(IndexError):
+        empty.setEntry(1, "bad")
+    with pytest.raises(IndexError):
+        empty.setEntry(-1, "bad")
+    empty.setEntry(0, "first")
+    assert empty.args == ["first"]
+
+    for badKey in (True, False, None, 1.5, ("port", int)):
+        with pytest.raises(TypeError, match="Entry key must be an int or str"):
+            node.setEntry(t.cast("t.Any", badKey), 123)
+
+
 def test_node_get_args_get_props_and_print_config() -> None:
     doc = kdl.parse("n b=2 #null 1 a=#null c=3 #null\n")
     node = doc.nodes[0]
