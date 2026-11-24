@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from . import converters, kdl1check, parsing, t
 from .chars import (
@@ -114,33 +115,7 @@ def parse(input: str, config: t.ParseConfig | None = None) -> Document:
 
     doc = Document()
     try:
-        if i < n and chars[i] in _LINESPACE_START:
-            i = skipLinespace(s, i)
-
-        while i < n:
-            node, nextI = parseBaseNode(s, i)
-            if nextI < 0:
-                break
-            if node is not None:
-                doc.nodes.append(node)
-            termEnd = skipTerminatorAndLinespace(s, nextI)
-            if termEnd < 0:
-                got = chars[nextI] if nextI < n else ""
-                raise ParseError(
-                    s,
-                    nextI,
-                    f"Expected a node terminator (newline, ;, or EOF). Got '{got}'",
-                    maybeKdl1=kdl1check.looksLikeAfterNode(chars, nextI, n),
-                )
-            i = termEnd
-
-        if i < n:
-            raise ParseError(
-                s,
-                i,
-                "Unexpected non-node content",
-                maybeKdl1=kdl1check.looksLikeNodeStart(chars, i, n),
-            )
+        doc.nodes = _parseNodes(s, i)
     except ParseError as err:
         if not allowFallback or not err.maybeKdl1:
             raise
@@ -153,11 +128,42 @@ def parse(input: str, config: t.ParseConfig | None = None) -> Document:
     return doc
 
 
-def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[Node]:
+@dataclass(slots=True)
+class _OpenNode:
+    start: int
+    nameEnd: int
+    name: str
+    tag: str | None
+    args: list[t.Any]
+    props: dict[str, t.Any]
+    children: list[Node]
+    hasRealChildren: bool
+    nodeDiscard: bool
+    blockStart: int
+    blockIsReal: bool
+    parentNodes: list[Node]
+    parentDiscard: bool
+
+
+class _NodeHead(t.NamedTuple):
+    name: str
+    tag: str | None
+    nameEnd: int
+    args: list[t.Any]
+    props: dict[str, t.Any]
+    discard: bool
+    spaceEnd: int
+
+
+def _parseNodeHead(
+    s: Stream,
+    start: int,
+    discard: bool,
+) -> _NodeHead | None:
     chars = s.chars
     n = s.length
     if start >= n:
-        return _FAIL
+        return None
 
     if chars[start] == "/" and start + 1 < n and chars[start + 1] == "-":
         i = skipLinespace(s, start + 2)
@@ -169,12 +175,12 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
     if i < n and chars[i] == "(":
         tag, tagEnd = parseTag(s, i)
         if tagEnd < 0:
-            return _FAIL
+            return None
         i = skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in _NODESPACE_START) else tagEnd
 
     name, nameEnd = parseStringText(s, i)
     if name is None:
-        return _FAIL
+        return None
     i = nameEnd
 
     args: list[t.Any] = []
@@ -216,81 +222,170 @@ def parseBaseNode(s: Stream, start: int, discard: bool = False) -> ParseResult[N
             else:
                 props[propKey] = propVal
 
-    # child blocks (optional real children plus any slashdashed child blocks)
-    children: list[Node] = []
-    hasRealChildren = False
-    while spaceEnd < n:
-        ch = chars[spaceEnd]
-        if ch == "{":
-            if hasRealChildren:
-                break
-            parsedChildren, i = parseNodeChildren(s, spaceEnd, discard=discard)
-            assert parsedChildren is not None
-            children = parsedChildren
-            hasRealChildren = True
-        elif ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
-            sdEnd = skipLinespace(s, spaceEnd + 2)
-            sdChildren, childEnd = parseNodeChildren(s, sdEnd, discard=True)
-            if sdChildren is None:
-                break
-            i = childEnd
-        else:
-            break
-        spaceEnd = skipNodespace(s, i) if (i < n and chars[i] in _NODESPACE_START) else i
-
-    i = spaceEnd
-    if discard:
-        return (None, i)
-
-    node: Node = Node(name, tag, args, props, children)
-    nodeConverters = s.config.nodeConverters
-    if nodeConverters:
-        pf: ParseFragment | None = None
-        for convKey, converter in nodeConverters.items():
-            if node.matchesKey(convKey):
-                if pf is None:
-                    pf = ParseFragment(chars[start:nameEnd], s, start)
-                converted = converter(node, pf)
-                if converted == NotImplemented:
-                    continue
-                node = converted
-                break
-
-    return (node, i)
+    return _NodeHead(name, tag, nameEnd, args, props, discard, spaceEnd)
 
 
-def parseNodeChildren(s: Stream, start: int, discard: bool = False) -> ParseResult[list[Node]]:
+def _applyNodeConverters(
+    s: Stream,
+    node: Node,
+    start: int,
+    nameEnd: int,
+) -> Node:
+    pf: ParseFragment | None = None
+    for convKey, converter in s.config.nodeConverters.items():
+        if node.matchesKey(convKey):
+            if pf is None:
+                pf = ParseFragment(s.chars[start:nameEnd], s, start)
+            converted = converter(node, pf)
+            if converted == NotImplemented:
+                continue
+            return t.cast("Node", converted)
+    return node
+
+
+def _parseNodes(s: Stream, start: int) -> list[Node]:
     chars = s.chars
     n = s.length
-    if start >= n or chars[start] != "{":
-        return _FAIL
-    i = start + 1
-    if i < n and chars[i] in _LINESPACE_START:
-        i = skipLinespace(s, i)
-    nodes: list[Node] = []
+    i = skipLinespace(s, start) if (start < n and chars[start] in _LINESPACE_START) else start
 
-    while i < n and chars[i] != "}":
-        node, nextI = parseBaseNode(s, i, discard=discard)
-        if nextI < 0:
-            break
-        i = nextI
-        if node is not None:
-            nodes.append(node)
+    rootNodes: list[Node] = []
+    curNodes = rootNodes
+    curDiscard = False
+    # Explicit stack of open ancestor nodes avoids Python recursion limits on deeply nested documents.
+    stack: list[_OpenNode] = []
+    hasNodeConverters = bool(s.config.nodeConverters)
+
+    while True:
+        # 1. Inside a child block, `}` (or EOF) closes the block and resumes its owner node.
+        if stack and (i >= n or chars[i] == "}"):
+            if i >= n:
+                raise ParseError(s, stack[-1].blockStart, "Hit EOF while searching for end of child list")
+            frame = stack.pop()
+            i += 1
+            if frame.blockIsReal:
+                frame.children = curNodes
+                frame.hasRealChildren = True
+            curNodes = frame.parentNodes
+            curDiscard = frame.parentDiscard
+            spaceEnd = skipNodespace(s, i) if (i < n and chars[i] in _NODESPACE_START) else i
+            nodeStart = frame.start
+            nameEnd = frame.nameEnd
+            name = frame.name
+            tag = frame.tag
+            args = frame.args
+            props = frame.props
+            children = frame.children
+            hasRealChildren = frame.hasRealChildren
+            nodeDiscard = frame.nodeDiscard
+        else:
+            # 2. Top-level EOF finishes the document.
+            if i >= n:
+                break
+            # 3. Parse the next node's header (`/-`, `(tag)`, `name`, args, props).
+            head = _parseNodeHead(s, i, curDiscard)
+            if head is None:
+                if stack:
+                    raise ParseError(
+                        s,
+                        i,
+                        "Junk between end of child list and closing }",
+                        maybeKdl1=kdl1check.looksLikeAfterNode(chars, i, n)
+                        or kdl1check.looksLikeNodeStart(chars, i, n),
+                    )
+                raise ParseError(
+                    s,
+                    i,
+                    "Unexpected non-node content",
+                    maybeKdl1=kdl1check.looksLikeNodeStart(chars, i, n),
+                )
+            nodeStart = i
+            name, tag, nameEnd, args, props, nodeDiscard, spaceEnd = head
+            children = []
+            hasRealChildren = False
+
+        # 4. Enter a child block (`{ ... }` or slashdashed `/- { ... }`) if one follows this node.
+        if spaceEnd < n:
+            ch = chars[spaceEnd]
+            if ch == "{" and not hasRealChildren:
+                stack.append(
+                    _OpenNode(
+                        start=nodeStart,
+                        nameEnd=nameEnd,
+                        name=name,
+                        tag=tag,
+                        args=args,
+                        props=props,
+                        children=children,
+                        hasRealChildren=hasRealChildren,
+                        nodeDiscard=nodeDiscard,
+                        blockStart=spaceEnd,
+                        blockIsReal=True,
+                        parentNodes=curNodes,
+                        parentDiscard=curDiscard,
+                    ),
+                )
+                curNodes = []
+                curDiscard = nodeDiscard
+                i = spaceEnd + 1
+                if i < n and chars[i] in _LINESPACE_START:
+                    i = skipLinespace(s, i)
+                continue
+            if ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
+                sdEnd = skipLinespace(s, spaceEnd + 2)
+                if sdEnd < n and chars[sdEnd] == "{":
+                    stack.append(
+                        _OpenNode(
+                            start=nodeStart,
+                            nameEnd=nameEnd,
+                            name=name,
+                            tag=tag,
+                            args=args,
+                            props=props,
+                            children=children,
+                            hasRealChildren=hasRealChildren,
+                            nodeDiscard=nodeDiscard,
+                            blockStart=sdEnd,
+                            blockIsReal=False,
+                            parentNodes=curNodes,
+                            parentDiscard=curDiscard,
+                        ),
+                    )
+                    curNodes = []
+                    curDiscard = True
+                    i = sdEnd + 1
+                    if i < n and chars[i] in _LINESPACE_START:
+                        i = skipLinespace(s, i)
+                    continue
+
+        # 5. No more child blocks for this node — finalize it and advance past its terminator.
+        i = spaceEnd
+        if not nodeDiscard:
+            node = Node(name, tag, args, props, children)
+            if hasNodeConverters:
+                node = _applyNodeConverters(s, node, nodeStart, nameEnd)
+            curNodes.append(node)
+
         termEnd = skipTerminatorAndLinespace(s, i)
         if termEnd < 0:
-            break
+            if stack:
+                if i < n and chars[i] == "}":
+                    continue
+                raise ParseError(
+                    s,
+                    i,
+                    "Junk between end of child list and closing }",
+                    maybeKdl1=kdl1check.looksLikeAfterNode(chars, i, n) or kdl1check.looksLikeNodeStart(chars, i, n),
+                )
+            got = chars[i] if i < n else ""
+            raise ParseError(
+                s,
+                i,
+                f"Expected a node terminator (newline, ;, or EOF). Got '{got}'",
+                maybeKdl1=kdl1check.looksLikeAfterNode(chars, i, n),
+            )
         i = termEnd
 
-    if i >= n:
-        raise ParseError(s, start, "Hit EOF while searching for end of child list")
-    if chars[i] != "}":
-        raise ParseError(
-            s,
-            i,
-            "Junk between end of child list and closing }",
-            maybeKdl1=kdl1check.looksLikeAfterNode(chars, i, n) or kdl1check.looksLikeNodeStart(chars, i, n),
-        )
-    return (nodes, i + 1)
+    return rootNodes
 
 
 def parseTag(s: Stream, start: int) -> ParseResult[str]:

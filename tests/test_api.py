@@ -710,3 +710,101 @@ def test_stream_loc_line_endings() -> None:
     sCrlf = kdl_stream.Stream("a\r\nb", kdl.ParseConfig())
     assert sCrlf.loc(0) == (1, 1)
     assert sCrlf.loc(3) == (2, 1)
+
+
+# ---------------------------------------------------------------------------
+# Deeply nested documents (arbitrary depth beyond Python recursion limit)
+# ---------------------------------------------------------------------------
+
+
+def _makeDeepDoc(depth: int, *, leaf: str = "leaf 1", slashdashPrefix: str = "") -> str:
+    parts = [f"{slashdashPrefix}n{i} k={i} {{\n" for i in range(depth)]
+    parts.append(f"{leaf}\n")
+    parts.extend("}\n" for _ in range(depth))
+    return "".join(parts)
+
+
+def test_excessively_deep_kdl2_parse_and_print() -> None:
+    depth = 2000
+    src = _makeDeepDoc(depth, leaf='(end)leaf "ok" v=42')
+
+    # Native parse + print (with indent="" and with non-empty indent past recursion limit)
+    doc = kdl.parse(src, kdl.ParseConfig(version=2))
+    cur = doc.nodes[0]
+    for i in range(depth):
+        assert cur.name == f"n{i}"
+        assert cur.props == {"k": float(i)}
+        assert len(cur.nodes) == 1
+        cur = cur.nodes[0]
+    assert cur.name == "leaf"
+    assert cur.tag == "end"
+    assert cur.args == ["ok"]
+    assert cur.props == {"v": 42.0}
+
+    printedFlat = doc.print(kdl.PrintConfig(indent=""))
+    reparsedFlat = kdl.parse(printedFlat, kdl.ParseConfig(version=2))
+    assert reparsedFlat.print(kdl.PrintConfig(indent="")) == printedFlat
+
+    # Also verify non-empty indentation and direct Node.print(indentLevel=...) past recursion limit
+    printedIndented = doc.print(kdl.PrintConfig(indent=" "))
+    assert (" " * depth) + "(end)leaf ok v=42.0\n" in printedIndented
+    assert kdl.Node("deep").print(kdl.PrintConfig(indent=" "), indentLevel=1500) == (" " * 1500) + "deep\n"
+
+    # Raw (nativeUntaggedValues=False) parse + print roundtrip at depth 2000
+    rawCfg = kdl.ParseConfig(version=2, nativeUntaggedValues=False, nativeTaggedValues=False)
+    rawDoc = kdl.parse(src, rawCfg)
+    assert rawDoc.print(kdl.PrintConfig(indent="")) == _makeDeepDoc(depth, leaf="(end)leaf ok v=42")
+
+
+def test_excessively_deep_kdl2_converters_slashdash_and_errors() -> None:
+    depth = 1500
+
+    # Node converters run bottom-up without recursion overflow
+    seenOrder: list[str] = []
+
+    def recordNode(node: kdl.Node, _pf: kdl.ParseFragment) -> kdl.Node:
+        seenOrder.append(node.name)
+        return node
+
+    convDoc = kdl.parse(
+        _makeDeepDoc(depth, leaf="leaf"),
+        kdl.ParseConfig(version=2, nodeConverters={...: recordNode}),
+    )
+    assert len(convDoc.nodes) == 1
+    assert len(seenOrder) == depth + 1
+    assert seenOrder[0] == "leaf"
+    assert seenOrder[-1] == "n0"
+
+    # Deeply nested slashdashed node and slashdashed child blocks
+    sdNodeDoc = kdl.parse(_makeDeepDoc(depth, slashdashPrefix="/- ") + "after 1\n", kdl.ParseConfig(version=2))
+    assert [n.name for n in sdNodeDoc.nodes] == ["after"]
+
+    sdBlocksParts = [f"n{i} /- {{\n" for i in range(depth)]
+    sdBlocksParts.append("ignored 1\n")
+    sdBlocksParts.extend("}\n" for _ in range(depth))
+    sdBlocksDoc = kdl.parse("".join(sdBlocksParts), kdl.ParseConfig(version=2))
+    assert len(sdBlocksDoc.nodes) == 1
+    assert sdBlocksDoc.nodes[0].name == "n0"
+    assert sdBlocksDoc.nodes[0].nodes == []
+
+    # Unclosed deeply nested block raises ParseError (not RecursionError) at the unclosed `{`
+    unclosed = "".join(f"n{i} {{\n" for i in range(depth)) + "leaf\n" + ("}\n" * (depth - 1))
+    with pytest.raises(kdl.ParseError, match="Hit EOF while searching for end of child list") as excInfo:
+        kdl.parse(unclosed, kdl.ParseConfig(version=2))
+    assert excInfo.value.line == 1
+
+
+def test_excessively_deep_kdl1_parse_and_print() -> None:
+    depth = 2000
+    src = _makeDeepDoc(depth, leaf="leaf true")
+
+    for cfg in (kdl.ParseConfig(version=1), kdl.ParseConfig(version="auto")):
+        doc = kdl.parse(src, cfg)
+        cur = doc.nodes[0]
+        for i in range(depth):
+            assert cur.name == f"n{i}"
+            cur = cur.nodes[0]
+        assert cur.name == "leaf"
+        assert cur.args == [True]
+        printed = doc.print(kdl.PrintConfig(indent=""))
+        assert "leaf #true\n" in printed

@@ -16,16 +16,18 @@ from .chars import DISALLOWED_OR_NL_PATTERN, DISALLOWED_OR_NON_ASCII_NL_RE, NEG_
 
 # Cache of precomputed indentation strings per indent unit, populated lazily on first use.
 _INITIAL_INDENT_DEPTH = 16
+_MAX_CACHED_INDENT_DEPTH = 64
 _INDENTS: dict[str, list[str]] = {}
 
 
 def _getIndents(unit: str, minLevel: int = 0) -> list[str]:
     indents = _INDENTS.get(unit)
     if indents is None:
-        depth = max(_INITIAL_INDENT_DEPTH, minLevel + 1)
+        depth = min(_MAX_CACHED_INDENT_DEPTH, max(_INITIAL_INDENT_DEPTH, minLevel + 1))
         indents = _INDENTS[unit] = [unit * i for i in range(depth)]
-    elif minLevel >= len(indents):
-        indents.extend(unit * i for i in range(len(indents), minLevel + _INITIAL_INDENT_DEPTH))
+    elif minLevel >= len(indents) and len(indents) < _MAX_CACHED_INDENT_DEPTH:
+        target = min(_MAX_CACHED_INDENT_DEPTH, minLevel + _INITIAL_INDENT_DEPTH)
+        indents.extend(unit * i for i in range(len(indents), target))
     return indents
 
 
@@ -41,10 +43,8 @@ class Document:
             # always end a kdl doc with a newline
             return "\n"
         out: list[str] = []
-        state = _PrintState(out, cfg, _getIndents(cfg.indent), strCache, strFmt)
-        for node in self.nodes:
-            childNode = node if isinstance(node, Node) else toKdlNode(node)
-            _printNodeInto(childNode, 0, state)
+        state = _PrintState(out, cfg, strCache, strFmt)
+        _printNodesInto(self.nodes, 0, state)
         return "".join(out)
 
     @t.overload
@@ -94,8 +94,8 @@ class Node:
         strCache, strFmt = _getStrPrinter(cfg.respectStringType)
         level = max(0, indentLevel)
         out: list[str] = []
-        state = _PrintState(out, cfg, _getIndents(cfg.indent, level), strCache, strFmt)
-        _printNodeInto(self, level, state)
+        state = _PrintState(out, cfg, strCache, strFmt)
+        _printNodesInto([self], level, state)
         return "".join(out)
 
     @t.overload
@@ -144,120 +144,146 @@ class Node:
 class _PrintState(t.NamedTuple):
     out: list[str]
     config: t.PrintConfig
-    indents: list[str]
     strCache: dict[str, str]
     strFmt: t.Callable[[str], str]
 
 
-def _printNodeInto(node: Node, indentLevel: int, state: _PrintState) -> None:
-    # Appends chunks into a single shared list to avoid O(N^2) string concatenation across subtrees.
-    out, config, indents, strCache, strFmt = state
+def _printNodesInto(rootNodes: list[Node], baseLevel: int, state: _PrintState) -> None:
+    # Appends chunks into a single shared list using an explicit stack of parent cursors to avoid
+    # both O(N^2) string concatenation and Python recursion limits on deeply nested trees.
+    out, config, strCache, strFmt = state
     append = out.append
-    indentStr = indents[indentLevel]
+    printNullArgs = config.printNullArgs
+    printNullProps = config.printNullProps
+    sortProperties = config.sortProperties
+    semicolons = config.semicolons
+    indentUnit = config.indent
+    indents = _getIndents(indentUnit, baseLevel)
+    indentsLen = len(indents)
 
-    # Inline cache lookup is safe with `or` because string formatters never return "".
-    nameStr = strCache.get(node.name) or strFmt(node.name)
-    if node.tag is not None:
-        tagStr = strCache.get(node.tag) or strFmt(node.tag)
-        append(f"{indentStr}({tagStr}){nameStr}")
-    else:
-        append(f"{indentStr}{nameStr}" if indentStr else nameStr)
+    curNodes = rootNodes
+    curIdx = 0
+    curLen = len(curNodes)
+    indentLevel = baseLevel
+    indentStr = indents[indentLevel] if indentLevel < indentsLen else (indentUnit * indentLevel)
+    # Saved ancestor cursors: (siblingNodes, nextIndex, len(siblingNodes), indentLevel, indentStr)
+    stack: list[tuple[list[Node], int, int, int, str]] = []
+    push = stack.append
+    pop = stack.pop
 
-    if node.args:
-        printNullArgs = config.printNullArgs
-        for value in node.args:
-            # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives;
-            # subclasses (e.g. IntEnum) still fall through to toKdlValue().
-            valType = type(value)
-            if valType is str:
-                valStr = strCache.get(value) or strFmt(value)
-            elif value is True:
-                valStr = "#true"
-            elif value is False:
-                valStr = "#false"
-            elif valType is float:
-                if math.isfinite(value):
-                    valStr = str(value)
-                elif math.isnan(value):
-                    valStr = "#nan"
-                else:
-                    valStr = "#inf" if value > 0 else "#-inf"
-            elif valType is int:
-                try:
-                    valStr = str(value)
-                except ValueError:
-                    valStr = "#inf" if value > 0 else "#-inf"
-            elif value is None:
-                if not printNullArgs:
-                    continue
-                valStr = "#null"
-            elif isinstance(value, Value):
-                if not printNullArgs and isinstance(value, Null):
-                    continue
-                valStr = value.print(config)
+    while True:
+        while curIdx >= curLen:
+            if not stack:
+                return
+            curNodes, curIdx, curLen, indentLevel, indentStr = pop()
+            if semicolons:
+                append(f"{indentStr}}};\n" if indentStr else "};\n")
             else:
-                kdlVal = toKdlValue(value)
-                if not printNullArgs and isinstance(kdlVal, Null):
-                    continue
-                valStr = kdlVal.print(config)
-            append(f" {valStr}")
+                append(f"{indentStr}}}\n" if indentStr else "}\n")
 
-    if node.props:
-        propsIter: t.Iterable[tuple[str, t.Any]] = (
-            sorted(node.props.items()) if config.sortProperties else node.props.items()
-        )
-        printNullProps = config.printNullProps
-        for name, value in propsIter:
-            valType = type(value)
-            if valType is str:
-                valStr = strCache.get(value) or strFmt(value)
-            elif value is True:
-                valStr = "#true"
-            elif value is False:
-                valStr = "#false"
-            elif valType is float:
-                if math.isfinite(value):
-                    valStr = str(value)
-                elif math.isnan(value):
-                    valStr = "#nan"
-                else:
-                    valStr = "#inf" if value > 0 else "#-inf"
-            elif valType is int:
-                try:
-                    valStr = str(value)
-                except ValueError:
-                    valStr = "#inf" if value > 0 else "#-inf"
-            elif value is None:
-                if not printNullProps:
-                    continue
-                valStr = "#null"
-            elif isinstance(value, Value):
-                if not printNullProps and isinstance(value, Null):
-                    continue
-                valStr = value.print(config)
-            else:
-                kdlVal = toKdlValue(value)
-                if not printNullProps and isinstance(kdlVal, Null):
-                    continue
-                valStr = kdlVal.print(config)
-            keyStr = strCache.get(name) or strFmt(name)
-            append(f" {keyStr}={valStr}")
+        item = curNodes[curIdx]
+        curIdx += 1
+        node = item if isinstance(item, Node) else toKdlNode(item)
 
-    if node.nodes:
-        append(" {\n")
-        childLevel = indentLevel + 1
-        if childLevel >= len(indents):
-            unit = config.indent
-            indents.extend(unit * i for i in range(len(indents), childLevel + _INITIAL_INDENT_DEPTH))
-        for child in node.nodes:
-            childNode = child if isinstance(child, Node) else toKdlNode(child)
-            _printNodeInto(childNode, childLevel, state)
-        if config.semicolons:
-            append(f"{indentStr}}};\n" if indentStr else "};\n")
+        # Inline cache lookup is safe with `or` because string formatters never return "".
+        nameStr = strCache.get(node.name) or strFmt(node.name)
+        if node.tag is not None:
+            tagStr = strCache.get(node.tag) or strFmt(node.tag)
+            append(f"{indentStr}({tagStr}){nameStr}")
         else:
-            append(f"{indentStr}}}\n" if indentStr else "}\n")
-    else:
-        append(";\n" if config.semicolons else "\n")
+            append(f"{indentStr}{nameStr}" if indentStr else nameStr)
+
+        if node.args:
+            for value in node.args:
+                # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives;
+                # subclasses (e.g. IntEnum) still fall through to toKdlValue().
+                valType = type(value)
+                if valType is str:
+                    valStr = strCache.get(value) or strFmt(value)
+                elif value is True:
+                    valStr = "#true"
+                elif value is False:
+                    valStr = "#false"
+                elif valType is float:
+                    if math.isfinite(value):
+                        valStr = str(value)
+                    elif math.isnan(value):
+                        valStr = "#nan"
+                    else:
+                        valStr = "#inf" if value > 0 else "#-inf"
+                elif valType is int:
+                    try:
+                        valStr = str(value)
+                    except ValueError:
+                        valStr = "#inf" if value > 0 else "#-inf"
+                elif value is None:
+                    if not printNullArgs:
+                        continue
+                    valStr = "#null"
+                elif isinstance(value, Value):
+                    if not printNullArgs and isinstance(value, Null):
+                        continue
+                    valStr = value.print(config)
+                else:
+                    kdlVal = toKdlValue(value)
+                    if not printNullArgs and isinstance(kdlVal, Null):
+                        continue
+                    valStr = kdlVal.print(config)
+                append(f" {valStr}")
+
+        if node.props:
+            propsIter: t.Iterable[tuple[str, t.Any]] = (
+                sorted(node.props.items()) if sortProperties else node.props.items()
+            )
+            for name, value in propsIter:
+                valType = type(value)
+                if valType is str:
+                    valStr = strCache.get(value) or strFmt(value)
+                elif value is True:
+                    valStr = "#true"
+                elif value is False:
+                    valStr = "#false"
+                elif valType is float:
+                    if math.isfinite(value):
+                        valStr = str(value)
+                    elif math.isnan(value):
+                        valStr = "#nan"
+                    else:
+                        valStr = "#inf" if value > 0 else "#-inf"
+                elif valType is int:
+                    try:
+                        valStr = str(value)
+                    except ValueError:
+                        valStr = "#inf" if value > 0 else "#-inf"
+                elif value is None:
+                    if not printNullProps:
+                        continue
+                    valStr = "#null"
+                elif isinstance(value, Value):
+                    if not printNullProps and isinstance(value, Null):
+                        continue
+                    valStr = value.print(config)
+                else:
+                    kdlVal = toKdlValue(value)
+                    if not printNullProps and isinstance(kdlVal, Null):
+                        continue
+                    valStr = kdlVal.print(config)
+                keyStr = strCache.get(name) or strFmt(name)
+                append(f" {keyStr}={valStr}")
+
+        if node.nodes:
+            append(" {\n")
+            push((curNodes, curIdx, curLen, indentLevel, indentStr))
+            curNodes = node.nodes
+            curIdx = 0
+            curLen = len(curNodes)
+            indentLevel += 1
+            if indentLevel >= indentsLen and indentsLen < _MAX_CACHED_INDENT_DEPTH:
+                _getIndents(indentUnit, indentLevel)
+                indentsLen = len(indents)
+            indentStr = indents[indentLevel] if indentLevel < indentsLen else (indentUnit * indentLevel)
+        else:
+            append(";\n" if semicolons else "\n")
 
 
 class Value:
