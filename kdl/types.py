@@ -7,6 +7,7 @@ import decimal
 import ipaddress
 import math
 import re
+import sys
 import urllib.parse
 import uuid
 from dataclasses import dataclass
@@ -409,6 +410,17 @@ class Octal(Numberish):
         return self.print()
 
 
+def _scaleInt(mantissa: int, exp: int) -> float | int:
+    # Computes `mantissa * 10**exp` as an exact int when within Python's str-digit limit,
+    # falling back to ±inf on enormous exponents to prevent OOM / ValueError on printing.
+    if mantissa == 0:
+        return 0
+    maxDigits = sys.get_int_max_str_digits() or 4300
+    if exp < maxDigits and (mantissa.bit_length() * 30103) // 100000 + exp < maxDigits:
+        return t.cast("int", mantissa * (10**exp))
+    return POS_INF if mantissa > 0 else NEG_INF
+
+
 @dataclass(slots=True)
 class Decimal(Numberish):
     mantissa: int | float
@@ -417,17 +429,17 @@ class Decimal(Numberish):
 
     @property
     @t.override
-    def value(self) -> float:
+    def value(self) -> float | int:
         mantissa = self.mantissa
-        if isinstance(mantissa, float) and not math.isfinite(mantissa):
-            return mantissa
-        if self.exponent == 0:
-            if isinstance(mantissa, float):
+        if isinstance(mantissa, float):
+            if not math.isfinite(mantissa) or self.exponent == 0:
                 return mantissa
-            try:
-                return float(mantissa)
-            except OverflowError:
-                return POS_INF if mantissa > 0 else NEG_INF
+        else:
+            exp = self.exponent
+            if exp == 0:
+                return mantissa
+            if exp > 0:
+                return _scaleInt(mantissa, exp)
         # Parse via strtod rather than `mantissa * 10.0**exponent` to avoid OverflowError and double-rounding.
         try:
             s = str(mantissa)

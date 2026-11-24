@@ -38,7 +38,10 @@ def _normalizeValue(val: t.Any) -> t.Any:
         if isinstance(num, float) and num == 0.0:
             # Distinguish -0.0 from +0.0 only if negative sign bit is set
             return ("num", val.tag, math.copysign(1.0, num), 0.0)
-        return ("num", val.tag, float(num))
+        try:
+            return ("num", val.tag, float(num))
+        except OverflowError:
+            return ("num", val.tag, float("inf") if num > 0 else float("-inf"))
     if isinstance(val, kdl.Stringish):
         return ("str", val.tag, val.value)
     if isinstance(val, kdl.Bool):
@@ -444,7 +447,8 @@ def test_config_converters_and_native_types_in_kdl1() -> None:
         "custom:hi",
         kdl.String("keep", tag="skip"),
     ]
-    assert node.props == {"dup": 2.0}
+    assert node.props == {"dup": 2}
+    assert isinstance(node.props["dup"], int)
     assert seenVals == ['"hi"', '"keep"']
 
 
@@ -458,4 +462,5 @@ def test_config_converters_and_native_types_in_kdl1() -> None:
 )
 def test_kdl1_crlf_escline(src: str) -> None:
     doc = kdl.parse(src, kdl.ParseConfig(version=1))
-    assert doc.nodes[0].args == [1.0, 2.0]
+    assert doc.nodes[0].args == [1, 2]
+    assert all(isinstance(v, int) for v in doc.nodes[0].args)

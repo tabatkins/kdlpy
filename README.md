@@ -85,7 +85,7 @@ Document(
                     tag=None,
                     args=[],
                     props={
-                        'foo': 1.0,
+                        'foo': 1,
                         'bar': True
                     },
                     nodes=[]
@@ -98,9 +98,9 @@ Document(
 ```
 
 > [!NOTE]
-> Untagged decimal numbers (like `foo=1`) parse as Python `float` (`1.0`),
-> since KDL's grammar does not distinguish integers from floats without a type annotation.
-> Radix literals (`0x1a`, `0o755`, `0b101`) and integer-tagged numbers (like `(i64)1`) parse as `int`.
+> Plain integers (no decimal point, and either no exponent or a non-negative exponent, such as `1`, `-42`, `1e3`),
+> as well as radix literals (`0x1a`, `0o755`, `0b101`) and integer-tagged numbers (`(i64)1`), parse as Python `int`.
+> Numbers with a decimal point or a negative exponent (such as `1.0`, `1.5e2`, `1e-2`), along with `#inf`, `#-inf`, and `#nan`, parse as `float`.
 
 You can also create a `kdl.Parser()` object and call its `.parse()` method; `Parser` objects can set up parsing and printing options that'll apply by default. See [Customizing Parsing](#customizing-parsing) and [Customizing Printing](#customizing-printing) below.
 
@@ -122,7 +122,7 @@ documents and nodes provide convenient lookup and mutation shortcuts:
 'arg'
 >>> child = parent["child_node"]
 >>> child("foo")
-1.0
+1
 >>> child.getEntry("missing", "fallback")
 'fallback'
 >>> child.setEntry("foo", 2)
@@ -147,8 +147,8 @@ kdl-py automatically parses KDL values into native Python types and serializes t
 | --- | --- | --- |
 | `bool` | `#true`, `#false` | `#true`, `#false` |
 | `None` | `#null` | `#null` |
-| `float` | untagged decimal numbers, `#inf`, `#-inf`, `#nan` | decimal number, `#inf`, `#-inf`, `#nan` |
-| `int` | untagged `0x`/`0o`/`0b` literals (or integer tags below) | decimal number |
+| `int` | plain untagged integers (no decimal point; no exponent or non-negative exponent), `0x`/`0o`/`0b` literals, or integer tags below | decimal number |
+| `float` | untagged numbers with a decimal point or negative exponent, `#inf`, `#-inf`, `#nan` | decimal number, `#inf`, `#-inf`, `#nan` |
 | `str` | untagged strings | formatted per [`PrintConfig.respectStringType`](#customizing-printing) (bare identifier, quoted, or raw string by default) |
 
 ### Reserved Tagged Types
@@ -213,7 +213,7 @@ A `ParseConfig` object has the following properties:
 
 * `nativeUntaggedValues: bool = True`
 
-	Controls whether the parser produces native Python objects (`str`, `float` for decimals/specials, `int` for `0x`/`0o`/`0b`, `bool`, `None`)
+	Controls whether the parser produces native Python objects (`str`, `int`, `float` including `inf`/`-inf`/`nan`, `bool`, `None`)
 	when parsing untagged values (those without a `(tag)` prefix),
 	or always produces kdl-py `Value` objects (`kdl.IdentString`, `kdl.String`, `kdl.RawString`, `kdl.Decimal`, `kdl.Hex`, `kdl.Infinity`, `kdl.NaN`, etc.).
 
@@ -337,7 +337,7 @@ In order of importance:
 ```py3
 >>> doc = kdl.parse('server port=8080 host="localhost" {\n  route "/api"\n}\n')
 >>> print(doc.print(kdl.PrintConfig(indent="  ", sortProperties=True)))
-server host=localhost port=8080.0 {
+server host=localhost port=8080 {
   route "/api"
 }
 ```
@@ -456,7 +456,7 @@ A `PrintConfig` object has the following properties:
 * `kdl.Binary(value: int, tag: str | None = None)`
 * `kdl.Octal(value: int, tag: str | None = None)`
 * `kdl.Decimal(mantissa: int | float, exponent: int = 0, tag: str | None = None)`
-	* `dec.value`: readonly `float`, `float(mantissa)` when `exponent == 0` or parsed from `f"{mantissa}e{exponent}"`
+	* `dec.value`: readonly `float | int`; returns an exact `int` when `mantissa` is an `int` and `exponent >= 0` (within Python's integer digit limit), otherwise a `float`
 * `kdl.Hex(value: int, tag: str | None = None)`
 * `kdl.Infinity(value: float, tag: str | None = None)`
 * `kdl.NaN(value: float = float("nan"), tag: str | None = None)`

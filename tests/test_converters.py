@@ -230,10 +230,11 @@ def test_wrong_kind_for_builtin_tag_and_native_flags() -> None:
     # nativeTaggedValues=False preserves tagged values as kdl.Value while converting untagged
     noTagDoc = kdl.parse('n 1 (i8)2 (date)"2026-11-23"\n', kdl.ParseConfig(nativeTaggedValues=False))
     assert noTagDoc.nodes[0].args == [
-        1.0,
+        1,
         kdl.Decimal(2, tag="i8"),
         kdl.String("2026-11-23", tag="date"),
     ]
+    assert isinstance(noTagDoc.nodes[0].args[0], int)
 
     # nativeUntaggedValues=False preserves untagged as kdl.Value while still converting tagged
     noUntagDoc = kdl.parse('n 1 (i8)2 (date)"2026-11-23"\n', kdl.ParseConfig(nativeUntaggedValues=False))
@@ -251,6 +252,7 @@ def test_native_serialization_roundtrip() -> None:
         False,
         "hello world",
         "bare",
+        42,
         42.0,
         -3.5,
         float("inf"),

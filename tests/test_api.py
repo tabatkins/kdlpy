@@ -31,14 +31,17 @@ def test_parser_config_and_print_config_precedence() -> None:
 
     # Explicit ParseConfig passed to parser.parse() overrides parser.parseConfig
     overrideDoc = parser.parse("n 1\n", kdl.ParseConfig(nativeUntaggedValues=True, version=2))
-    assert overrideDoc.nodes[0].args == [1.0]
+    assert overrideDoc.nodes[0].args == [1]
+    assert isinstance(overrideDoc.nodes[0].args[0], int)
     assert overrideDoc.printConfig is printCfg
 
 
 def test_parser_defaults() -> None:
-    doc = kdl.Parser().parse("a 1 #true #null str\n")
+    doc = kdl.Parser().parse("a 1 1.5 #true #null str\n")
     assert doc.printConfig is None
-    assert doc.nodes[0].args == [1.0, True, None, "str"]
+    assert doc.nodes[0].args == [1, 1.5, True, None, "str"]
+    assert isinstance(doc.nodes[0].args[0], int)
+    assert isinstance(doc.nodes[0].args[1], float)
 
 
 def test_kdl2_value_converters_and_fallthrough() -> None:
@@ -76,10 +79,10 @@ def test_kdl2_value_converters_and_fallthrough() -> None:
     assert node.args == [
         "first:custom:hit",
         "second:pass",
-        "override:5.0",
+        "override:5",
         7,  # NotImplemented fell through to built-in (u8) converter
         30,
-        0.0,  # NotImplemented fell through to nativeUntaggedValues
+        0,  # NotImplemented fell through to nativeUntaggedValues
     ]
     assert node.props == {"k": "first:custom:prop"}
     # Slashdashed values must not invoke converters
@@ -120,7 +123,7 @@ def test_kdl2_node_converters_and_fallthrough() -> None:
     box = doc.nodes[0]
     assert isinstance(box, kdl.Node)
     assert box.name == "wrapped_box"
-    assert box.args == ["(tag)box", 42.0]
+    assert box.args == ["(tag)box", 42]
     assert box.nodes == ["leaf:ok"]
     assert doc.nodes[1] == {"converted": "passthrough", "children": ["leaf:nested"]}
 
@@ -207,7 +210,8 @@ def test_node_call_get_entry_and_set_entry() -> None:
         with pytest.raises(IndexError):
             getter(-3)
 
-        assert getter("port") == 8080.0
+        assert getter("port") == 8080
+        assert isinstance(getter("port"), int)
         assert getter("opt") is None
         with pytest.raises(KeyError):
             getter("missing")
@@ -263,17 +267,14 @@ def test_node_call_get_entry_and_set_entry() -> None:
 def test_node_get_args_get_props_and_print_config() -> None:
     doc = kdl.parse("n b=2 #null 1 a=#null c=3 #null\n")
     node = doc.nodes[0]
-    assert node.args == [None, 1.0, None]
-    assert node.props == {"b": 2.0, "a": None, "c": 3.0}
-    assert list(node.getArgs((..., float))) == [1.0]
-    assert list(node.getProps((..., float))) == [("b", 2.0), ("c", 3.0)]
-    assert doc.print(kdl.PrintConfig(printNullArgs=False)) == "n 1.0 b=2.0 a=#null c=3.0\n"
-    assert doc.print(kdl.PrintConfig(printNullProps=False)) == "n #null 1.0 #null b=2.0 c=3.0\n"
-    assert (
-        doc.print(kdl.PrintConfig(printNullArgs=False, printNullProps=False, sortProperties=True))
-        == "n 1.0 b=2.0 c=3.0\n"
-    )
-    assert doc.print(kdl.PrintConfig(sortProperties=True)) == "n #null 1.0 #null a=#null b=2.0 c=3.0\n"
+    assert node.args == [None, 1, None]
+    assert node.props == {"b": 2, "a": None, "c": 3}
+    assert list(node.getArgs((..., int))) == [1]
+    assert list(node.getProps((..., int))) == [("b", 2), ("c", 3)]
+    assert doc.print(kdl.PrintConfig(printNullArgs=False)) == "n 1 b=2 a=#null c=3\n"
+    assert doc.print(kdl.PrintConfig(printNullProps=False)) == "n #null 1 #null b=2 c=3\n"
+    assert doc.print(kdl.PrintConfig(printNullArgs=False, printNullProps=False, sortProperties=True)) == "n 1 b=2 c=3\n"
+    assert doc.print(kdl.PrintConfig(sortProperties=True)) == "n #null 1 #null a=#null b=2 c=3\n"
 
 
 def test_empty_document_and_node_print_indent() -> None:
@@ -539,8 +540,12 @@ def test_decimal_scinot_overflow_and_enormous_ints() -> None:
     d3 = kdl.parse("n 0.00001\n", rawCfg)
     assert d3.print(kdl.PrintConfig(exponent="E")) == "n 1E-5\n"
 
-    assert math.isinf(kdl.Decimal(10**400).value)
+    assert kdl.Decimal(10**400).value == 10**400
+    assert isinstance(kdl.Decimal(10**400).value, int)
+    assert math.isinf(kdl.Decimal(1, 5000).value)
     assert math.isinf(kdl.Decimal(10**5000, 1).value)
+    assert kdl.Decimal(0, 10**9).value == 0
+    assert isinstance(kdl.Decimal(0, 10**9).value, int)
     assert kdl.Decimal(10**5000).print() == "#inf"
     assert kdl.Decimal(-(10**5000)).print() == "#-inf"
     assert kdl.Decimal(float("nan")).print() == "#nan"
@@ -575,6 +580,67 @@ def test_decimal_scinot_overflow_and_enormous_ints() -> None:
         dV1 = kdl.parse(src, kdl.ParseConfig(version=1, nativeUntaggedValues=False))
         assert dV1.nodes[0].args[0].value == float("inf")
         assert dV1.nodes[0].args[1].value == float("inf")
+
+
+def test_integer_vs_float_number_parsing() -> None:
+    src = (
+        "n 0 -0 1 -42 +1_000 1__0 1e0 1e+0 1e-0 1e3 2_5E+2 -3e2 0e999999 "
+        + "1.0 -0.0 1.5 1.5e2 1.0e0 1e-2 100e-2 -0e-5 "
+        + "p_int=7 p_exp=2e4 p_flt=7.0 p_negexp=7e-1\n"
+    )
+    expectedArgs: list[tuple[float | int, type]] = [
+        (0, int),
+        (0, int),
+        (1, int),
+        (-42, int),
+        (1000, int),
+        (10, int),
+        (1, int),
+        (1, int),
+        (1, int),
+        (1000, int),
+        (2500, int),
+        (-300, int),
+        (0, int),
+        (1.0, float),
+        (-0.0, float),
+        (1.5, float),
+        (150.0, float),
+        (1.0, float),
+        (0.01, float),
+        (1.0, float),
+        (0.0, float),
+    ]
+    expectedProps: dict[str, tuple[float | int, type]] = {
+        "p_int": (7, int),
+        "p_exp": (20000, int),
+        "p_flt": (7.0, float),
+        "p_negexp": (0.7, float),
+    }
+
+    pad = "// " + ("x" * 140) + "\n"
+    for version in (2, 1):
+        for prefix in ("", pad):
+            for nativeUntagged in (True, False):
+                cfg = kdl.ParseConfig(version=t.cast("kdl.ParseVersion", version), nativeUntaggedValues=nativeUntagged)
+                doc = kdl.parse(prefix + src, cfg)
+                node = doc.nodes[0]
+                actualArgs = node.args if nativeUntagged else [v.value for v in node.args]
+                actualProps = node.props if nativeUntagged else {k: v.value for k, v in node.props.items()}
+                for actual, (expVal, expType) in zip(actualArgs, expectedArgs, strict=True):
+                    assert actual == expVal
+                    assert isinstance(actual, expType) and not isinstance(actual, bool)
+                # Preserve negative zero on -0.0 and positive zero on -0e-5
+                assert math.copysign(1.0, actualArgs[14]) == -1.0
+                assert math.copysign(1.0, actualArgs[20]) == 1.0
+                for propKey, (expVal, expType) in expectedProps.items():
+                    assert actualProps[propKey] == expVal
+                    assert isinstance(actualProps[propKey], expType) and not isinstance(actualProps[propKey], bool)
+
+    # Large exact integer beyond float range stays exact int, while >4300-digit exponent falls back to inf
+    bigExact = kdl.parse("n 1e400 1e5000\n", kdl.ParseConfig(version=2)).nodes[0].args
+    assert bigExact[0] == 10**400 and isinstance(bigExact[0], int)
+    assert bigExact[1] == float("inf") and isinstance(bigExact[1], float)
 
 
 @pytest.mark.parametrize(
@@ -800,13 +866,13 @@ def test_excessively_deep_kdl2_parse_and_print() -> None:
     cur = doc.nodes[0]
     for i in range(depth):
         assert cur.name == f"n{i}"
-        assert cur.props == {"k": float(i)}
+        assert cur.props == {"k": i}
         assert len(cur.nodes) == 1
         cur = cur.nodes[0]
     assert cur.name == "leaf"
     assert cur.tag == "end"
     assert cur.args == ["ok"]
-    assert cur.props == {"v": 42.0}
+    assert cur.props == {"v": 42}
 
     printedFlat = doc.print(kdl.PrintConfig(indent=""))
     reparsedFlat = kdl.parse(printedFlat, kdl.ParseConfig(version=2))
@@ -814,7 +880,7 @@ def test_excessively_deep_kdl2_parse_and_print() -> None:
 
     # Also verify non-empty indentation and direct Node.print(indentLevel=...) past recursion limit
     printedIndented = doc.print(kdl.PrintConfig(indent=" "))
-    assert (" " * depth) + "(end)leaf ok v=42.0\n" in printedIndented
+    assert (" " * depth) + "(end)leaf ok v=42\n" in printedIndented
     assert kdl.Node("deep").print(kdl.PrintConfig(indent=" "), indentLevel=1500) == (" " * 1500) + "deep\n"
 
     # Raw (nativeUntaggedValues=False) parse + print roundtrip at depth 2000

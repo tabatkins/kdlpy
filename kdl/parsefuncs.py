@@ -37,6 +37,7 @@ from .types import (
     RawString,
     String,
     Value,
+    scaleInt,
 )
 
 if t.TYPE_CHECKING:
@@ -664,17 +665,30 @@ def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.An
         _raiseDecimalError(s, i)
 
     if native:
+        mantStr, expStr = mDec.groups()
+        if "." not in mantStr:
+            cleanMant = mantStr.replace("_", "") if "_" in mantStr else mantStr
+            if expStr is None:
+                try:
+                    return (int(cleanMant, 10), end)
+                except ValueError:
+                    pass
+            else:
+                cleanExp = expStr.replace("_", "") if "_" in expStr else expStr
+                try:
+                    expInt = int(cleanExp, 10)
+                    if expInt >= 0:
+                        mInt = int(cleanMant, 10)
+                        return (mInt if expInt == 0 else scaleInt(mInt, expInt), end)
+                except ValueError:
+                    pass
         raw = mDec.group()
         if "_" in raw:
             raw = raw.replace("_", "")
         fval = float(raw)
-        # Match Decimal(int("-0"), 0).value (+0.0) while preserving negative zero for `-0.0` and underflows.
-        if fval == 0.0 and raw[0] == "-" and "." not in raw:
-            ePos = raw.find("e")
-            if ePos == -1:
-                ePos = raw.find("E")
-            if ePos == -1 or not raw[:ePos].strip("+-0"):
-                return (0.0, end)
+        # Match Decimal(int("-0"), -k).value (+0.0) while preserving negative zero for `-0.0` and underflows.
+        if fval == 0.0 and raw[0] == "-" and "." not in mantStr and not mantStr.strip("+-0_"):
+            return (0.0, end)
         return (fval, end)
 
     mantStr, expStr = mDec.groups()

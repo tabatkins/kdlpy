@@ -27,6 +27,7 @@ from .types import (
     RawString,
     String,
     Value,
+    scaleInt,
 )
 
 if t.TYPE_CHECKING:
@@ -455,6 +456,29 @@ def _floatFromDecStr(raw: str) -> float:
     return fval
 
 
+def _numFromDecStr(raw: str) -> float | int:
+    if "_" in raw:
+        raw = raw.replace("_", "")
+    if "." not in raw:
+        ePos = raw.find("e")
+        if ePos == -1:
+            ePos = raw.find("E")
+        if ePos == -1:
+            try:
+                return int(raw, 10)
+            except ValueError:
+                pass
+        else:
+            try:
+                expInt = int(raw[ePos + 1 :], 10)
+                if expInt >= 0:
+                    mInt = int(raw[:ePos], 10)
+                    return mInt if expInt == 0 else scaleInt(mInt, expInt)
+            except ValueError:
+                pass
+    return _floatFromDecStr(raw)
+
+
 def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.Any, int]:
     chars = s.chars
     n = s.length
@@ -519,7 +543,7 @@ def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.
     if discard:
         return (None, end)
     if native:
-        return (_floatFromDecStr(mDec.group()), end)
+        return (_numFromDecStr(mDec.group()), end)
     mantStr = mDec.group(1)
     if "_" in mantStr:
         mantStr = mantStr.replace("_", "")
@@ -1102,7 +1126,7 @@ def _handleChunkFallback(
                 key = m.group(1)
                 if eli == 3:
                     rawNum = m.group(3)
-                    pval: t.Any = _floatFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum)
+                    pval: t.Any = _numFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum)
                 elif eli == 2:
                     sVal = m.group(2)
                     pval = sVal if nativeUntagged else String(sVal)
@@ -1136,7 +1160,7 @@ def _handleChunkFallback(
         if eli == 7:
             if not nodeDiscard:
                 rawNum = m.group(7)
-                _addArg(_floatFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum))
+                _addArg(_numFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum))
             return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         tok1 = m.group(1)
         kwVal = _KW_NATIVE.get(tok1, _UNSET)
@@ -1306,10 +1330,18 @@ def _parseChunkedNative(s: Stream) -> Document:
                     continue
                 vc = pv[0]
                 if "1" <= vc <= "9":
-                    try:
-                        pval: t.Any = floatFn(pv)
-                    except ValueError:
-                        pval = floatFn(pv.replace("_", ""))
+                    if "." not in pv and "e" not in pv and "E" not in pv:
+                        try:
+                            pval: t.Any = intFn(pv, 10)
+                        except ValueError:
+                            pval = _numFromDecStr(pv)
+                    elif "." in pv:
+                        try:
+                            pval = floatFn(pv)
+                        except ValueError:
+                            pval = floatFn(pv.replace("_", ""))
+                    else:
+                        pval = _numFromDecStr(pv)
                 elif vc == '"':
                     inner = pv[1:-1]
                     if "\\" in inner:
@@ -1329,13 +1361,7 @@ def _parseChunkedNative(s: Stream) -> Document:
                     except ValueError:
                         pval = intFn(pv.replace("_", ""), 0)
                 else:
-                    try:
-                        fval = floatFn(pv)
-                    except ValueError:
-                        fval = floatFn(pv.replace("_", ""))
-                    if fval == 0.0 and vc == "-" and "." not in pv:
-                        fval = _floatFromDecStr(pv)
-                    pval = fval
+                    pval = _numFromDecStr(pv)
                 if props is None:
                     props = {k: pval}
                 else:
@@ -1568,10 +1594,18 @@ def _parseChunkedNative(s: Stream) -> Document:
                 if "1" <= ac0 <= "9":
                     nextEntDiscard = False
                     if not entDiscard:
-                        try:
-                            val = floatFn(arg)
-                        except ValueError:
-                            val = floatFn(arg.replace("_", ""))
+                        if "." not in arg and "e" not in arg and "E" not in arg:
+                            try:
+                                val = intFn(arg, 10)
+                            except ValueError:
+                                val = _numFromDecStr(arg)
+                        elif "." in arg:
+                            try:
+                                val = floatFn(arg)
+                            except ValueError:
+                                val = floatFn(arg.replace("_", ""))
+                        else:
+                            val = _numFromDecStr(arg)
                         if args is None:
                             args = [val]
                         else:
@@ -1589,13 +1623,7 @@ def _parseChunkedNative(s: Stream) -> Document:
                             except ValueError:
                                 val = intFn(arg.replace("_", ""), 0)
                         else:
-                            try:
-                                fval = floatFn(arg)
-                            except ValueError:
-                                fval = floatFn(arg.replace("_", ""))
-                            if fval == 0.0 and ac0 == "-" and "." not in arg:
-                                fval = _floatFromDecStr(arg)
-                            val = fval
+                            val = _numFromDecStr(arg)
                         if args is None:
                             args = [val]
                         else:
@@ -2519,7 +2547,7 @@ def _parseDirect(s: Stream) -> Document:
                         if not nodeDiscard:
                             key, numStr = t.cast("tuple[str, str]", m.group(1, 3))
                             if fastUntagged:
-                                val = _floatFromDecStr(numStr)
+                                val = _numFromDecStr(numStr)
                             else:
                                 val = _decimalFromStr(numStr)
                                 if hasValConverters:
@@ -2568,7 +2596,7 @@ def _parseDirect(s: Stream) -> Document:
                         i = m.end()
                         if not nodeDiscard:
                             if fastUntagged:
-                                val = _floatFromDecStr(m.group(7))
+                                val = _numFromDecStr(m.group(7))
                             else:
                                 val = _decimalFromStr(m.group(7))
                                 if hasValConverters:
