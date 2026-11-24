@@ -13,6 +13,8 @@ if t.TYPE_CHECKING:
 
 
 class Parser:
+    """Reusable KDL parser bundling default `ParseConfig` and `PrintConfig` settings."""
+
     __slots__ = ("parseConfig", "printConfig")
 
     def __init__(
@@ -20,10 +22,12 @@ class Parser:
         parseConfig: ParseConfig | None = None,
         printConfig: t.PrintConfig | None = None,
     ) -> None:
+        """Create a parser with optional default parse and print configurations."""
         self.parseConfig = parseConfig
         self.printConfig = printConfig
 
     def parse(self, chars: str, config: ParseConfig | None = None) -> t.Document:
+        """Parse KDL text into a `Document` and attach this parser's default `printConfig`."""
         doc = parsefuncs.parse(chars, config or self.parseConfig or defaults)
         doc.printConfig = self.printConfig
         return doc
@@ -31,6 +35,8 @@ class Parser:
 
 @dataclass(slots=True)
 class ParseConfig:
+    """Options controlling KDL version detection, native value conversion, and custom converters."""
+
     nativeUntaggedValues: bool = True
     nativeTaggedValues: bool = True
     valueConverters: dict[t.ValueKey, ValueConverterT] = field(default_factory=dict)

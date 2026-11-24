@@ -7,6 +7,8 @@ from . import t
 
 @dataclass(slots=True)
 class PrintConfig:
+    """Options controlling indentation, string/radix formatting, null emission, and property sorting."""
+
     indent: str = "\t"
     semicolons: bool = False
     printNullArgs: bool = True

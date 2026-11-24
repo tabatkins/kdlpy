@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 
 from . import converters, kdl1check, parsing, t
 from .chars import (
     BARE_IDENT_PATTERN,
+    BARE_IDENT_RE_STR,
     CONFUSABLE_KEYWORDS,
     DIGITS,
     DISALLOWED_RE,
@@ -44,14 +46,16 @@ if t.TYPE_CHECKING:
     from .t import ParseResult
 
     # (lineStartPos, indent, text)
-    type MultilineLine = tuple[int, str, str]
-    # (propKeyOrNone, value, nextIndex) with nextIndex < 0 for no-match
-    type EntryResult = tuple[str | None, t.Any, int]
+    type _MultilineLine = tuple[int, str, str]
+    # (name, tag, nameEnd, args, props, discard, spaceEnd)
+    type _NodeHead = tuple[str, str | None, int, list[t.Any], dict[str, t.Any], bool, int]
 
 # 1-char lookahead sets used to skip unnecessary scanner calls (and dispatch bare idents in parseEntry).
 _NODESPACE_START = frozenset(WS_CHARS + "/\\")
 _LINESPACE_START = frozenset(WS_CHARS + NL_CHARS + "/\\")
 _SPECIAL_ENTRY_START = frozenset('"{};\n\r)/(#0123456789+-')
+# ASCII characters guaranteed not to continue a KDL2 bare identifier (used for regex-free keyword termination).
+_KW_DELIM = frozenset(' \t\n\r;{}()[]/\\"#=')
 
 # Precompiled scanner patterns and bound matchers
 _matchUnicodeSpace = re.compile(rf"[{WS_RE}]+").match
@@ -63,7 +67,17 @@ _matchBareIdent = BARE_IDENT_PATTERN.match
 _matchPlainQuoteChunk = re.compile(rf'[^"\\{NL_RE}{DISALLOWED_RE}]*').match
 _matchRawQuoteChunk = re.compile(rf'[^"{NL_RE}{DISALLOWED_RE}]*').match
 
-_matchDecimal = re.compile(r"([+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?)(?:[eE]([+-]?[0-9][0-9_]*))?").match
+# Captures bare ident (group 1) and optionally `=value` for common untagged property values:
+# group 2 = plain quoted string body, group 3 = decimal literal, group 4 = lowercase #keyword name.
+_PLAIN_QUOTE_RE_STR = rf'"([^"\\{NL_RE}{DISALLOWED_RE}]*)"(?![#"])'
+_SIMPLE_DEC_RE_STR = r"[+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?(?![.eExob])"
+_SIMPLE_KW_RE_STR = r"#(true|false|null|inf|-inf|nan)(?=[ \t\n\r;{}()\[\]/\\\"#=]|$)"
+_matchIdentOrSimpleProp = re.compile(
+    rf"({BARE_IDENT_RE_STR})(?:=(?:{_PLAIN_QUOTE_RE_STR}|({_SIMPLE_DEC_RE_STR})|{_SIMPLE_KW_RE_STR}))?",
+).match
+
+# Optional groups let `lastindex` distinguish plain int (None), plain float (1), and scinot (2).
+_matchDecimal = re.compile(r"[+-]?[0-9][0-9_]*(\.[0-9][0-9_]*)?(?:[eE]([+-]?[0-9][0-9_]*))?").match
 _matchDecDigits = re.compile(r"[0-9][0-9_]*").match
 _matchBinDigits = re.compile(r"[01][01_]*").match
 _matchOctDigits = re.compile(r"[0-7][0-7_]*").match
@@ -84,16 +98,26 @@ _SIMPLE_ESCAPES: dict[str, str] = {
 # ParseResult convention: `(value, nextIndex)` with `index < 0` for no-match,
 # and `(None, index >= 0)` for successfully parsed but discarded (`/-`) items.
 _FAIL: ParseResult[None] = (None, -1)
-_ENTRY_FAIL: tuple[None, None, int] = (None, None, -1)
+_KDL1_MODULE_NAME = f"{__package__}.kdl1"
+
+
+def _parseKdl1(input: str, config: t.ParseConfig) -> Document:
+    """Lazily load `kdl.kdl1` and parse `input` using the KDL 1.0 parser."""
+    # Dispatch through the module object (not a cached function ref) so test monkeypatches on `kdl1.parse` still work.
+    kdl1Mod = sys.modules.get(_KDL1_MODULE_NAME)
+    if kdl1Mod is None:
+        from . import kdl1
+
+        kdl1Mod = kdl1
+    return t.cast("Document", kdl1Mod.parse(input, config))
 
 
 def parse(input: str, config: t.ParseConfig | None = None) -> Document:
+    """Parse a KDL string into a `Document`, honoring `config.version` (`1`, `2`, or `'auto'`)."""
     config = config or parsing.defaults
     match config.version:
         case 1:
-            from . import kdl1
-
-            return kdl1.parse(input, config)
+            return _parseKdl1(input, config)
         case 2:
             allowFallback = False
         case "auto":
@@ -104,13 +128,12 @@ def parse(input: str, config: t.ParseConfig | None = None) -> Document:
     s = Stream(input, config)
     chars = s.chars
     n = s.length
+    # KDL 2.0 allows a single leading UTF-8 BOM before the document.
     i = 1 if chars.startswith("\ufeff") else 0
     if allowFallback and i + 2 <= n and chars[i] == "/" and chars[i + 1] == "-":
         markerVersion = kdl1check.detectVersionMarker(chars, i)
         if markerVersion == 1:
-            from . import kdl1
-
-            return kdl1.parse(input, config)
+            return _parseKdl1(input, config)
         if markerVersion == 2:
             allowFallback = False
 
@@ -120,17 +143,18 @@ def parse(input: str, config: t.ParseConfig | None = None) -> Document:
     except ParseError as err:
         if not allowFallback or not err.maybeKdl1:
             raise
-        from . import kdl1
-
         try:
-            return kdl1.parse(input, config)
+            return _parseKdl1(input, config)
         except ParseError:
+            # If KDL 1.0 also rejects the input, report the original KDL 2.0 error.
             raise err from None
     return doc
 
 
 @dataclass(slots=True)
 class _OpenNode:
+    """Saved ancestor node frame on `_parseNodes`'s explicit stack while parsing its `{ ... }` child block."""
+
     start: int
     nameEnd: int
     name: str
@@ -146,84 +170,56 @@ class _OpenNode:
     parentDiscard: bool
 
 
-class _NodeHead(t.NamedTuple):
-    name: str
-    tag: str | None
-    nameEnd: int
-    args: list[t.Any]
-    props: dict[str, t.Any]
-    discard: bool
-    spaceEnd: int
-
-
 def _parseNodeHead(
     s: Stream,
     start: int,
     discard: bool,
 ) -> _NodeHead | None:
+    """Parse one node's optional `/-`, optional `(tag)`, name, and entries, returning None on no-match."""
     chars = s.chars
     n = s.length
     if start >= n:
         return None
+    nodespaceStart = _NODESPACE_START
 
     if chars[start] == "/" and start + 1 < n and chars[start + 1] == "-":
-        i = skipLinespace(s, start + 2)
+        i = _skipLinespace(s, start + 2)
         discard = True
     else:
         i = start
 
     tag: str | None = None
     if i < n and chars[i] == "(":
-        tag, tagEnd = parseTag(s, i)
+        tag, tagEnd = _parseTag(s, i)
         if tagEnd < 0:
             return None
-        i = skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in _NODESPACE_START) else tagEnd
+        i = _skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in nodespaceStart) else tagEnd
 
-    name, nameEnd = parseStringText(s, i)
-    if name is None:
+    if i >= n:
         return None
-    i = nameEnd
+    if chars[i] not in ('"', "#"):
+        mName = _matchBareIdent(chars, i)
+        if mName is None:
+            return None
+        name = mName.group()
+        if name in CONFUSABLE_KEYWORDS:
+            raise ParseError(
+                s,
+                i,
+                f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{name}'.",
+                maybeKdl1=name not in kdl1check.KDL1_KEYWORDS,
+            )
+        nameEnd = mName.end()
+    else:
+        parsedName, nameEnd = _parseStringText(s, i)
+        if parsedName is None:
+            return None
+        name = parsedName
 
     args: list[t.Any] = []
     props: dict[str, t.Any] = {}
-
-    # props and args
-    while True:
-        # Inline fast path for the common single-space separator to avoid calling skipNodespace().
-        if i < n and chars[i] == " " and (i + 1 >= n or chars[i + 1] not in _NODESPACE_START):
-            spaceEnd = i + 1
-        elif i < n and chars[i] in _NODESPACE_START:
-            spaceEnd = skipNodespace(s, i)
-        else:
-            spaceEnd = i
-            break
-        if spaceEnd >= n:
-            break
-
-        ch = chars[spaceEnd]
-        # Fast exit when nodespace lands on a child block or common node terminator.
-        if ch in "{};\n\r":
-            break
-        if ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
-            sdEnd = skipLinespace(s, spaceEnd + 2)
-            entryDiscard = True
-        elif spaceEnd == i:
-            break
-        else:
-            sdEnd = spaceEnd
-            entryDiscard = discard
-
-        propKey, propVal, nextI = parseEntry(s, sdEnd, discard=entryDiscard)
-        if nextI < 0:
-            break
-        i = nextI
-        if not entryDiscard:
-            if propKey is None:
-                args.append(propVal)
-            else:
-                props[propKey] = propVal
-
-    return _NodeHead(name, tag, nameEnd, args, props, discard, spaceEnd)
+    spaceEnd = _parseEntries(s, nameEnd, discard, args, props)
+    return (name, tag, nameEnd, args, props, discard, spaceEnd)
 
 
 def _applyNodeConverters(
@@ -232,6 +228,7 @@ def _applyNodeConverters(
     start: int,
     nameEnd: int,
 ) -> Node:
+    """Apply the first matching user `nodeConverter` (that does not return `NotImplemented`) to `node`."""
     pf: ParseFragment | None = None
     for convKey, converter in s.config.nodeConverters.items():
         if node.matchesKey(convKey):
@@ -245,9 +242,10 @@ def _applyNodeConverters(
 
 
 def _parseNodes(s: Stream, start: int) -> list[Node]:
+    """Iteratively parse a KDL 2.0 node tree starting at `start` using an explicit block stack."""
     chars = s.chars
     n = s.length
-    i = skipLinespace(s, start) if (start < n and chars[start] in _LINESPACE_START) else start
+    i = _skipLinespace(s, start) if (start < n and chars[start] in _LINESPACE_START) else start
 
     rootNodes: list[Node] = []
     curNodes = rootNodes
@@ -268,7 +266,7 @@ def _parseNodes(s: Stream, start: int) -> list[Node]:
                 frame.hasRealChildren = True
             curNodes = frame.parentNodes
             curDiscard = frame.parentDiscard
-            spaceEnd = skipNodespace(s, i) if (i < n and chars[i] in _NODESPACE_START) else i
+            spaceEnd = _skipNodespace(s, i) if (i < n and chars[i] in _NODESPACE_START) else i
             nodeStart = frame.start
             nameEnd = frame.nameEnd
             name = frame.name
@@ -329,10 +327,14 @@ def _parseNodes(s: Stream, start: int) -> list[Node]:
                 curDiscard = nodeDiscard
                 i = spaceEnd + 1
                 if i < n and chars[i] in _LINESPACE_START:
-                    i = skipLinespace(s, i)
+                    mLs = _matchLinespaceChars(chars, i)
+                    if mLs is not None:
+                        i = mLs.end()
+                    if i < n and chars[i] in ("/", "\\"):
+                        i = _skipLinespace(s, i)
                 continue
             if ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
-                sdEnd = skipLinespace(s, spaceEnd + 2)
+                sdEnd = _skipLinespace(s, spaceEnd + 2)
                 if sdEnd < n and chars[sdEnd] == "{":
                     stack.append(
                         _OpenNode(
@@ -355,7 +357,7 @@ def _parseNodes(s: Stream, start: int) -> list[Node]:
                     curDiscard = True
                     i = sdEnd + 1
                     if i < n and chars[i] in _LINESPACE_START:
-                        i = skipLinespace(s, i)
+                        i = _skipLinespace(s, i)
                     continue
 
         # 5. No more child blocks for this node — finalize it and advance past its terminator.
@@ -366,7 +368,7 @@ def _parseNodes(s: Stream, start: int) -> list[Node]:
                 node = _applyNodeConverters(s, node, nodeStart, nameEnd)
             curNodes.append(node)
 
-        termEnd = skipTerminatorAndLinespace(s, i)
+        termEnd = _skipTerminatorAndLinespace(s, i)
         if termEnd < 0:
             if stack:
                 if i < n and chars[i] == "}":
@@ -389,19 +391,36 @@ def _parseNodes(s: Stream, start: int) -> list[Node]:
     return rootNodes
 
 
-def parseTag(s: Stream, start: int) -> ParseResult[str]:
+def _parseTag(s: Stream, start: int) -> ParseResult[str]:
+    """Parse a `(type)` annotation starting at `start`, returning `(tagText, nextIndex)` or `_FAIL`."""
     chars = s.chars
     n = s.length
     if start >= n or chars[start] != "(":
         return _FAIL
     i = start + 1
     if i < n and chars[i] in _NODESPACE_START:
-        i = skipNodespace(s, i)
-    tag, i = parseStringText(s, i)
-    if tag is None:
+        i = _skipNodespace(s, i)
+    if i >= n:
         return _FAIL
+    if chars[i] not in ('"', "#"):
+        mTag = _matchBareIdent(chars, i)
+        if mTag is None:
+            return _FAIL
+        tag: str | None = mTag.group()
+        if tag in CONFUSABLE_KEYWORDS:
+            raise ParseError(
+                s,
+                i,
+                f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{tag}'.",
+                maybeKdl1=tag not in kdl1check.KDL1_KEYWORDS,
+            )
+        i = mTag.end()
+    else:
+        tag, i = _parseStringText(s, i)
+        if tag is None:
+            return _FAIL
     if i < n and chars[i] in _NODESPACE_START:
-        i = skipNodespace(s, i)
+        i = _skipNodespace(s, i)
     if i >= n or chars[i] != ")":
         raise ParseError(
             s,
@@ -412,9 +431,9 @@ def parseTag(s: Stream, start: int) -> ParseResult[str]:
     return (tag, i + 1)
 
 
-def skipTerminatorAndLinespace(s: Stream, start: int) -> int:
-    # Fuses node-terminator check and next-line linespace skipping: on a newline terminator,
-    # `_matchLinespaceChars` eats the newline, blank lines, and next-line indentation in one regex call.
+def _skipTerminatorAndLinespace(s: Stream, start: int) -> int:
+    """Consume a node terminator (newline, `;`, `//` comment, or EOF) and trailing linespace, or return -1."""
+    # On a newline terminator, `_matchLinespaceChars` consumes blank lines and next-line indent in one regex call.
     chars = s.chars
     n = s.length
     if start >= n:
@@ -425,114 +444,312 @@ def skipTerminatorAndLinespace(s: Stream, start: int) -> int:
         assert m is not None
         i = m.end()
         if i < n and chars[i] in ("/", "\\"):
-            return skipLinespace(s, i)
+            return _skipLinespace(s, i)
         return i
     if ch == ";":
         i = start + 1
-        return skipLinespace(s, i) if (i < n and chars[i] in _LINESPACE_START) else i
+        return _skipLinespace(s, i) if (i < n and chars[i] in _LINESPACE_START) else i
     if ch == "/" and start + 1 < n and chars[start + 1] == "/":
-        return skipLinespace(s, start)
+        return _skipLinespace(s, start)
     return -1
 
 
-def parseEntry(s: Stream, start: int, discard: bool = False) -> EntryResult:
+def _makeKeywordValue(ident: str) -> Value:
+    """Instantiate the `Value` wrapper for a validated lowercase KDL 2.0 keyword name."""
+    match ident:
+        case "true":
+            return Bool(True)
+        case "false":
+            return Bool(False)
+        case "null":
+            return Null()
+        case "inf":
+            return Infinity(POS_INF)
+        case "-inf":
+            return Infinity(NEG_INF)
+        case _:
+            return NaN(NAN)
+
+
+def _parseIntOrOverflow(raw: str) -> int | float:
+    """Parse a decimal integer string, falling back to `float` (e.g. ±inf) if it exceeds `int_max_str_digits`."""
+    clean = raw.replace("_", "") if "_" in raw else raw
+    try:
+        return int(clean, 10)
+    except ValueError:
+        fval = float(clean)
+        # Integer `-000...` with no decimal point has value +0.0 (matching `int("-0")`), not -0.0.
+        if fval == 0.0 and clean[0] == "-" and not clean.strip("+-0"):
+            return 0.0
+        return fval
+
+
+def _parseDecimalStr(raw: str, native: bool) -> t.Any:
+    """Convert a validated KDL decimal literal into a Python `int`/`float` (`native=True`) or `Decimal`."""
+    # Fast path for plain unsigned ASCII integers (guaranteed ASCII from caller regexes).
+    if raw.isdigit():
+        try:
+            intVal: int | float = int(raw, 10)
+        except ValueError:
+            intVal = _parseIntOrOverflow(raw)
+        return intVal if native else Decimal(intVal, 0)
+
+    # Other plain integers (signed or underscored, no `.` or `e`/`E`).
+    if "." not in raw and "e" not in raw and "E" not in raw:
+        try:
+            intVal = int(raw, 10)
+        except ValueError:
+            intVal = _parseIntOrOverflow(raw)
+        return intVal if native else Decimal(intVal, 0)
+
+    ePos = raw.find("e")
+    if ePos == -1:
+        ePos = raw.find("E")
+    if ePos == -1:
+        # Plain float with decimal point, no exponent.
+        try:
+            fltVal = float(raw)
+        except ValueError:
+            fltVal = float(raw.replace("_", ""))
+        return fltVal if native else Decimal(fltVal, 0)
+
+    mantStr = raw[:ePos]
+    expStr = raw[ePos + 1 :]
+    return _parseScinot(raw, mantStr, expStr, native)
+
+
+def _parseScinot(raw: str, mantStr: str, expStr: str, native: bool) -> t.Any:
+    """Convert a scientific-notation decimal (`mantStr` + `e`/`E` + `expStr`) to native or `Decimal`."""
+    cleanMant = mantStr.replace("_", "") if "_" in mantStr else mantStr
+    cleanExp = expStr.replace("_", "") if "_" in expStr else expStr
+    if native:
+        if "." not in cleanMant:
+            try:
+                expInt = int(cleanExp, 10)
+                if expInt >= 0:
+                    mInt = int(cleanMant, 10)
+                    return mInt if expInt == 0 else _scaleInt(mInt, expInt)
+            except ValueError:
+                pass
+        cleanRaw = raw.replace("_", "") if "_" in raw else raw
+        fval = float(cleanRaw)
+        # Match Decimal(int("-0"), -k).value (+0.0) while preserving negative zero for `-0.0` and underflows.
+        if fval == 0.0 and cleanRaw[0] == "-" and "." not in cleanMant and not cleanMant.strip("+-0"):
+            return 0.0
+        return fval
+
+    try:
+        mantissa: int | float = float(cleanMant) if "." in cleanMant else int(cleanMant, 10)
+        exponent = int(cleanExp, 10)
+        return Decimal(mantissa, exponent)
+    except ValueError:
+        cleanRaw = raw.replace("_", "") if "_" in raw else raw
+        fval = float(cleanRaw)
+        if fval == 0.0 and cleanRaw[0] == "-" and "." not in cleanMant and not cleanMant.strip("+-0"):
+            fval = 0.0
+        return Decimal(fval, 0)
+
+
+def _parseEntries(
+    s: Stream,
+    i: int,
+    discard: bool,
+    args: list[t.Any],
+    props: dict[str, t.Any],
+) -> int:
+    """Parse all arguments and properties following a node name, returning the offset after trailing nodespace."""
     chars = s.chars
     n = s.length
-    if start >= n:
-        return _ENTRY_FAIL
+    fast = s.fastUntagged
+    hasValConv = bool(s.config.valueConverters)
+    nodespaceStart = _NODESPACE_START
+    specialStart = _SPECIAL_ENTRY_START
+    confusable = CONFUSABLE_KEYWORDS
+    matchIdentOrProp = _matchIdentOrSimpleProp
+    argsAppend = args.append
 
-    ch = chars[start]
-    if ch not in _SPECIAL_ENTRY_START:
-        # Fast path: bare identifier (either property key `key=val` or bare string arg)
-        m = _matchBareIdent(chars, start)
-        if m is None:
-            return _ENTRY_FAIL
-        strEnd = m.end()
-        text = m.group()
-        if text in CONFUSABLE_KEYWORDS:
-            isPropKey = strEnd < n and chars[strEnd] == "="
-            raise ParseError(
-                s,
-                start,
-                f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{text}'.",
-                maybeKdl1=(not isPropKey) if text in kdl1check.KDL1_KEYWORDS else isPropKey,
-            )
-    elif ch == '"':
-        textOrNone, strEnd = parseStringText(s, start)
-        assert textOrNone is not None
-        text = textOrNone
-    elif ch in DIGITS or (ch in "+-" and start + 1 < n and chars[start + 1] in DIGITS):
-        if discard or s.fastUntagged:
-            val, valEnd = parseNumber(s, start, native=True)
-            return (None, None, valEnd) if discard else (None, val, valEnd)
-        numVal, valEnd = parseNumber(s, start, native=False)
-        val = _finalizeValue(s, t.cast("Value", numVal), None, start, valEnd)
-        return (None, val, valEnd)
-    elif ch == "#":
-        if start + 1 < n and chars[start + 1] not in ('"', "#"):
-            rawFast = discard or s.fastUntagged
-            kwVal, kwEnd = parseKeyword(s, start, native=rawFast)
-            if kwEnd < 0:
-                return _ENTRY_FAIL
-            if discard:
-                return (None, None, kwEnd)
-            if rawFast:
-                return (None, kwVal, kwEnd)
-            return (None, _finalizeValue(s, t.cast("Value", kwVal), None, start, kwEnd), kwEnd)
-        textOrNone, strEnd = parseStringText(s, start)
-        if textOrNone is None:
-            return _ENTRY_FAIL
-        text = textOrNone
-    elif ch == "(":
-        val, valEnd = parseValue(s, start, discard=discard)
-        if valEnd < 0:
-            return _ENTRY_FAIL
-        return (None, None, valEnd) if discard else (None, val, valEnd)
-    elif ch in "+-":
-        textOrNone, strEnd = parseStringText(s, start, inEntry=True)
-        if textOrNone is None:
-            return _ENTRY_FAIL
-        text = textOrNone
-    else:
-        return _ENTRY_FAIL
+    while True:
+        if i >= n:
+            return i
+        sepCh = chars[i]
+        # Inline fast path for the common single-space separator to avoid calling _skipNodespace().
+        if sepCh == " ":
+            spaceEnd = i + 1
+            if spaceEnd < n and chars[spaceEnd] in nodespaceStart:
+                spaceEnd = _skipNodespace(s, spaceEnd)
+        elif sepCh in nodespaceStart:
+            spaceEnd = _skipNodespace(s, i)
+        else:
+            return i
+        if spaceEnd >= n:
+            return spaceEnd
 
-    # Peek past optional nodespace for `=` to distinguish `key=val` properties from string args without backtracking.
-    eqPos = -1
-    if strEnd < n:
-        nextCh = chars[strEnd]
-        if nextCh == "=":
-            eqPos = strEnd
-        elif nextCh == " " and strEnd + 1 < n and chars[strEnd + 1] not in _NODESPACE_START:
-            if chars[strEnd + 1] == "=":
-                eqPos = strEnd + 1
-        elif nextCh in _NODESPACE_START:
-            afterKey = skipNodespace(s, strEnd)
-            if afterKey < n and chars[afterKey] == "=":
-                eqPos = afterKey
+        ch = chars[spaceEnd]
+        # Fast exit when nodespace lands on a child block or common node terminator.
+        if ch in "{};\n\r":
+            return spaceEnd
+        if ch == "/" and spaceEnd + 1 < n and chars[spaceEnd + 1] == "-":
+            entryStart = _skipLinespace(s, spaceEnd + 2)
+            entryDiscard = True
+        elif spaceEnd == i:
+            return spaceEnd
+        else:
+            entryStart = spaceEnd
+            entryDiscard = discard
 
-    if eqPos >= 0:
-        valStart = eqPos + 1
-        if valStart < n and chars[valStart] in _NODESPACE_START:
-            valStart = skipNodespace(s, valStart)
-        propVal, propEnd = parseValue(s, valStart, discard=discard)
-        if propEnd < 0:
-            raise ParseError(
-                s,
-                valStart,
-                "Expected value after prop=.",
-                maybeKdl1=kdl1check.isTagStartAt(chars, valStart, n),
-            )
-        return (None, None, propEnd) if discard else (text, propVal, propEnd)
+        if entryStart >= n:
+            return spaceEnd
+        ech = chars[entryStart]
 
-    if discard:
-        return (None, None, strEnd)
-    if s.fastUntagged:
-        return (None, text, strEnd)
-    valObj: Value = RawString(text) if ch == "#" else (String(text) if ch == '"' else IdentString(text))
-    return (None, _finalizeValue(s, valObj, None, start, strEnd), strEnd)
+        if ech not in specialStart:
+            # Fast path: bare identifier, optionally followed immediately by `=simpleValue`
+            # (plain quoted string, decimal number, or lowercase #keyword) in one regex step.
+            m = matchIdentOrProp(chars, entryStart)
+            if m is None:
+                return spaceEnd
+            li = m.lastindex
+            text = m.group(1)
+            end = m.end()
+            if text in confusable:
+                isPropKey = (li is not None and li > 1) or (end < n and chars[end] == "=")
+                raise ParseError(
+                    s,
+                    entryStart,
+                    f"Ident strings confusable with keywords aren't allowed; use a quoted string. Got '{text}'.",
+                    maybeKdl1=(not isPropKey) if text in kdl1check.KDL1_KEYWORDS else isPropKey,
+                )
+            # `li == 1` means only the bare ident matched (arg or complex property); `li > 1` matched `key=simpleValue`.
+            if li != 1:
+                i = end
+                if entryDiscard:
+                    continue
+                if li == 2:
+                    # Group 2: plain single-line quoted string value (`key="..."`).
+                    sVal = m.group(2)
+                    if fast:
+                        props[text] = sVal
+                    elif hasValConv:
+                        props[text] = _finalizeValue(s, String(sVal), None, m.start(2) - 1, end)
+                    else:
+                        props[text] = String(sVal)
+                elif li == 3:
+                    # Group 3: decimal number value (`key=123`, `key=-1.5e2`, etc.).
+                    numStr = m.group(3)
+                    if fast and numStr.isdigit():
+                        try:
+                            props[text] = int(numStr, 10)
+                        except ValueError:
+                            props[text] = _parseIntOrOverflow(numStr)
+                    else:
+                        numVal = _parseDecimalStr(numStr, native=fast)
+                        if hasValConv:
+                            props[text] = _finalizeValue(s, t.cast("Value", numVal), None, m.start(3), end)
+                        else:
+                            props[text] = numVal
+                else:
+                    # Group 4: lowercase keyword value (`key=#true`, `#false`, `#null`, `#inf`, `#-inf`, `#nan`).
+                    kwName = m.group(4)
+                    if fast:
+                        props[text] = NATIVE_KEYWORDS[kwName]
+                    elif hasValConv:
+                        props[text] = _finalizeValue(s, _makeKeywordValue(kwName), None, m.start(4) - 1, end)
+                    else:
+                        props[text] = _makeKeywordValue(kwName)
+                continue
+            strEnd = end
+        elif ech == '"':
+            textOrNone, strEnd = _parseStringText(s, entryStart)
+            assert textOrNone is not None
+            text = textOrNone
+        elif ech in DIGITS or (ech in "+-" and entryStart + 1 < n and chars[entryStart + 1] in DIGITS):
+            if entryDiscard or fast:
+                val, valEnd = _parseNumber(s, entryStart, native=True)
+                i = valEnd
+                if not entryDiscard:
+                    argsAppend(val)
+            else:
+                numVal, valEnd = _parseNumber(s, entryStart, native=False)
+                i = valEnd
+                argsAppend(
+                    _finalizeValue(s, t.cast("Value", numVal), None, entryStart, valEnd) if hasValConv else numVal,
+                )
+            continue
+        elif ech == "#":
+            if entryStart + 1 < n and chars[entryStart + 1] not in ('"', "#"):
+                rawFast = entryDiscard or fast
+                kwVal, kwEnd = _parseKeyword(s, entryStart, native=rawFast)
+                if kwEnd < 0:
+                    return spaceEnd
+                i = kwEnd
+                if not entryDiscard:
+                    if rawFast or not hasValConv:
+                        argsAppend(kwVal)
+                    else:
+                        argsAppend(_finalizeValue(s, t.cast("Value", kwVal), None, entryStart, kwEnd))
+                continue
+            textOrNone, strEnd = _parseStringText(s, entryStart)
+            if textOrNone is None:
+                return spaceEnd
+            text = textOrNone
+        elif ech == "(":
+            val, valEnd = _parseValue(s, entryStart, discard=entryDiscard)
+            if valEnd < 0:
+                return spaceEnd
+            i = valEnd
+            if not entryDiscard:
+                argsAppend(val)
+            continue
+        elif ech in "+-":
+            textOrNone, strEnd = _parseStringText(s, entryStart, inEntry=True)
+            if textOrNone is None:
+                return spaceEnd
+            text = textOrNone
+        else:
+            return spaceEnd
+
+        # Peek past optional nodespace for `=` to distinguish `key=val` properties from string args.
+        eqPos = -1
+        if strEnd < n:
+            nextCh = chars[strEnd]
+            if nextCh == "=":
+                eqPos = strEnd
+            elif nextCh == " " and strEnd + 1 < n and chars[strEnd + 1] not in nodespaceStart:
+                if chars[strEnd + 1] == "=":
+                    eqPos = strEnd + 1
+            elif nextCh in nodespaceStart:
+                afterKey = _skipNodespace(s, strEnd)
+                if afterKey < n and chars[afterKey] == "=":
+                    eqPos = afterKey
+
+        if eqPos >= 0:
+            valStart = eqPos + 1
+            if valStart < n and chars[valStart] in nodespaceStart:
+                valStart = _skipNodespace(s, valStart)
+            propVal, propEnd = _parseValue(s, valStart, discard=entryDiscard)
+            if propEnd < 0:
+                raise ParseError(
+                    s,
+                    valStart,
+                    "Expected value after prop=.",
+                    maybeKdl1=kdl1check.isTagStartAt(chars, valStart, n),
+                )
+            i = propEnd
+            if not entryDiscard:
+                props[text] = propVal
+            continue
+
+        i = strEnd
+        if entryDiscard:
+            continue
+        if fast:
+            argsAppend(text)
+        else:
+            strObj: Value = RawString(text) if ech == "#" else (String(text) if ech == '"' else IdentString(text))
+            argsAppend(_finalizeValue(s, strObj, None, entryStart, strEnd) if hasValConv else strObj)
 
 
-def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.Any]:
+def _parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.Any]:
+    """Parse a single KDL 2.0 value with optional leading `(tag)`, returning `(value, nextIndex)` or `_FAIL`."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -541,9 +758,9 @@ def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.An
     tag: str | None = None
     i = start
     if chars[i] == "(":
-        tag, tagEnd = parseTag(s, i)
+        tag, tagEnd = _parseTag(s, i)
         if tagEnd >= 0:
-            i = skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in _NODESPACE_START) else tagEnd
+            i = _skipNodespace(s, tagEnd) if (tagEnd < n and chars[tagEnd] in _NODESPACE_START) else tagEnd
 
     if i >= n:
         if tag is not None:
@@ -555,13 +772,13 @@ def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.An
     native = discard or (tag is None and s.fastUntagged)
 
     if ch in DIGITS or (ch in "+-" and i + 1 < n and chars[i + 1] in DIGITS):
-        val, end = parseNumber(s, i, native=native)
+        val, end = _parseNumber(s, i, native=native)
         if discard:
             return (None, end)
         return (val, end) if native else (_finalizeValue(s, t.cast("Value", val), tag, valueStart, end), end)
 
     if ch == "#" and i + 1 < n and chars[i + 1] not in ('"', "#"):
-        val, end = parseKeyword(s, i, native=native)
+        val, end = _parseKeyword(s, i, native=native)
         if end < 0:
             if tag is not None:
                 raise ParseError(s, i, "Found a tag, but no value following it.")
@@ -570,7 +787,7 @@ def parseValue(s: Stream, start: int, discard: bool = False) -> ParseResult[t.An
             return (None, end)
         return (val, end) if native else (_finalizeValue(s, t.cast("Value", val), tag, valueStart, end), end)
 
-    text, end = parseStringText(s, i, inValue=True)
+    text, end = _parseStringText(s, i, inValue=True)
     if text is not None:
         if discard:
             return (None, end)
@@ -591,6 +808,7 @@ def _finalizeValue(
     valueStart: int,
     valueEnd: int,
 ) -> t.Any:
+    """Attach `tag`, apply custom `valueConverters`, and unwrap or convert to native types per `s.config`."""
     val.tag = tag
     config = s.config
     valueConverters = config.valueConverters
@@ -615,7 +833,8 @@ def _finalizeValue(
     return val
 
 
-def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.Any]:
+def _parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.Any]:
+    """Parse a KDL 2.0 decimal or radix (`0x`/`0o`/`0b`) numeric literal starting at `start`."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -627,34 +846,45 @@ def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.An
         i = start + 1
         if i >= n or chars[i] not in DIGITS:
             return _FAIL
+        firstDigit = chars[i]
     elif ch in DIGITS:
         sign = 1
         i = start
+        firstDigit = ch
     else:
         return _FAIL
 
-    if chars[i] == "0" and i + 1 < n:
+    if firstDigit == "0" and i + 1 < n:
         prefix = chars[i + 1]
         if prefix == "x":
             m = _matchHexDigits(chars, i + 2)
             if m is None:
                 raise ParseError(s, i + 2, "Expected hex digit after 0x, got junk.")
             raw = m.group()
-            intVal = int(raw.replace("_", "") if "_" in raw else raw, 16) * sign
+            try:
+                intVal = int(raw, 16) * sign
+            except ValueError:
+                intVal = int(raw.replace("_", ""), 16) * sign
             return (intVal if native else Hex(intVal), m.end())
         if prefix == "o":
             m = _matchOctDigits(chars, i + 2)
             if m is None:
                 raise ParseError(s, i + 2, "Expected octal digit after 0o, got junk.")
             raw = m.group()
-            intVal = int(raw.replace("_", "") if "_" in raw else raw, 8) * sign
+            try:
+                intVal = int(raw, 8) * sign
+            except ValueError:
+                intVal = int(raw.replace("_", ""), 8) * sign
             return (intVal if native else Octal(intVal), m.end())
         if prefix == "b":
             m = _matchBinDigits(chars, i + 2)
             if m is None:
                 raise ParseError(s, i + 2, "Expected binary digit after 0b, got junk.")
             raw = m.group()
-            intVal = int(raw.replace("_", "") if "_" in raw else raw, 2) * sign
+            try:
+                intVal = int(raw, 2) * sign
+            except ValueError:
+                intVal = int(raw.replace("_", ""), 2) * sign
             return (intVal if native else Binary(intVal), m.end())
 
     mDec = _matchDecimal(chars, start)
@@ -664,55 +894,31 @@ def parseNumber(s: Stream, start: int, native: bool = False) -> ParseResult[t.An
     if end < n and chars[end] in ".eE":
         _raiseDecimalError(s, i)
 
-    if native:
-        mantStr, expStr = mDec.groups()
-        if "." not in mantStr:
-            cleanMant = mantStr.replace("_", "") if "_" in mantStr else mantStr
-            if expStr is None:
-                try:
-                    return (int(cleanMant, 10), end)
-                except ValueError:
-                    pass
-            else:
-                cleanExp = expStr.replace("_", "") if "_" in expStr else expStr
-                try:
-                    expInt = int(cleanExp, 10)
-                    if expInt >= 0:
-                        mInt = int(cleanMant, 10)
-                        return (mInt if expInt == 0 else _scaleInt(mInt, expInt), end)
-                except ValueError:
-                    pass
-        raw = mDec.group()
-        if "_" in raw:
-            raw = raw.replace("_", "")
-        fval = float(raw)
-        # Match Decimal(int("-0"), -k).value (+0.0) while preserving negative zero for `-0.0` and underflows.
-        if fval == 0.0 and raw[0] == "-" and "." not in mantStr and not mantStr.strip("+-0_"):
-            return (0.0, end)
-        return (fval, end)
+    raw = mDec.group()
+    li = mDec.lastindex
+    if li is None:
+        # Plain integer (no decimal point or exponent).
+        try:
+            numVal: int | float = int(raw, 10)
+        except ValueError:
+            numVal = _parseIntOrOverflow(raw)
+        return (numVal if native else Decimal(numVal, 0), end)
+    if li == 1:
+        # Plain float (decimal point, no exponent).
+        try:
+            fltVal = float(raw)
+        except ValueError:
+            fltVal = float(raw.replace("_", ""))
+        return (fltVal if native else Decimal(fltVal, 0), end)
 
-    mantStr, expStr = mDec.groups()
-    if "_" in mantStr:
-        mantStr = mantStr.replace("_", "")
-    try:
-        mantissa: int | float = float(mantStr) if "." in mantStr else int(mantStr, 10)
-        if expStr is None:
-            return (Decimal(mantissa, 0), end)
-        if "_" in expStr:
-            expStr = expStr.replace("_", "")
-        exponent = int(expStr, 10)
-        return (Decimal(mantissa, exponent), end)
-    except ValueError:
-        raw = mDec.group()
-        if "_" in raw:
-            raw = raw.replace("_", "")
-        fval = float(raw)
-        if fval == 0.0 and raw[0] == "-" and "." not in mantStr and not mantStr.strip("+-0"):
-            fval = 0.0
-        return (Decimal(fval, 0), end)
+    # Scientific notation: `mDec.group(2)` is the exponent digits after `e`/`E`.
+    expStr = mDec.group(2)
+    mantStr = raw[: len(raw) - len(expStr) - 1]
+    return (_parseScinot(raw, mantStr, expStr, native), end)
 
 
 def _raiseDecimalError(s: Stream, digitStart: int) -> t.NoReturn:
+    """Re-scan a malformed decimal starting at `digitStart` to raise a precise `ParseError`."""
     chars = s.chars
     n = s.length
     mInt = _matchDecDigits(chars, digitStart)
@@ -729,11 +935,43 @@ def _raiseDecimalError(s: Stream, digitStart: int) -> t.NoReturn:
     raise ParseError(s, i, "Expected a node terminator (newline, ;, or EOF).")
 
 
-def parseKeyword(s: Stream, start: int, native: bool = False) -> ParseResult[t.Any]:
+def _parseKeyword(s: Stream, start: int, native: bool = False) -> ParseResult[t.Any]:
+    """Parse a `#`-prefixed KDL 2.0 keyword (`#true`, `#false`, `#null`, `#inf`, `#-inf`, `#nan`)."""
     chars = s.chars
-    if start >= s.length or chars[start] != "#":
+    n = s.length
+    if start >= n or chars[start] != "#":
         return _FAIL
-    m = _matchBareIdent(chars, start + 1)
+    # Fast prefix match for the 6 lowercase KDL2 keywords followed by EOF or an ASCII delimiter.
+    kwStart = start + 1
+    if kwStart < n:
+        c1 = chars[kwStart]
+        if c1 == "t" and chars.startswith("true", kwStart):
+            end = kwStart + 4
+            if end >= n or chars[end] in _KW_DELIM:
+                return (True if native else Bool(True), end)
+        elif c1 == "f" and chars.startswith("false", kwStart):
+            end = kwStart + 5
+            if end >= n or chars[end] in _KW_DELIM:
+                return (False if native else Bool(False), end)
+        elif c1 == "n":
+            if chars.startswith("null", kwStart):
+                end = kwStart + 4
+                if end >= n or chars[end] in _KW_DELIM:
+                    return (None if native else Null(), end)
+            elif chars.startswith("nan", kwStart):
+                end = kwStart + 3
+                if end >= n or chars[end] in _KW_DELIM:
+                    return (NAN if native else NaN(NAN), end)
+        elif c1 == "i" and chars.startswith("inf", kwStart):
+            end = kwStart + 3
+            if end >= n or chars[end] in _KW_DELIM:
+                return (POS_INF if native else Infinity(POS_INF), end)
+        elif c1 == "-" and chars.startswith("-inf", kwStart):
+            end = kwStart + 4
+            if end >= n or chars[end] in _KW_DELIM:
+                return (NEG_INF if native else Infinity(NEG_INF), end)
+
+    m = _matchBareIdent(chars, kwStart)
     if m is None:
         return _FAIL
     ident = m.group()
@@ -742,28 +980,18 @@ def parseKeyword(s: Stream, start: int, native: bool = False) -> ParseResult[t.A
         val = NATIVE_KEYWORDS.get(ident, t.UNSET)
         if val is not t.UNSET:
             return (val, end)
-    else:
-        match ident:
-            case "true":
-                return (Bool(True), end)
-            case "false":
-                return (Bool(False), end)
-            case "null":
-                return (Null(), end)
-            case "inf":
-                return (Infinity(POS_INF), end)
-            case "-inf":
-                return (Infinity(NEG_INF), end)
-            case "nan":
-                return (NaN(NAN), end)
+    elif ident in NATIVE_KEYWORDS:
+        return (_makeKeywordValue(ident), end)
 
-    isKdl1PropKey = end < s.length and chars[end] == "="
+    # In KDL 1.0, `#...` is a valid bare identifier so `#foo=1` / `#True=1` may trigger KDL1 fallback.
+    isKdl1PropKey = end < n and chars[end] == "="
     if ident in CONFUSABLE_KEYWORDS:
         raise ParseError(s, start, f"KDL keywords must be written in lowercase, got #{ident}", maybeKdl1=isKdl1PropKey)
     raise ParseError(s, start, f"Unknown keyword #{ident}", maybeKdl1=isKdl1PropKey)
 
 
-def parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bool = False) -> ParseResult[str]:
+def _parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bool = False) -> ParseResult[str]:
+    """Parse a KDL 2.0 bare identifier, quoted string, raw string, or multiline string at `start`."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -777,6 +1005,7 @@ def parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bo
         end = m.end()
         ident = m.group()
         if ident in CONFUSABLE_KEYWORDS:
+            # KDL1 allows `true`/`false`/`null` as values, and allows other confusables (e.g. `inf`, `True`) as keys/names.
             if inValue:
                 maybeKdl1 = ident in kdl1check.KDL1_KEYWORDS
             elif inEntry:
@@ -803,7 +1032,7 @@ def parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bo
                     sub = chars[strStart:quotePos]
                     if "\\" not in sub and sub.isprintable():
                         return (sub, end)
-            return parseQuotedString(s, strStart, 0)
+            return _parseQuotedString(s, strStart, 0)
         quoteStart = start
         hashCount = 0
     else:
@@ -821,17 +1050,18 @@ def parseStringText(s: Stream, start: int, *, inValue: bool = False, inEntry: bo
     quoteCount = i - quoteStart
 
     if quoteCount == 1:
-        return parseQuotedString(s, i, hashCount)
+        return _parseQuotedString(s, i, hashCount)
     if quoteCount == 2:
-        # Empty single-line string `""` / `#""#`: back up 1 so parseQuotedString sees the closing `"`
+        # Empty single-line string `""` / `#""#`: back up 1 so _parseQuotedString sees the closing `"`
         # and validates any trailing `#` or extra quotes.
-        return parseQuotedString(s, i - 1, hashCount)
+        return _parseQuotedString(s, i - 1, hashCount)
     if quoteCount == 3:
-        return parseMultilineString(s, i, hashCount)
+        return _parseMultilineString(s, i, hashCount)
     raise ParseError(s, start, f"Encountered {quoteCount} quotes in a row.")
 
 
 def _checkPlainQuoteEnd(s: Stream, start: int, chars: str, end: int, n: int) -> None:
+    """Reject trailing `#` or extra `"` characters immediately following a non-raw quoted string."""
     if end < n:
         nextCh = chars[end]
         if nextCh == "#":
@@ -840,12 +1070,14 @@ def _checkPlainQuoteEnd(s: Stream, start: int, chars: str, end: int, n: int) -> 
             raise ParseError(s, start, "Single-quote string was ended with multiple quote chars.")
 
 
-def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:
+def _parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:
+    """Parse the body and closing delimiter of a single-line quoted (`hashCount == 0`) or raw string."""
     chars = s.chars
     n = s.length
 
     if hashCount == 0:
-        m = _matchPlainQuoteChunk(chars, start)
+        matchChunk = _matchPlainQuoteChunk
+        m = matchChunk(chars, start)
         assert m is not None
         i = m.end()
         if i < n and chars[i] == '"':
@@ -853,7 +1085,9 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
             _checkPlainQuoteEnd(s, start, chars, end, n)
             return (chars[start:i], end)
 
+        simpleGet = _SIMPLE_ESCAPES.get
         parts: list[str] = [chars[start:i]] if i > start else []
+        append = parts.append
         while True:
             if i >= n:
                 raise ParseError(s, start, "Hit EOF while looking for the end of the string")
@@ -863,14 +1097,25 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
                 _checkPlainQuoteEnd(s, start, chars, end, n)
                 return ("".join(parts), end)
             if ch == "\\":
-                esc, i = parseEscape(s, i)
-                if esc:
-                    parts.append(esc)
-                m = _matchPlainQuoteChunk(chars, i)
+                if i + 1 < n:
+                    simple = simpleGet(chars[i + 1])
+                    if simple is not None:
+                        append(simple)
+                        i += 2
+                    else:
+                        esc, i = _parseEscape(s, i)
+                        if esc:
+                            append(esc)
+                else:
+                    esc, i = _parseEscape(s, i)
+                    if esc:
+                        append(esc)
+                m = matchChunk(chars, i)
                 assert m is not None
-                if m.end() > i:
-                    parts.append(chars[i : m.end()])
-                    i = m.end()
+                chunkEnd = m.end()
+                if chunkEnd > i:
+                    append(chars[i:chunkEnd])
+                    i = chunkEnd
             elif ch in NL_SET:
                 raise ParseError(
                     s,
@@ -886,7 +1131,19 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
                     maybeKdl1=ch == "\ufeff",
                 )
 
-    # Raw single-line string (`#"..."#`)
+    # Fast path for short, printable single-line raw strings (`#"..."#`).
+    # `find(delim)` locates the leftmost `"` followed by >= hashCount `#`s; checking `chars[end] != "#"`
+    # ensures an exact hash match, and `isprintable()` rejects all newlines and disallowed codepoints.
+    delim = '"' + ("#" * hashCount)
+    pos = chars.find(delim, start, start + 256)
+    if pos != -1:
+        end = pos + hashCount + 1
+        if end >= n or chars[end] != "#":
+            sub = chars[start:pos]
+            if sub.isprintable():
+                return (sub, end)
+
+    # General raw single-line string (`#"..."#`)
     i = start
     while True:
         m = _matchRawQuoteChunk(chars, i)
@@ -921,7 +1178,8 @@ def parseQuotedString(s: Stream, start: int, hashCount: int) -> ParseResult[str]
         return (chars[start:quotePos], hashEnd)
 
 
-def parseEscape(s: Stream, start: int) -> ParseResult[str]:
+def _parseEscape(s: Stream, start: int) -> ParseResult[str]:
+    r"""Parse a single KDL 2.0 escape sequence (simple, `\u{...}`, or whitespace escape) starting at `\`."""
     chars = s.chars
     n = s.length
     if start + 1 >= n:
@@ -963,25 +1221,28 @@ def parseEscape(s: Stream, start: int) -> ParseResult[str]:
             )
         return (chr(hexValue), i + 1)
     if ch in LINESPACE_CHAR_SET:
+        # KDL 2.0 whitespace escape (`\` + one or more whitespace/newline chars) collapses to empty string.
         m = _matchLinespaceChars(chars, start + 1)
         assert m is not None
         return ("", m.end())
     raise ParseError(s, start, "Invalid character escape", maybeKdl1=ch == "/")
 
 
-def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:
+def _parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[str]:
+    """Parse a KDL 2.0 triple-quoted (or raw `#\"\"\"...\"\"\"#`) multiline string starting after opening quotes."""
     chars = s.chars
     n = s.length
-    i = skipNewline(chars, start, n)
+    i = _skipNewline(chars, start, n)
     if i == start:
         raise ParseError(s, start, "Multiline strings must have a newline immediately after their opening quotes.")
 
-    lines: list[MultilineLine] = []
+    lines: list[_MultilineLine] = []
     lineStart = i
     mSpace = _matchUnicodeSpace(chars, i)
     if mSpace is not None:
-        lineIndent = chars[i : mSpace.end()]
-        i = mSpace.end()
+        spaceEnd = mSpace.end()
+        lineIndent = chars[i:spaceEnd]
+        i = spaceEnd
     else:
         lineIndent = ""
     lineParts: list[str] = []
@@ -990,9 +1251,10 @@ def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[s
     while True:
         m = matchChunk(chars, i)
         assert m is not None
-        if m.end() > i:
-            lineParts.append(chars[i : m.end()])
-            i = m.end()
+        chunkEnd = m.end()
+        if chunkEnd > i:
+            lineParts.append(chars[i:chunkEnd])
+            i = chunkEnd
 
         if i >= n:
             raise ParseError(s, start, "Hit EOF while looking for the end of the string")
@@ -1013,7 +1275,8 @@ def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[s
                     raise ParseError(s, quoteStart, f"Saw {quoteCount} consecutive quotes in a multi-line string.")
                 if i < n and chars[i] == "#":
                     raise ParseError(s, i, "Saw # characters at the end of a non-raw string.")
-                rawChars = processMultiline(lines, lineStart, lineIndent, "".join(lineParts), s)
+                lastText = lineParts[0] if len(lineParts) == 1 else "".join(lineParts)
+                rawChars = _processMultiline(lines, lineStart, lineIndent, lastText, s)
                 return (rawChars, i)
 
             if i >= n or chars[i] != "#":
@@ -1036,19 +1299,20 @@ def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[s
                 )
             if quoteCount > 3:
                 # Extra quotes before the closing `"""#...` are content on the closing line,
-                # which processMultiline() will reject as non-whitespace on the final line.
+                # which _processMultiline() will reject as non-whitespace on the final line.
                 lineParts.append('"' * (quoteCount - 3))
-            rawChars = processMultiline(lines, lineStart, lineIndent, "".join(lineParts), s)
+            lastText = lineParts[0] if len(lineParts) == 1 else "".join(lineParts)
+            rawChars = _processMultiline(lines, lineStart, lineIndent, lastText, s)
             return (rawChars, hashEnd)
 
         if ch == "\\":
-            esc, i = parseEscape(s, i)
+            esc, i = _parseEscape(s, i)
             if esc:
                 lineParts.append(esc)
             continue
 
         # Must be a newline or disallowed literal character
-        nlEnd = skipNewline(chars, i, n)
+        nlEnd = _skipNewline(chars, i, n)
         if nlEnd == i:
             raise ParseError(
                 s,
@@ -1056,25 +1320,28 @@ def parseMultilineString(s: Stream, start: int, hashCount: int) -> ParseResult[s
                 "Disallowed literal character in multiline string.",
                 maybeKdl1=ch == "\ufeff",
             )
-        lines.append((lineStart, lineIndent, "".join(lineParts)))
+        lineText = lineParts[0] if len(lineParts) == 1 else "".join(lineParts)
+        lines.append((lineStart, lineIndent, lineText))
         i = nlEnd
         lineStart = i
         mSpace = _matchUnicodeSpace(chars, i)
         if mSpace is not None:
-            lineIndent = chars[i : mSpace.end()]
-            i = mSpace.end()
+            spaceEnd = mSpace.end()
+            lineIndent = chars[i:spaceEnd]
+            i = spaceEnd
         else:
             lineIndent = ""
         lineParts = []
 
 
-def processMultiline(
-    lines: list[MultilineLine],
+def _processMultiline(
+    lines: list[_MultilineLine],
     lastLinePos: int,
     lastIndent: str,
     lastText: str,
     s: Stream,
 ) -> str:
+    """Validate the closing line of a multiline string and strip `lastIndent` from every non-blank line."""
     if lastText:
         raise ParseError(s, lastLinePos, "Multiline string ended with non-whitespace content on last line.")
     prefixLen = len(lastIndent)
@@ -1097,7 +1364,8 @@ def processMultiline(
     return "\n".join(outLines)
 
 
-def skipNewline(chars: str, start: int, n: int) -> int:
+def _skipNewline(chars: str, start: int, n: int) -> int:
+    """Advance past a single KDL 2.0 newline (`\\r\\n` counts as one), or return `start` unchanged."""
     if start >= n:
         return start
     ch = chars[start]
@@ -1112,7 +1380,8 @@ def skipNewline(chars: str, start: int, n: int) -> int:
     return start
 
 
-def skipLinespace(s: Stream, start: int) -> int:
+def _skipLinespace(s: Stream, start: int) -> int:
+    """Skip zero or more KDL 2.0 whitespace, newlines, comments (`//` and `/* */`), and line continuations."""
     chars = s.chars
     n = s.length
     i = start
@@ -1138,11 +1407,11 @@ def skipLinespace(s: Stream, start: int) -> int:
                     )
                 continue
             if nextCh == "*":
-                i = skipBlockComment(s, i)
+                i = _skipBlockComment(s, i)
                 continue
             break
         if ch == "\\":
-            nextI = skipEscline(s, i)
+            nextI = _skipEscline(s, i)
             if nextI == i:
                 break
             i = nextI
@@ -1151,7 +1420,8 @@ def skipLinespace(s: Stream, start: int) -> int:
     return i
 
 
-def skipNodespace(s: Stream, start: int) -> int:
+def _skipNodespace(s: Stream, start: int) -> int:
+    """Skip intra-node whitespace, block comments, and `\\` line continuations starting at `start`."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -1167,22 +1437,23 @@ def skipNodespace(s: Stream, start: int) -> int:
         i = start
 
     while True:
-        i = skipWhitespace(s, i)
-        nextI = skipEscline(s, i)
+        i = _skipWhitespace(s, i)
+        nextI = _skipEscline(s, i)
         if nextI == i:
             return i
         i = nextI
 
 
-def skipEscline(s: Stream, start: int) -> int:
+def _skipEscline(s: Stream, start: int) -> int:
+    """Skip a `\\` line continuation (`\\` + optional whitespace + newline, `//` comment, or EOF), or return `start`."""
     chars = s.chars
     n = s.length
     if start >= n or chars[start] != "\\":
         return start
-    i = skipWhitespace(s, start + 1)
+    i = _skipWhitespace(s, start + 1)
     if i >= n:
         return i
-    nlEnd = skipNewline(chars, i, n)
+    nlEnd = _skipNewline(chars, i, n)
     if nlEnd > i:
         return nlEnd
     if chars[i] == "/" and i + 1 < n and chars[i + 1] == "/":
@@ -1200,7 +1471,8 @@ def skipEscline(s: Stream, start: int) -> int:
     return start
 
 
-def skipWhitespace(s: Stream, start: int) -> int:
+def _skipWhitespace(s: Stream, start: int) -> int:
+    """Skip horizontal KDL 2.0 unicode whitespace and nested `/* ... */` block comments."""
     chars = s.chars
     n = s.length
     i = start
@@ -1211,13 +1483,14 @@ def skipWhitespace(s: Stream, start: int) -> int:
             if i >= n:
                 break
         if chars[i] == "/" and i + 1 < n and chars[i + 1] == "*":
-            i = skipBlockComment(s, i)
+            i = _skipBlockComment(s, i)
         else:
             break
     return i
 
 
-def skipBlockComment(s: Stream, start: int) -> int:
+def _skipBlockComment(s: Stream, start: int) -> int:
+    """Skip a possibly nested `/* ... */` block comment starting at `start`, rejecting disallowed characters."""
     # Iterative depth scan with a single `/*|*/|disallowed` search regex avoids recursion and scans bodies in C.
     chars = s.chars
     if not chars.startswith("/*", start):

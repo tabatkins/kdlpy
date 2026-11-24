@@ -22,6 +22,7 @@ _INDENTS: dict[str, list[str]] = {}
 
 
 def _getIndents(unit: str, minLevel: int = 0) -> list[str]:
+    """Return a cached list of repeated `unit` indent strings covering at least `minLevel`."""
     indents = _INDENTS.get(unit)
     if indents is None:
         depth = min(_MAX_CACHED_INDENT_DEPTH, max(_INITIAL_INDENT_DEPTH, minLevel + 1))
@@ -34,10 +35,13 @@ def _getIndents(unit: str, minLevel: int = 0) -> list[str]:
 
 @dataclass(slots=True)
 class Document:
+    """Root KDL document containing a list of top-level nodes and an optional default `PrintConfig`."""
+
     nodes: list[Node] = dataclasses.field(default_factory=list)
     printConfig: t.PrintConfig | None = None
 
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize this document to a KDL 2.0 string."""
         cfg = config or self.printConfig or printing.defaults
         strCache, strFmt = _getStrPrinter(cfg.respectStringType)
         if not self.nodes:
@@ -55,26 +59,32 @@ class Document:
     def get[VT](self, key: t.NodeKey, default: VT) -> Node | VT: ...
 
     def get[VT](self, key: t.NodeKey, default: VT | None = None) -> Node | VT | None:
+        """Return the first top-level node matching `key`, or `default` if none matches."""
         try:
             return self[key]
         except (KeyError, IndexError):
             return default
 
     def __getitem__(self, key: t.NodeKey) -> Node:
+        """Return the first top-level node matching `key`, raising KeyError/IndexError if absent."""
         return _getNodeByKey(self.nodes, key)
 
     def getAll(
         self,
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
+        """Yield all top-level nodes matching `key`."""
         return _iterNodesByKey(self.nodes, key)
 
     def __str__(self) -> str:
+        """Serialize this document using its default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class Node:
+    """Single KDL node with a name, optional type tag, positional args, properties, and child nodes."""
+
     name: str
     tag: str | None = None
     args: list[t.Any] = dataclasses.field(default_factory=list)
@@ -86,6 +96,7 @@ class Node:
         config: t.PrintConfig | None = None,
         indentLevel: int = 0,
     ) -> str:
+        """Serialize this node and its subtree to a KDL 2.0 string at `indentLevel`."""
         cfg = config or printing.defaults
         strCache, strFmt = _getStrPrinter(cfg.respectStringType)
         level = max(0, indentLevel)
@@ -101,37 +112,45 @@ class Node:
     def get[VT](self, key: t.NodeKey, default: VT) -> Node | VT: ...
 
     def get[VT](self, key: t.NodeKey, default: VT | None = None) -> Node | VT | None:
+        """Return the first child node matching `key`, or `default` if none matches."""
         try:
             return self[key]
         except (KeyError, IndexError):
             return default
 
     def __getitem__(self, key: t.NodeKey) -> Node:
+        """Return the first child node matching `key`, raising KeyError/IndexError if absent."""
         return _getNodeByKey(self.nodes, key)
 
     def getAll(
         self,
         key: t.NodeKey,
     ) -> t.Iterable[Node]:
+        """Yield all child nodes matching `key`."""
         return _iterNodesByKey(self.nodes, key)
 
     def matchesKey(self, key: t.NodeKey) -> bool:
+        """Return True if this node matches `key`."""
         return nodeMatchesKey(self, key)
 
     def getProps(self, key: t.ValueKey) -> t.Iterable[tuple[str, t.Any]]:
+        """Yield `(name, value)` pairs for properties whose values match `key`."""
         for name, val in self.props.items():
             if valueMatchesKey(val, key):
                 yield name, val
 
     def getArgs(self, key: t.ValueKey) -> t.Iterable[t.Any]:
+        """Yield positional argument values matching `key`."""
         for val in self.args:
             if valueMatchesKey(val, key):
                 yield val
 
     def __call__(self, key: int | str) -> t.Any:
+        """Shorthand for `getEntry(key)`."""
         return self.getEntry(key)
 
     def getEntry(self, key: int | str, default: t.Any = t.UNSET) -> t.Any:
+        """Return property `key` (if `str`) or positional arg `key` (if `int`), or `default`."""
         if isinstance(key, str):
             if default is t.UNSET:
                 return self.props[key]
@@ -147,6 +166,7 @@ class Node:
         raise TypeError(msg)
 
     def setEntry(self, key: int | str, value: t.Any) -> None:
+        """Set property `key` (if `str`) or positional arg `key` (if `int`, appending when `key == len(args)`)."""
         if isinstance(key, str):
             self.props[key] = value
             return
@@ -160,10 +180,13 @@ class Node:
         raise TypeError(msg)
 
     def __str__(self) -> str:
+        """Serialize this node using the default print configuration."""
         return self.print()
 
 
 class _PrintState(t.NamedTuple):
+    """Shared output buffer and resolved string formatter passed to `_printNodesInto`."""
+
     out: list[str]
     config: t.PrintConfig
     strCache: dict[str, str]
@@ -171,10 +194,11 @@ class _PrintState(t.NamedTuple):
 
 
 def _printNodesInto(rootNodes: list[Node], baseLevel: int, state: _PrintState) -> None:
-    # Appends chunks into a single shared list using an explicit stack of parent cursors to avoid
-    # both O(N^2) string concatenation and Python recursion limits on deeply nested trees.
+    """Iteratively serialize `rootNodes` into `state.out` using an explicit ancestor stack."""
+    # Explicit stack of parent cursors avoids both O(N^2) string concat and recursion limits on deep trees.
     out, config, strCache, strFmt = state
     append = out.append
+    strCacheGet = strCache.get
     printNullArgs = config.printNullArgs
     printNullProps = config.printNullProps
     sortProperties = config.sortProperties
@@ -182,6 +206,26 @@ def _printNodesInto(rootNodes: list[Node], baseLevel: int, state: _PrintState) -
     indentUnit = config.indent
     indents = _getIndents(indentUnit, baseLevel)
     indentsLen = len(indents)
+
+    # Resolve String value cache/formatter once so untagged `String` objects avoid per-value `.print()` calls.
+    strValFmt: t.Callable[[str], str]
+    if config.respectStringType is True:
+        strValCacheGet = _QUOTED_STR_CACHE.get
+        strValFmt = _printQuotedString
+    else:
+        strValCacheGet = strCacheGet
+        strValFmt = strFmt
+
+    isfinite = math.isfinite
+    isnan = math.isnan
+
+    # Cache several module-local variables to avoid even that crawl up the scope tree.
+    nodeCls = Node
+    valueCls = Value
+    decCls = Decimal
+    strValCls = String
+    identStrCls = IdentString
+    boolCls = Bool
 
     curNodes = rootNodes
     curIdx = 0
@@ -205,49 +249,65 @@ def _printNodesInto(rootNodes: list[Node], baseLevel: int, state: _PrintState) -
 
         item = curNodes[curIdx]
         curIdx += 1
-        node = item if isinstance(item, Node) else toKdlNode(item)
+        node = item if isinstance(item, nodeCls) else _toKdlNode(item)
 
         # Inline cache lookup is safe with `or` because string formatters never return "".
-        nameStr = strCache.get(node.name) or strFmt(node.name)
+        nameStr = strCacheGet(node.name) or strFmt(node.name)
         if node.tag is not None:
-            tagStr = strCache.get(node.tag) or strFmt(node.tag)
+            tagStr = strCacheGet(node.tag) or strFmt(node.tag)
             append(f"{indentStr}({tagStr}){nameStr}")
         else:
             append(f"{indentStr}{nameStr}" if indentStr else nameStr)
 
         if node.args:
             for value in node.args:
-                # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives;
-                # subclasses (e.g. IntEnum) still fall through to toKdlValue().
+                # Exact `type(value) is ...` avoids isinstance() MRO checks for plain primitives
+                # and common untagged KDL Value wrappers; subclasses fall through cleanly.
                 valType = type(value)
                 if valType is str:
-                    valStr = strCache.get(value) or strFmt(value)
-                elif value is True:
-                    valStr = "#true"
-                elif value is False:
-                    valStr = "#false"
-                elif valType is float:
-                    if math.isfinite(value):
-                        valStr = str(value)
-                    elif math.isnan(value):
-                        valStr = "#nan"
-                    else:
-                        valStr = "#inf" if value > 0 else "#-inf"
+                    valStr = strCacheGet(value) or strFmt(value)
                 elif valType is int:
                     try:
                         valStr = str(value)
                     except ValueError:
                         valStr = "#inf" if value > 0 else "#-inf"
+                elif valType is float:
+                    if isfinite(value):
+                        valStr = str(value)
+                    elif isnan(value):
+                        valStr = "#nan"
+                    else:
+                        valStr = "#inf" if value > 0 else "#-inf"
+                elif valType is bool:
+                    valStr = "#true" if value else "#false"
                 elif value is None:
                     if not printNullArgs:
                         continue
                     valStr = "#null"
-                elif isinstance(value, Value):
+                elif (
+                    valType is decCls
+                    and value.tag is None
+                    and value.exponent == 0
+                    and not isinstance(value.mantissa, float)
+                ):
+                    # Float mantissas stay on `.print()` so scinot floats respect `config.exponent`.
+                    try:
+                        valStr = str(value.mantissa)
+                    except ValueError:
+                        # Exceeds Python's int_max_str_digits limit; serialize as KDL infinity.
+                        valStr = "#inf" if value.mantissa > 0 else "#-inf"
+                elif valType is strValCls and value.tag is None:
+                    valStr = strValCacheGet(value.value) or strValFmt(value.value)
+                elif valType is boolCls and value.tag is None:
+                    valStr = "#true" if value.value else "#false"
+                elif valType is identStrCls and value.tag is None:
+                    valStr = strCacheGet(value.value) or strFmt(value.value)
+                elif isinstance(value, valueCls):
                     if not printNullArgs and isinstance(value, Null):
                         continue
                     valStr = value.print(config)
                 else:
-                    kdlVal = toKdlValue(value)
+                    kdlVal = _toKdlValue(value)
                     if not printNullArgs and isinstance(kdlVal, Null):
                         continue
                     valStr = kdlVal.print(config)
@@ -260,37 +320,53 @@ def _printNodesInto(rootNodes: list[Node], baseLevel: int, state: _PrintState) -
             for name, value in propsIter:
                 valType = type(value)
                 if valType is str:
-                    valStr = strCache.get(value) or strFmt(value)
-                elif value is True:
-                    valStr = "#true"
-                elif value is False:
-                    valStr = "#false"
-                elif valType is float:
-                    if math.isfinite(value):
-                        valStr = str(value)
-                    elif math.isnan(value):
-                        valStr = "#nan"
-                    else:
-                        valStr = "#inf" if value > 0 else "#-inf"
+                    valStr = strCacheGet(value) or strFmt(value)
                 elif valType is int:
                     try:
                         valStr = str(value)
                     except ValueError:
                         valStr = "#inf" if value > 0 else "#-inf"
+                elif valType is float:
+                    if isfinite(value):
+                        valStr = str(value)
+                    elif isnan(value):
+                        valStr = "#nan"
+                    else:
+                        valStr = "#inf" if value > 0 else "#-inf"
+                elif valType is bool:
+                    valStr = "#true" if value else "#false"
                 elif value is None:
                     if not printNullProps:
                         continue
                     valStr = "#null"
-                elif isinstance(value, Value):
+                elif (
+                    valType is decCls
+                    and value.tag is None
+                    and value.exponent == 0
+                    and not isinstance(value.mantissa, float)
+                ):
+                    # Float mantissas stay on `.print()` so scinot floats respect `config.exponent`.
+                    try:
+                        valStr = str(value.mantissa)
+                    except ValueError:
+                        # Exceeds Python's int_max_str_digits limit; serialize as KDL infinity.
+                        valStr = "#inf" if value.mantissa > 0 else "#-inf"
+                elif valType is strValCls and value.tag is None:
+                    valStr = strValCacheGet(value.value) or strValFmt(value.value)
+                elif valType is boolCls and value.tag is None:
+                    valStr = "#true" if value.value else "#false"
+                elif valType is identStrCls and value.tag is None:
+                    valStr = strCacheGet(value.value) or strFmt(value.value)
+                elif isinstance(value, valueCls):
                     if not printNullProps and isinstance(value, Null):
                         continue
                     valStr = value.print(config)
                 else:
-                    kdlVal = toKdlValue(value)
+                    kdlVal = _toKdlValue(value)
                     if not printNullProps and isinstance(kdlVal, Null):
                         continue
                     valStr = kdlVal.print(config)
-                keyStr = strCache.get(name) or strFmt(name)
+                keyStr = strCacheGet(name) or strFmt(name)
                 append(f" {keyStr}={valStr}")
 
         if node.nodes:
@@ -309,58 +385,69 @@ def _printNodesInto(rootNodes: list[Node], baseLevel: int, state: _PrintState) -
 
 
 class Value:
+    """Base class for all explicit KDL value wrappers carrying an optional type `tag`."""
+
     # Plain base class (not ABCMeta) so isinstance(x, Value/Numberish/Stringish) uses C's fast MRO check.
     __slots__ = ("tag",)
     tag: str | None
 
     @property
     def value(self) -> t.Any:
+        """Return the underlying Python native value."""
         raise NotImplementedError
 
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize this value to its KDL 2.0 representation."""
         raise NotImplementedError
 
     def matchesKey(self, key: t.ValueKey) -> bool:
+        """Return True if this value matches `key`."""
         return valueMatchesKey(self, key)
 
 
 @dataclass(slots=True)
 class ExactValue(Value):
-    # Not produced by anything in the parser,
-    # but used when a native type needs a precise output
-    # not captured by the native semantics,
-    # like precise number formatting.
-    # .chars *must* be a valid KDL value
+    """Verbatim pre-formatted KDL literal for custom native types needing exact output control."""
+
+    # Not produced by the parser; `.chars` must already be a valid KDL value literal.
     chars: str
     tag: str | None = None
 
     @property
     @t.override
     def value(self) -> str:
+        """Return the verbatim KDL literal text."""
         return self.chars
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize `.chars` verbatim, prefixed with `(tag)` if tagged."""
         if self.tag is None:
             return self.chars
         cfg = config or printing.defaults
         return f"({_printStr(self.tag, cfg.respectStringType)}){self.chars}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 class Numberish(Value):  # pylint: disable=abstract-method
+    """Base class for all numeric KDL value wrappers (`Binary`, `Octal`, `Decimal`, `Hex`, `Infinity`, `NaN`)."""
+
     __slots__ = ()
 
 
 @dataclass(slots=True)
 class Binary(Numberish):
+    """KDL binary integer literal (`0b...`)."""
+
     value: int
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `0b...` (when `respectRadix` is True) or decimal."""
         cfg = config or printing.defaults
         if cfg.respectRadix:
             numStr = bin(self.value)
@@ -374,16 +461,20 @@ class Binary(Numberish):
         return f"({_printStr(self.tag, cfg.respectStringType)}){numStr}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class Octal(Numberish):
+    """KDL octal integer literal (`0o...`)."""
+
     value: int
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `0o...` (when `respectRadix` is True) or decimal."""
         cfg = config or printing.defaults
         if cfg.respectRadix:
             numStr = oct(self.value)
@@ -397,15 +488,19 @@ class Octal(Numberish):
         return f"({_printStr(self.tag, cfg.respectStringType)}){numStr}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 def _scaleInt(mantissa: int, exp: int) -> float | int:
-    # Computes `mantissa * 10**exp` as an exact int when within Python's str-digit limit,
-    # falling back to ±inf on enormous exponents to prevent OOM / ValueError on printing.
+    """Compute `mantissa * 10**exp` as an exact `int` if within str-digit limits, else ±inf."""
     if mantissa == 0:
         return 0
+    # Python's minimum int-str-digits floor is 640, so small exponents/mantissas are always safe.
+    if exp < 300 and -(10**100) < mantissa < 10**100:
+        return t.cast("int", mantissa * (10**exp))
     maxDigits = sys.get_int_max_str_digits() or 4300
+    # Estimate base-10 digits via log10(2) ≈ 0.30103 to avoid allocating enormous intermediate ints.
     if exp < maxDigits and (mantissa.bit_length() * 30103) // 100000 + exp < maxDigits:
         return t.cast("int", mantissa * (10**exp))
     return POS_INF if mantissa > 0 else NEG_INF
@@ -413,6 +508,8 @@ def _scaleInt(mantissa: int, exp: int) -> float | int:
 
 @dataclass(slots=True)
 class Decimal(Numberish):
+    """KDL decimal number storing `mantissa` and base-10 `exponent` separately for faithful round-tripping."""
+
     mantissa: int | float
     exponent: int = 0
     tag: str | None = None
@@ -420,6 +517,7 @@ class Decimal(Numberish):
     @property
     @t.override
     def value(self) -> float | int:
+        """Evaluate `mantissa * 10**exponent` as a Python `int` or `float`."""
         mantissa = self.mantissa
         if isinstance(mantissa, float):
             if not math.isfinite(mantissa) or self.exponent == 0:
@@ -443,42 +541,55 @@ class Decimal(Numberish):
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
-        cfg = config or printing.defaults
+        """Serialize this decimal literal, formatting any non-zero exponent with `config.exponent`."""
         mantissa = self.mantissa
-        if isinstance(mantissa, float) and not math.isfinite(mantissa):
-            s = "#nan" if math.isnan(mantissa) else ("#inf" if mantissa > 0 else "#-inf")
-        else:
+        exp = self.exponent
+        if not isinstance(mantissa, float):
             try:
                 s = str(mantissa)
             except ValueError:
                 s = "#inf" if mantissa > 0 else "#-inf"
             else:
-                exp = self.exponent
-                if "e" in s:
-                    s, mExp = s.split("e")
-                    exp += int(mExp)
                 if exp != 0:
+                    cfg = config or printing.defaults
                     s = f"{s}{cfg.exponent}{exp:+}"
+        elif not math.isfinite(mantissa):
+            s = "#nan" if math.isnan(mantissa) else ("#inf" if mantissa > 0 else "#-inf")
+        else:
+            s = str(mantissa)
+            if "e" in s:
+                # Fold Python's built-in float exponent (e.g. `1e-05`) into `exp` so we emit one exponent.
+                s, mExp = s.split("e")
+                exp += int(mExp)
+            if exp != 0:
+                cfg = config or printing.defaults
+                s = f"{s}{cfg.exponent}{exp:+}"
         if self.tag is None:
             return s
+        cfg = config or printing.defaults
         return f"({_printStr(self.tag, cfg.respectStringType)}){s}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class Infinity(Numberish):
+    """KDL `#inf` or `#-inf` floating-point keyword value."""
+
     value: float
     tag: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate that `value` is positive or negative infinity."""
         if not math.isinf(self.value):
             msg = f"Infinity value must be infinite; got {self.value!r}."
             raise ValueError(msg)
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `#inf` or `#-inf`."""
         if not math.isinf(self.value):
             msg = f"Infinity value must be infinite; got {self.value!r}."
             raise ValueError(msg)
@@ -489,37 +600,46 @@ class Infinity(Numberish):
         return f"({_printStr(self.tag, cfg.respectStringType)}){kw}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class NaN(Numberish):
+    """KDL `#nan` floating-point keyword value."""
+
     value: float = float("nan")
     tag: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate that `value` is NaN."""
         if not math.isnan(self.value):
             msg = f"NaN value must be NaN; got {self.value!r}."
             raise ValueError(msg)
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `#nan`."""
         if self.tag is None:
             return "#nan"
         cfg = config or printing.defaults
         return f"({_printStr(self.tag, cfg.respectStringType)})#nan"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class Hex(Numberish):
+    """KDL hexadecimal integer literal (`0x...`)."""
+
     value: int
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `0x...` (when `respectRadix` is True) or decimal."""
         cfg = config or printing.defaults
         if cfg.respectRadix:
             numStr = hex(self.value)
@@ -533,16 +653,20 @@ class Hex(Numberish):
         return f"({_printStr(self.tag, cfg.respectStringType)}){numStr}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class Bool(Value):
+    """KDL boolean keyword value (`#true` or `#false`)."""
+
     value: bool
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `#true` or `#false`."""
         kw = "#true" if self.value else "#false"
         if self.tag is None:
             return kw
@@ -550,30 +674,38 @@ class Bool(Value):
         return f"({_printStr(self.tag, cfg.respectStringType)}){kw}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class Null(Value):
+    """KDL `#null` keyword value."""
+
     tag: str | None = None
 
     @property
     @t.override
     def value(self) -> None:
+        """Return `None`."""
         return None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as `#null`."""
         if self.tag is None:
             return "#null"
         cfg = config or printing.defaults
         return f"({_printStr(self.tag, cfg.respectStringType)})#null"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 class Stringish(Value):  # pylint: disable=abstract-method
+    """Base class for all KDL string value wrappers (`String`, `IdentString`, `RawString`)."""
+
     __slots__ = ()
 
 
@@ -583,48 +715,58 @@ _findQuoteHashRuns = re.compile(r'"(#*)').finditer
 
 @dataclass(slots=True)
 class RawString(Stringish):
+    """KDL raw string literal (`#"..."#`)."""
+
     value: str
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as a raw `#...#` string when allowed and printable, else quoted/ident."""
         cfg = config or printing.defaults
         strMode = cfg.respectStringType
         tagStr = f"({_printStr(self.tag, strMode)})" if self.tag is not None else ""
         if strMode == "auto" or strMode is True:
-            if isPrintableRawString(self.value):
-                hashes = "#" * findRequiredHashCount(self.value)
+            if _isPrintableRawString(self.value):
+                hashes = "#" * _findRequiredHashCount(self.value)
                 return f'{tagStr}{hashes}"{self.value}"{hashes}'
-            return f'{tagStr}"{escapedFromRaw(self.value)}"'
+            return f'{tagStr}"{_escapedFromRaw(self.value)}"'
         if strMode is False:
-            body = _IDENT_CACHE.get(self.value) or printIdent(self.value)
+            body = _IDENT_CACHE.get(self.value) or _printIdent(self.value)
             return f"{tagStr}{body}"
         msg = f"Invalid respectStringType {strMode!r}; expected True, False, or 'auto'."
         raise ValueError(msg)
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
-def isPrintableRawString(chars: str) -> bool:
+def _isPrintableRawString(chars: str) -> bool:
+    """Return True if `chars` can be emitted as a single-line KDL 2.0 raw string."""
     # Leading quotes (e.g. `"` -> `#"""#`), newlines, or disallowed codepoints can't be represented as
     # single-line KDL2 raw strings.
     return not chars.startswith('"') and (chars.isprintable() or _searchRawDisallowed(chars) is None)
 
 
-def findRequiredHashCount(chars: str) -> int:
+def _findRequiredHashCount(chars: str) -> int:
+    """Return the minimum `#` delimiter count so `"` + `#*n` never occurs inside `chars`."""
     if '"' not in chars:
         return 1
+    # One more `#` than the longest run of `#`s immediately following any `"` prevents early termination.
     return max((len(m.group(1)) for m in _findQuoteHashRuns(chars)), default=0) + 1
 
 
 @dataclass(slots=True)
 class IdentString(Stringish):
+    """KDL identifier string literal (bare when valid, quoted otherwise)."""
+
     value: str
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize according to `config.respectStringType`."""
         cfg = config or printing.defaults
         strMode = cfg.respectStringType
         body = _printStr(self.value, strMode)
@@ -633,24 +775,28 @@ class IdentString(Stringish):
         return f"({_printStr(self.tag, strMode)}){body}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
 @dataclass(slots=True)
 class String(Stringish):
+    """KDL quoted string literal."""
+
     value: str
     tag: str | None = None
 
     @t.override
     def print(self, config: t.PrintConfig | None = None) -> str:
+        """Serialize as quoted (`exact`), bare-or-quoted (`plain`), or cleanest form (`auto`)."""
         cfg = config or printing.defaults
         strMode = cfg.respectStringType
         if strMode == "auto":
-            body = _AUTO_STR_CACHE.get(self.value) or printAutoString(self.value)
+            body = _AUTO_STR_CACHE.get(self.value) or _printAutoString(self.value)
         elif strMode is True:
-            body = _QUOTED_STR_CACHE.get(self.value) or printQuotedString(self.value)
+            body = _QUOTED_STR_CACHE.get(self.value) or _printQuotedString(self.value)
         elif strMode is False:
-            body = _IDENT_CACHE.get(self.value) or printIdent(self.value)
+            body = _IDENT_CACHE.get(self.value) or _printIdent(self.value)
         else:
             msg = f"Invalid respectStringType {strMode!r}; expected True, False, or 'auto'."
             raise ValueError(msg)
@@ -659,6 +805,7 @@ class String(Stringish):
         return f"({_printStr(self.tag, strMode)}){body}"
 
     def __str__(self) -> str:
+        """Serialize this value using the default print configuration."""
         return self.print()
 
 
@@ -680,7 +827,8 @@ _KDLISH_TYPES = (
 )
 
 
-def toKdlNode(val: t.Any) -> Node:
+def _toKdlNode(val: t.Any) -> Node:
+    """Return `val` if it is already a `Node`, or convert it via its `.to_kdl()` method."""
     if isinstance(val, Node):
         return val
     toKdl = getattr(val, "to_kdl", None)
@@ -694,13 +842,30 @@ def toKdlNode(val: t.Any) -> Node:
     return node
 
 
-def toKdlValue(val: t.Any) -> t.KDLValue:
+# O(1) exact-type dispatch for stdlib native types in `_toKdlValue`; subclasses still fall through to isinstance().
+_EXACT_STDLIB_TO_KDL: dict[type, t.Callable[[t.Any], t.KDLValue]] = {
+    decimal.Decimal: lambda v: String(str(v), "decimal"),
+    datetime.datetime: lambda v: String(v.isoformat(), "date-time"),
+    datetime.time: lambda v: String(v.isoformat(), "time"),
+    datetime.date: lambda v: String(v.isoformat(), "date"),
+    ipaddress.IPv4Address: lambda v: String(str(v), "ipv4"),
+    ipaddress.IPv6Address: lambda v: String(str(v), "ipv6"),
+    urllib.parse.ParseResult: lambda v: String(urllib.parse.urlunparse(v), "url"),
+    uuid.UUID: lambda v: String(str(v), "uuid"),
+    bytes: lambda v: String(base64.b64encode(v).decode("utf-8"), "base64"),
+}
+
+
+def _toKdlValue(val: t.Any) -> t.KDLValue:
     """
     Converts any KDLish value (a KDLValue, a primitive,
     an object corresponding to a built-in tag,
     or an object with .to_kdl() that returns one of the above)
     into a KDLValue
     """
+    exactConv = _EXACT_STDLIB_TO_KDL.get(type(val))
+    if exactConv is not None:
+        return exactConv(val)
     if isinstance(val, Value):
         return val
     if val is None:
@@ -734,7 +899,7 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
     if isinstance(val, uuid.UUID):
         return String(str(val), "uuid")
     if isinstance(val, re.Pattern) and isinstance(val.pattern, str):
-        # Fast path for the most standard flag
+        # Fast path for the default UNICODE flag; otherwise verify flags come solely from inline `(?...)` flags.
         if val.flags != re.UNICODE:
             if val.flags != re.compile(val.pattern).flags:
                 msg = (
@@ -753,13 +918,14 @@ def toKdlValue(val: t.Any) -> t.KDLValue:
         raise TypeError(msg)
 
     convertedVal = toKdl()
-    if isKdlishValue(convertedVal):
-        return toKdlValue(convertedVal)
+    if _isKdlishValue(convertedVal):
+        return _toKdlValue(convertedVal)
     msg = f"Expected object to convert to KDL value or compatible primitive. Got:\n{val!r}"
     raise TypeError(msg)
 
 
-def isKdlishValue(val: t.Any) -> bool:
+def _isKdlishValue(val: t.Any) -> bool:
+    """Return True if `val` is a `Value`, primitive, or supported stdlib type convertible to KDL."""
     if val is None:
         return True
     if isinstance(val, re.Pattern):
@@ -768,12 +934,13 @@ def isKdlishValue(val: t.Any) -> bool:
 
 
 def _findIndexedNode(nodes: list[Node], tagKey: t.TagKey, idx: int) -> Node:
+    """Return the `idx`-th node (supporting negative indices) in `nodes` whose tag matches `tagKey`."""
     if tagKey is Ellipsis:
         return nodes[idx]
     if idx >= 0:
         seen = 0
         for child in nodes:
-            kdlNode = child if isinstance(child, Node) else toKdlNode(child)
+            kdlNode = child if isinstance(child, Node) else _toKdlNode(child)
             if tagMatchesKey(kdlNode.tag, tagKey):
                 if seen == idx:
                     return child
@@ -781,7 +948,7 @@ def _findIndexedNode(nodes: list[Node], tagKey: t.TagKey, idx: int) -> Node:
     else:
         seen = 0
         for child in reversed(nodes):
-            kdlNode = child if isinstance(child, Node) else toKdlNode(child)
+            kdlNode = child if isinstance(child, Node) else _toKdlNode(child)
             if tagMatchesKey(kdlNode.tag, tagKey):
                 seen -= 1
                 if seen == idx:
@@ -791,6 +958,14 @@ def _findIndexedNode(nodes: list[Node], tagKey: t.TagKey, idx: int) -> Node:
 
 
 def _getNodeByKey(nodes: list[Node], key: t.NodeKey) -> Node:
+    """Return the first node in `nodes` matching `key`, raising KeyError/IndexError if absent."""
+    if isinstance(key, str):
+        nodeCls = Node
+        for node in nodes:
+            kdlNode = node if isinstance(node, nodeCls) else _toKdlNode(node)
+            if kdlNode.name == key:
+                return node
+        raise KeyError(key)
     if isinstance(key, bool):
         msg = f"Invalid NameKey {key!r}"
         raise TypeError(msg)
@@ -813,6 +988,14 @@ def _getNodeByKey(nodes: list[Node], key: t.NodeKey) -> Node:
 
 
 def _iterNodesByKey(nodes: list[Node], key: t.NodeKey) -> t.Iterable[Node]:
+    """Yield every node in `nodes` matching `key`."""
+    if isinstance(key, str):
+        nodeCls = Node
+        for node in nodes:
+            kdlNode = node if isinstance(node, nodeCls) else _toKdlNode(node)
+            if kdlNode.name == key:
+                yield node
+        return
     if isinstance(key, bool):
         msg = f"Invalid NameKey {key!r}"
         raise TypeError(msg)
@@ -844,8 +1027,9 @@ def _iterNodesByKey(nodes: list[Node], key: t.NodeKey) -> t.Iterable[Node]:
 
 
 def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
+    """Return True if `node` matches a `NodeKey` (`nameKey` or `(tagKey, nameKey)`)."""
     if not isinstance(node, Node):
-        node = toKdlNode(node)
+        node = _toKdlNode(node)
     if isinstance(key, tuple):
         if len(key) != 2:
             msg = f"Invalid NodeKey {key!r}"
@@ -859,8 +1043,8 @@ def nodeMatchesKey(node: t.Any, key: t.NodeKey) -> bool:
 
 
 def valueMatchesKey(value: t.Any, key: t.ValueKey) -> bool:
-    # Need to allow for both Value and values that were converted to other types
-    # non-Value objects are untagged, by definition
+    """Return True if `value` matches a `ValueKey` (`tagKey` or `(tagKey, typeKey)`)."""
+    # Non-Value objects (e.g. converted Python natives) are untagged by definition.
     tag = value.tag if isinstance(value, Value) else None
     if isinstance(key, tuple):
         if len(key) != 2:
@@ -872,6 +1056,7 @@ def valueMatchesKey(value: t.Any, key: t.ValueKey) -> bool:
 
 
 def tagMatchesKey(val: str | None, key: t.TagKey) -> bool:
+    """Return True if tag `val` matches `key` (`...`, `None`, `str`, `re.Pattern`, or predicate)."""
     if key is Ellipsis:
         return True
     if key is None:
@@ -889,6 +1074,7 @@ def tagMatchesKey(val: str | None, key: t.TagKey) -> bool:
 
 
 def nameMatchesKey(val: str | None, key: t.NameKey) -> bool:
+    """Return True if node name `val` matches `key` (`...`/`None`, `str`, `re.Pattern`, or predicate)."""
     if key is Ellipsis or key is None:
         return True
     if isinstance(key, str):
@@ -907,6 +1093,7 @@ def nameMatchesKey(val: str | None, key: t.NameKey) -> bool:
 
 
 def typeMatchesKey(val: t.Any, key: t.TypeKey) -> bool:
+    """Return True if `val` is an instance of `key` (or `key` is `...`)."""
     if key is Ellipsis:
         return True
     try:
@@ -920,14 +1107,17 @@ _UNICODE_ESCAPE_SUB = re.compile(DISALLOWED_OR_NON_ASCII_NL_RE).sub
 
 
 def _unicodeEscapeChar(m: re.Match[str]) -> str:
+    r"""Format a single matched disallowed/non-ASCII-newline codepoint as `\u{hex}`."""
     return f"\\u{{{ord(m.group()):x}}}"
 
 
-def escapedFromRaw(chars: str) -> str:
+def _escapedFromRaw(chars: str) -> str:
+    """Escape `chars` for use inside a KDL 2.0 double-quoted string."""
+    # Chained C-level `.replace()` calls outperform `str.translate()` in CPython.
     res = (
         chars.replace("\\", "\\\\")
         .replace('"', '\\"')
-        # don't escape a forward slash when printing
+        # Forward slashes are not escaped in KDL 2.0.
         .replace("\b", "\\b")
         .replace("\f", "\\f")
         .replace("\n", "\\n")
@@ -946,28 +1136,31 @@ _QUOTED_STR_CACHE: dict[str, str] = {}
 
 
 def _getStrPrinter(mode: t.StringTypeMode) -> tuple[dict[str, str], t.Callable[[str], str]]:
+    """Return the `(cache, formatter)` pair for node names, tags, keys, and default strings in `mode`."""
     if mode == "auto":
-        return (_AUTO_STR_CACHE, printAutoString)
+        return (_AUTO_STR_CACHE, _printAutoString)
     if mode is True or mode is False:
-        return (_IDENT_CACHE, printIdent)
+        return (_IDENT_CACHE, _printIdent)
     msg = f"Invalid respectStringType {mode!r}; expected True, False, or 'auto'."
     raise ValueError(msg)
 
 
 def _printStr(chars: str, mode: t.StringTypeMode) -> str:
+    """Format an identifier/string `chars` according to `mode` using the corresponding cache."""
     if mode == "auto":
-        return _AUTO_STR_CACHE.get(chars) or printAutoString(chars)
+        return _AUTO_STR_CACHE.get(chars) or _printAutoString(chars)
     if mode is True or mode is False:
-        return _IDENT_CACHE.get(chars) or printIdent(chars)
+        return _IDENT_CACHE.get(chars) or _printIdent(chars)
     msg = f"Invalid respectStringType {mode!r}; expected True, False, or 'auto'."
     raise ValueError(msg)
 
 
-def printIdent(chars: str) -> str:
+def _printIdent(chars: str) -> str:
+    """Format `chars` as a bare identifier if valid, otherwise as a double-quoted string."""
     cached = _IDENT_CACHE.get(chars)
     if cached is not None:
         return cached
-    res = chars if isBareIdent(chars) else f'"{escapedFromRaw(chars)}"'
+    res = chars if isBareIdent(chars) else f'"{_escapedFromRaw(chars)}"'
     # Only cache short strings and flush at 4096 entries to cap memory on large/unbounded documents.
     if len(chars) <= 64:
         if len(_IDENT_CACHE) >= 4096:
@@ -976,11 +1169,12 @@ def printIdent(chars: str) -> str:
     return res
 
 
-def printQuotedString(chars: str) -> str:
+def _printQuotedString(chars: str) -> str:
+    """Format `chars` unconditionally as a double-quoted KDL string."""
     cached = _QUOTED_STR_CACHE.get(chars)
     if cached is not None:
         return cached
-    res = f'"{escapedFromRaw(chars)}"'
+    res = f'"{_escapedFromRaw(chars)}"'
     if len(chars) <= 64:
         if len(_QUOTED_STR_CACHE) >= 4096:
             _QUOTED_STR_CACHE.clear()
@@ -988,18 +1182,20 @@ def printQuotedString(chars: str) -> str:
     return res
 
 
-def printAutoString(chars: str) -> str:
+def _printAutoString(chars: str) -> str:
+    """Format `chars` in its cleanest KDL 2.0 form: bare ident, plain quoted, raw `#...#`, or escaped quoted."""
     cached = _AUTO_STR_CACHE.get(chars)
     if cached is not None:
         return cached
     if isBareIdent(chars):
         res = chars
     else:
-        escaped = escapedFromRaw(chars)
+        escaped = _escapedFromRaw(chars)
         if escaped == chars:
             res = f'"{chars}"'
-        elif isPrintableRawString(chars):
-            hashes = "#" * findRequiredHashCount(chars)
+        elif _isPrintableRawString(chars):
+            # Prefer raw syntax when escaping would otherwise be needed (e.g. quotes or backslashes).
+            hashes = "#" * _findRequiredHashCount(chars)
             res = f'{hashes}"{chars}"{hashes}'
         else:
             res = f'"{escaped}"'

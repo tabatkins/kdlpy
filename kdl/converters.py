@@ -37,6 +37,7 @@ if t.TYPE_CHECKING:
 
 
 def toNative(val: t.Value, s: t.Stream, start: int, end: int) -> t.KDLishValue:
+    """Convert a tagged `Value` to its Python native type if its tag is a built-in KDL type."""
     # Takes (s, start, end) instead of a ParseFragment to avoid slicing and allocating on valid values.
     tag = val.tag
     if tag is None:
@@ -53,6 +54,7 @@ def toNative(val: t.Value, s: t.Stream, start: int, end: int) -> t.KDLishValue:
 
 
 def _asFloat(val: t.Numberish, _s: t.Stream, _start: int, _end: int) -> float:
+    """Convert a KDL numeric value to a Python `float`, saturating overflows to ±inf."""
     v = val.value
     try:
         return float(v)
@@ -61,18 +63,23 @@ def _asFloat(val: t.Numberish, _s: t.Stream, _start: int, _end: int) -> float:
 
 
 def _makeIntConverter(low: int, high: int, label: str) -> _NumConverter:
+    """Build a range-checked integer converter accepting whole numbers in `[low, high)`."""
+
     def convert(val: t.Numberish, s: t.Stream, start: int, end: int) -> int:
+        """Convert a numeric `Value` to an exact Python `int` within `[low, high)`."""
         if isinstance(val, types.Decimal):
-            if val.exponent == 0 and isinstance(val.mantissa, int):
+            if val.exponent == 0 and not isinstance(val.mantissa, float):
                 vInt = val.mantissa
                 if not (low <= vInt < high):
                     raise ParseError(s, start, f"{s.chars[start:end]} doesn't fit in {label}.")
                 return vInt
+            # Reparse via decimal.Decimal to check exact integrality and bounds without float precision loss.
             raw = s.chars[start:end]
             chars = raw.replace("_", "") if "_" in raw else raw
             try:
                 vDec = decimal.Decimal(chars)
             except decimal.InvalidOperation:
+                # Extreme exponents can exceed Decimal's exponent limit; 0e<huge> is still exact 0.
                 if val.mantissa == 0:
                     if not (low <= 0 < high):
                         raise ParseError(s, start, f"0 doesn't fit in {label}.") from None
@@ -119,7 +126,9 @@ _usize = _makeIntConverter(0, 2 * _ISIZE_LIMIT, "a usize")
 
 
 def _decim(val: t.Value, s: t.Stream, start: int, end: int) -> decimal.Decimal:
+    """Convert a decimal or string `Value` into an exact `decimal.Decimal`."""
     if isinstance(val, types.Decimal):
+        # Use raw source text so decimal64/decimal128 preserve full precision instead of float rounding.
         raw = s.chars[start:end]
         chars: str | int | float = raw.replace("_", "") if "_" in raw else raw
     else:
@@ -131,6 +140,7 @@ def _decim(val: t.Value, s: t.Stream, start: int, end: int) -> decimal.Decimal:
 
 
 def _dateTime(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.datetime:
+    """Parse an ISO-8601 `date-time` string into a `datetime.datetime`."""
     try:
         return datetime.datetime.fromisoformat(val.value)
     except ValueError as exc:
@@ -138,6 +148,7 @@ def _dateTime(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.d
 
 
 def _time(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.time:
+    """Parse an ISO-8601 `time` string into a `datetime.time`."""
     try:
         return datetime.time.fromisoformat(val.value)
     except ValueError as exc:
@@ -145,6 +156,7 @@ def _time(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.time:
 
 
 def _date(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.date:
+    """Parse an ISO-8601 `date` string into a `datetime.date`."""
     try:
         return datetime.date.fromisoformat(val.value)
     except ValueError as exc:
@@ -152,6 +164,7 @@ def _date(val: t.Stringish, s: t.Stream, start: int, end: int) -> datetime.date:
 
 
 def _ipv4(val: t.Stringish, s: t.Stream, start: int, end: int) -> ipaddress.IPv4Address:
+    """Parse an `ipv4` string into an `ipaddress.IPv4Address`."""
     try:
         return ipaddress.IPv4Address(val.value)
     except ipaddress.AddressValueError as exc:
@@ -159,6 +172,7 @@ def _ipv4(val: t.Stringish, s: t.Stream, start: int, end: int) -> ipaddress.IPv4
 
 
 def _ipv6(val: t.Stringish, s: t.Stream, start: int, end: int) -> ipaddress.IPv6Address:
+    """Parse an `ipv6` string into an `ipaddress.IPv6Address`."""
     try:
         return ipaddress.IPv6Address(val.value)
     except ipaddress.AddressValueError as exc:
@@ -166,6 +180,7 @@ def _ipv6(val: t.Stringish, s: t.Stream, start: int, end: int) -> ipaddress.IPv6
 
 
 def _url(val: t.Stringish, s: t.Stream, start: int, end: int) -> urllib.parse.ParseResult:
+    """Parse a `url`/`irl` (or reference) string into a `urllib.parse.ParseResult`."""
     try:
         return t.cast("urllib.parse.ParseResult", urllib.parse.urlparse(val.value))
     except ValueError as exc:
@@ -173,6 +188,7 @@ def _url(val: t.Stringish, s: t.Stream, start: int, end: int) -> urllib.parse.Pa
 
 
 def _uuid(val: t.Stringish, s: t.Stream, start: int, end: int) -> uuid.UUID:
+    """Parse a `uuid` string into a `uuid.UUID`."""
     try:
         return uuid.UUID(val.value)
     except ValueError as exc:
@@ -180,6 +196,7 @@ def _uuid(val: t.Stringish, s: t.Stream, start: int, end: int) -> uuid.UUID:
 
 
 def _regex(val: t.Stringish, s: t.Stream, start: int, end: int) -> re.Pattern[str]:
+    """Compile a `regex` string into a `re.Pattern`."""
     try:
         return re.compile(val.value)
     except re.error as exc:
@@ -187,6 +204,7 @@ def _regex(val: t.Stringish, s: t.Stream, start: int, end: int) -> re.Pattern[st
 
 
 def _b64(val: t.Stringish, s: t.Stream, start: int, _end: int) -> bytes:
+    """Decode a strictly validated `base64` string into `bytes`."""
     try:
         return base64.b64decode(val.value.encode("utf-8"), validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -194,6 +212,7 @@ def _b64(val: t.Stringish, s: t.Stream, start: int, _end: int) -> bytes:
 
 
 def _b85(val: t.Stringish, s: t.Stream, start: int, _end: int) -> bytes:
+    """Decode an Ascii85 / Adobe-framed `base85` string into `bytes`."""
     raw = val.value
     adobe = raw.startswith("<~") and raw.endswith("~>")
     try:

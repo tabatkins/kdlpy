@@ -7,6 +7,7 @@ from . import errors, parsefuncs, parsing, printing, t
 
 
 def cli() -> None:
+    """Run the `kdlreformat` CLI to parse and reformat a KDL document."""
     cliParser = argparse.ArgumentParser(
         prog="kdlreformat",
         description="KDL parser/printer, letting you easily reformat KDL files into a canonical representation.",
@@ -51,7 +52,7 @@ def cli() -> None:
     cliParser.add_argument(
         "--string-type",
         dest="respectStringType",
-        type=stringTypeFromString,
+        type=_stringTypeFromString,
         action="store",
         metavar="{auto,exact,plain}",
         help=(
@@ -77,7 +78,7 @@ def cli() -> None:
     cliParser.add_argument(
         "--exponent",
         dest="exponent",
-        type=expFromString,
+        type=_expFromString,
         action="store",
         default="e",
         help="What character to use ('e' or 'E') for indicating exponents on scinot numbers.",
@@ -92,7 +93,7 @@ def cli() -> None:
     cliParser.add_argument(
         "--version",
         dest="version",
-        type=versionFromString,
+        type=_versionFromString,
         action="store",
         default="auto",
         metavar="{1,2,auto}",
@@ -135,14 +136,16 @@ def cli() -> None:
         sys.exit(1)
 
 
-def expFromString(s: str) -> str:
+def _expFromString(s: str) -> str:
+    """Validate and return the CLI exponent character (`'e'` or `'E'`)."""
     if s in ("e", "E"):
         return s
     msg = f"Expected 'e' or 'E' for an exponent; got '{s}'"
     raise argparse.ArgumentTypeError(msg)
 
 
-def stringTypeFromString(s: str) -> t.StringTypeMode:
+def _stringTypeFromString(s: str) -> t.StringTypeMode:
+    """Convert a CLI string-type flag (`'auto'`, `'exact'`, `'plain'`) to a PrintConfig mode."""
     if s == "auto":
         return "auto"
     if s == "exact":
@@ -153,7 +156,8 @@ def stringTypeFromString(s: str) -> t.StringTypeMode:
     raise argparse.ArgumentTypeError(msg)
 
 
-def versionFromString(s: str) -> t.ParseVersion:
+def _versionFromString(s: str) -> t.ParseVersion:
+    """Convert a CLI KDL version flag (`'1'`, `'2'`, or `'auto'`) to a ParseConfig version."""
     if s == "1":
         return 1
     if s == "2":

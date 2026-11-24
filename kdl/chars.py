@@ -40,13 +40,18 @@ CONFUSABLE_KEYWORDS: frozenset[str] = frozenset(
     for letters in itertools.product(*((ch.lower(), ch.upper()) if ch.isalpha() else (ch,) for ch in kw))
 )
 
-BARE_IDENT_PATTERN = re.compile(rf"(?![+-]?\.?[0-9]){IDENT_CHAR_RE_STR}+")
+# Reject number-like prefixes (e.g. `0`, `+1`, `-.5`) so bare identifiers cannot start like numbers.
+BARE_IDENT_RE_STR = rf"(?![+-]?\.?[0-9]){IDENT_CHAR_RE_STR}+"
+BARE_IDENT_PATTERN = re.compile(BARE_IDENT_RE_STR)
 _fullmatchBareIdent = BARE_IDENT_PATTERN.fullmatch
 DISALLOWED_OR_NON_ASCII_NL_RE = rf"[\x0b\x85\u2028\u2029{DISALLOWED_RE}]"
 DISALLOWED_OR_NL_PATTERN = re.compile(rf"[{NL_RE}{DISALLOWED_RE}]")
 
 
 def isBareIdent(chars: str) -> bool:
+    """Return True if `chars` is a valid KDL 2.0 bare identifier."""
+    if not chars:
+        return False
     # Every ASCII Python identifier (`[A-Za-z_][A-Za-z0-9_]*`) is a valid KDL bare ident (except keywords).
     if chars.isascii() and chars.isidentifier():
         return chars not in CONFUSABLE_KEYWORDS

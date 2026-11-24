@@ -8,7 +8,7 @@ import typing as t
 import pytest
 
 import kdl
-from kdl import stream as kdl_stream, types as kdl_types
+from kdl import stream as kdl_stream
 
 # ---------------------------------------------------------------------------
 # Parser & ParseConfig (KDL 2.0 & KDL 1.0)
@@ -807,11 +807,20 @@ def test_string_escaping_raw_roundtrip_and_regex_flags() -> None:
     printedRaw = kdl.Document([kdl.Node("n", args=[kdl.RawString(manyHashes)])]).print()
     assert kdl.parse(printedRaw, v2Cfg).nodes[0].args[0] == manyHashes
 
-    # Bytes regex patterns cannot be serialized as KDL strings
+    # Bytes regex patterns cannot be serialized as KDL strings (directly or via .to_kdl())
+    class BytesRegexWrapper:
+        def to_kdl(self) -> re.Pattern[bytes]:
+            return re.compile(b"abc")
+
+    class StrRegexWrapper:
+        def to_kdl(self) -> re.Pattern[str]:
+            return re.compile("abc")
+
     with pytest.raises(TypeError):
         kdl.Node("n", args=[re.compile(b"abc")]).print()
-    assert not kdl_types.isKdlishValue(re.compile(b"abc"))
-    assert kdl_types.isKdlishValue(re.compile("abc"))
+    with pytest.raises(TypeError):
+        kdl.Node("n", args=[BytesRegexWrapper()]).print()
+    assert kdl.Node("n", args=[StrRegexWrapper()]).print() == 'n (regex)#"abc"#\n'
 
     # Regex patterns with inline flags round-trip cleanly; external non-default flags raise ValueError
     for pat in (re.compile("foo"), re.compile("foo", re.UNICODE), re.compile("(?i)foo"), re.compile("(?a)foo")):

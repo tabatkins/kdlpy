@@ -51,25 +51,25 @@ KDL_ROOT = os.path.normpath(os.path.dirname(kdl.__file__))
 # Suite 1: Deterministic call-count budgets on the 20-block benchmark doc.
 # `kdl` counts only calls inside `kdl/` (immune to Python stdlib changes);
 # `total` includes C/stdlib calls and leaves ~15-20% headroom across Python versions.
-MAX_PARSE_NATIVE_KDL_CALLS = 7_500  # Expected ~6,600
-MAX_PARSE_NATIVE_TOTAL_CALLS = 27_000  # Expected ~23,200
+MAX_PARSE_NATIVE_KDL_CALLS = 3_600  # Expected ~3,060
+MAX_PARSE_NATIVE_TOTAL_CALLS = 19_500  # Expected ~16,270
 MAX_PARSE_NATIVE_FINALIZE_CALLS = 120  # Expected 100 (tagged values only; ~1,240 if fastUntagged breaks)
 MAX_PARSE_NATIVE_SKIP_NODESPACE_CALLS = 80  # Expected 40 (esclines/tags; ~1,500+ without single-space fast path)
 MAX_PARSE_NATIVE_LOC_CALLS = 0  # Must stay 0: Stream.loc() is lazy and only runs on ParseError
 MAX_ABC_INSTANCECHECK_CALLS = 0  # Must stay 0: Value hierarchy avoids ABCMeta isinstance overhead
-MAX_PARSE_RAW_KDL_CALLS = 8_500  # Expected ~7,500
-MAX_PARSE_RAW_TOTAL_CALLS = 27_500  # Expected ~23,100
-MAX_PRINT_NATIVE_KDL_CALLS = 1_300  # Expected ~1,010
-MAX_PRINT_NATIVE_TOTAL_CALLS = 11_000  # Expected ~8,950
+MAX_PARSE_RAW_KDL_CALLS = 4_100  # Expected ~3,480
+MAX_PARSE_RAW_TOTAL_CALLS = 18_500  # Expected ~15,270
+MAX_PRINT_NATIVE_KDL_CALLS = 1_050  # Expected ~820
+MAX_PRINT_NATIVE_TOTAL_CALLS = 11_000  # Expected ~8,830
 MAX_PRINT_NATIVE_IDENT_CALLS = 300  # Expected 196 cold-cache misses (~2,500+ if _IDENT_CACHE breaks)
-MAX_PRINT_RAW_KDL_CALLS = 2_600  # Expected ~2,140
-MAX_PRINT_RAW_TOTAL_CALLS = 12_000  # Expected ~9,750
-MAX_PRINT_RAW_IDENT_CALLS = 350  # Expected 236 cold-cache misses
+MAX_PRINT_RAW_KDL_CALLS = 1_450  # Expected ~1,160
+MAX_PRINT_RAW_TOTAL_CALLS = 12_000  # Expected ~9,850
+MAX_PRINT_RAW_IDENT_CALLS = 260  # Expected 176 cold-cache misses
 
 # Suite 2: Peak traced heap memory (KB) on the 20-block benchmark doc.
 # Generous ~2-2.5x headroom accommodates object-size differences across Python versions / architectures.
-MAX_PARSE_NATIVE_PEAK_KB = 600.0  # Expected ~280 KB
-MAX_PRINT_NATIVE_PEAK_KB = 350.0  # Expected ~140 KB (steady-state after cache warmup)
+MAX_PARSE_NATIVE_PEAK_KB = 500.0  # Expected ~232 KB
+MAX_PRINT_NATIVE_PEAK_KB = 350.0  # Expected ~137 KB (steady-state after cache warmup)
 
 # Suite 3: Asymptotic scaling ratios when input size increases 4x.
 # For O(N) work, 4x input should take ~4x calls/time while O(N^2) blows up to ~16x.
@@ -82,10 +82,10 @@ MAX_CONST_TIME_RATIO_4X = 2.5  # Expected ~1.0x (O(N) scan would be ~4x+)
 # Suite 4: Self-calibrated speed ratios (`min(kdl_time) / min(calib_time)`).
 # Dimensionless multiples of the interleaved calibration kernel; ~55-100% headroom avoids cross-machine noise
 # while still catching ~2x+ pure-CPU inner-loop slowdowns.
-MAX_SPEED_RATIO_PARSE_NATIVE = 2.60  # Expected ~1.60x-1.70x
-MAX_SPEED_RATIO_PARSE_RAW = 2.75  # Expected ~1.68x-1.80x
-MAX_SPEED_RATIO_PRINT_NATIVE = 0.55  # Expected ~0.27x-0.29x
-MAX_SPEED_RATIO_PRINT_RAW = 0.55  # Expected ~0.27x-0.29x
+MAX_SPEED_RATIO_PARSE_NATIVE = 2.40  # Expected ~1.50x-1.55x
+MAX_SPEED_RATIO_PARSE_RAW = 2.40  # Expected ~1.50x-1.55x
+MAX_SPEED_RATIO_PRINT_NATIVE = 0.55  # Expected ~0.26x-0.28x
+MAX_SPEED_RATIO_PRINT_RAW = 0.55  # Expected ~0.29x-0.31x
 
 
 @dataclasses.dataclass
@@ -273,9 +273,9 @@ def run_call_count_checks(doc_text: str) -> list[CheckResult]:
             ),
             check_max_int(
                 "calls.parse_native.skipNodespace",
-                prof_pn.by_func.get("skipNodespace", 0),
+                prof_pn.by_func.get("_skipNodespace", 0),
                 MAX_PARSE_NATIVE_SKIP_NODESPACE_CALLS,
-                "single-space separator fast path should avoid skipNodespace",
+                "single-space separator fast path should avoid _skipNodespace",
             ),
             check_max_int(
                 "calls.parse_native.loc",
@@ -295,9 +295,9 @@ def run_call_count_checks(doc_text: str) -> list[CheckResult]:
             check_max_int("calls.print_native.total", prof_tn.total_calls, MAX_PRINT_NATIVE_TOTAL_CALLS),
             check_max_int(
                 "calls.print_native.printIdent",
-                prof_tn.by_func.get("printIdent", 0)
-                + prof_tn.by_func.get("printAutoString", 0)
-                + prof_tn.by_func.get("printQuotedString", 0),
+                prof_tn.by_func.get("_printIdent", 0)
+                + prof_tn.by_func.get("_printAutoString", 0)
+                + prof_tn.by_func.get("_printQuotedString", 0),
                 MAX_PRINT_NATIVE_IDENT_CALLS,
                 "string cache inline lookups should avoid repeated string formatting calls",
             ),
@@ -305,9 +305,9 @@ def run_call_count_checks(doc_text: str) -> list[CheckResult]:
             check_max_int("calls.print_raw.total", prof_tr.total_calls, MAX_PRINT_RAW_TOTAL_CALLS),
             check_max_int(
                 "calls.print_raw.printIdent",
-                prof_tr.by_func.get("printIdent", 0)
-                + prof_tr.by_func.get("printAutoString", 0)
-                + prof_tr.by_func.get("printQuotedString", 0),
+                prof_tr.by_func.get("_printIdent", 0)
+                + prof_tr.by_func.get("_printAutoString", 0)
+                + prof_tr.by_func.get("_printQuotedString", 0),
                 MAX_PRINT_RAW_IDENT_CALLS,
                 "string cache inline lookups should avoid repeated string formatting calls",
             ),

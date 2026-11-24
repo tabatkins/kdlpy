@@ -14,9 +14,11 @@ class _UnsetType(Enum):
     UNSET = "UNSET"
 
     def __repr__(self) -> str:
+        """Return the sentinel name `'UNSET'`."""
         return "UNSET"
 
     def __bool__(self) -> bool:
+        """Treat `UNSET` as falsy."""
         return False
 
 

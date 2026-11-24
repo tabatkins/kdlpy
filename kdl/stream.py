@@ -4,6 +4,8 @@ from . import t
 
 
 class Stream:
+    """Input text and parse-config wrapper with lazy 1-indexed line/column computation."""
+
     __slots__ = ("chars", "config", "fastUntagged", "length", "startLine")
 
     chars: str
@@ -13,6 +15,7 @@ class Stream:
     fastUntagged: bool
 
     def __init__(self, chars: str, config: t.ParseConfig, startLine: int = 1) -> None:
+        """Wrap `chars` and `config`, precomputing whether untagged values bypass `Value` wrappers."""
         self.chars = chars
         self.length = len(chars)
         self.startLine = startLine
@@ -21,6 +24,7 @@ class Stream:
         self.fastUntagged = not config.valueConverters and config.nativeUntaggedValues
 
     def loc(self, index: int) -> tuple[int, int]:
+        """Compute the 1-indexed `(line, col)` location for offset `index`."""
         # Computed lazily on error via C-level str methods instead of indexing all newlines up front.
         if index <= 0:
             return (self.startLine, 1)

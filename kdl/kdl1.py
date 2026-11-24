@@ -8,6 +8,7 @@ import ipaddress
 import itertools
 import operator
 import re
+import socket
 import sys
 import urllib.parse
 import uuid
@@ -32,17 +33,18 @@ from .types import (
 
 if t.TYPE_CHECKING:
     type _FastFrame = tuple[
-        list[Node],  # parentNodes
-        str,  # name
-        str | None,  # tag
-        list[t.Any],  # args
-        dict[str, t.Any],  # props
-        bool,  # nodeDiscard
-        bool,  # childDiscard
-        bool,  # parentDiscard
-        int,  # blockPos (exact offset if blockEnd < 0, else chunk pos)
-        int,  # blockEnd (chunk endPos if >= 0, else -1)
-        int,  # blockTokIdx (token index within chunk if blockEnd >= 0)
+        list[Node],  # 0: parentNodes
+        t.Callable[[Node], None],  # 1: parentAppend
+        str,  # 2: name
+        str | None,  # 3: tag
+        list[t.Any],  # 4: args
+        dict[str, t.Any],  # 5: props
+        bool,  # 6: nodeDiscard
+        bool,  # 7: childDiscard
+        bool,  # 8: parentDiscard
+        int,  # 9: blockPos (exact offset if blockEnd < 0, else chunk pos)
+        int,  # 10: blockEnd (chunk endPos if >= 0, else -1)
+        int,  # 11: blockTokIdx (token index within chunk if blockEnd >= 0)
     ]
 
     type _GenFrame = tuple[
@@ -66,15 +68,18 @@ _NL_CHARS = "\n\r\x85\x0c\u2028\u2029"
 _WS_RE = r"\t \xa0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff"
 _NL_RE = r"\n\r\x85\x0c\u2028\u2029"
 _ID_CH = r'[^\x00-\x20\\/(){}<>;\[\]=,"\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]'
-_ID_CH_OR_Q = r"[^\x00-\x20\\/(){}<>;\[\]=,\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
 
 _BARE_CORE = rf'(?![+-]?[0-9]|r#*"){_ID_CH}+'
 _BARE_PROP_KEY = rf'(?![+-]?[0-9]|r#*"|(?:true|false|null)=){_ID_CH}+'
 _DEC = r"[+-]?[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?"
 _ID_EQ = r"[A-Za-z_][A-Za-z0-9_-]*"
-_ID_END = rf"[A-Za-z_][A-Za-z0-9_-]*(?!{_ID_CH_OR_Q})"
-_RADIX = r"[+-]?0(?:x[0-9a-fA-F][0-9a-fA-F_]*|o[0-7][0-7_]*|b[01][01_]*)"
-_QSTR = r'"[^"\\]*(?:(?:\\["\\/bfnrt]|\\u\{[0-9a-fA-F]{1,6}\})[^"\\]*)*"'
+_END = r"(?=[ \n{;]|$)"
+_NUM_OR_RADIX = (
+    r"[+-]?(?:0(?:x[0-9a-fA-F][0-9a-fA-F_]*|o[0-7][0-7_]*|b[01][01_]*)"
+    + r"|[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?(?![.eExob]))"
+)
+_QPLAIN = r'"[^"\\]*"'
+_QSTR = r'"[^"\\]*(?:\\(?:["\\/bfnrt]|u\{[0-9a-fA-F]{1,6}\})[^"\\]*)*"'
 _RAW = r'r(?:"[^"]*"|#"[^"]*(?:"(?!#)[^"]*)*"#|##"[^"]*(?:"(?!##)[^"]*)*"##)(?![#=])'
 _SLASH = r"/(?:-|\*[^*]*(?:\*(?!/)[^*]*)*\*/(?=[ \n{]))"
 
@@ -83,6 +88,12 @@ _NL_SET = frozenset(_NL_CHARS)
 _DIGITS = frozenset("0123456789")
 _KEYWORDS = frozenset(("true", "false", "null"))
 _KW_NATIVE: dict[str, bool | None] = {"true": True, "false": False, "null": None}
+_ATOMS: dict[str, t.Any] = {
+    "true": True,
+    "false": False,
+    "null": None,
+    **{str(n): n for n in range(-16, 256)},
+}
 _NATIVE_TAGS = converters.NATIVE_TAGS
 _UNSET = t.UNSET
 _lengthHint = operator.length_hint
@@ -115,38 +126,73 @@ _SIMPLE_ESCAPES: dict[str, str] = {
     "f": "\f",
 }
 
-# 5-group chunked tokenizer for C-speed scanning without Match allocations:
-# (propKey, propVal, argOrSym, nlHead, fallback)
-# The trailing `(?s:.+)` in `fallback` stops `findall` immediately on any complex/error byte
-# and lets us compute its exact offset in O(1) as `endPos - len(fb)`.
+# 7-group chunked tokenizer for C-speed scanning without Match allocations:
+# (k, pstr, pv, astr, arg, nh, fb)
+# - Captures plain quoted strings unquoted (`pstr`/`astr`) with guaranteed zero escapes.
+# - Fuses `\n[ \t]*NAME "plain"` and `\n[ \t]*NAME {` into a single `nh` token.
+# - Handles EOF/chunk-end `//` comment lines cleanly in the `\n` branch.
+# - Trailing `(?s:.+)` in `fb` stops `findall` on any complex/error byte at exact offset `endPos - len(fb)`.
+_PROP_VAL_RE = rf'(?:"([^"\\]*)"{_END}|({_NUM_OR_RADIX}|(?:true|false|null){_END}|{_QSTR}))'
 _TOK_RE = re.compile(
     r" (?:"
-    + rf"({_ID_EQ})=({_DEC}(?![.eExob])|(?:true|false|null)(?!{_ID_CH})|{_QSTR}|{_RADIX})"
-    + rf"|(\{{|{_QSTR}(?!=)|{_DEC}(?![.eExob])|\({_ID_EQ}\)(?:{_QSTR}|{_DEC}(?![.eExob]))"
-    + rf"|{_RAW}|{_SLASH}|\}}|\\[ \t]*\n[ \t]*(?= )|{_RADIX}|{_ID_END})"
+    + rf"({_ID_EQ})={_PROP_VAL_RE}"
+    + rf'|"([^"\\]+)"{_END}'
+    + rf"|(\{{|{_NUM_OR_RADIX}|\({_ID_EQ}\)(?:{_QSTR}|{_NUM_OR_RADIX})"
+    + rf"|{_QSTR}(?!=)|{_RAW}|{_SLASH}|\}}|\\[ \t]*\n[ \t]*(?= )|{_ID_EQ}{_END})"
     + r")"
-    + rf"|\n(?:[ \t]*(?://[^{_NL_RE}]*)?\n)*[ \t]*(\}}|{_ID_END}|/- {_ID_END}|\({_ID_EQ}\){_ID_END}|)"
+    + rf"|\n(?:[ \t]*(?://[^{_NL_RE}]*)?\n)*[ \t]*(?:"
+    + rf"(\}}|{_ID_EQ}(?: (?:{_QPLAIN}{_END}|\{{)|{_END})|/- {_ID_EQ}{_END}|\({_ID_EQ}\){_ID_EQ}{_END}|)"
+    + rf"|//[^{_NL_RE}]*(?=$))"
     + r"|(\{|;|(?s:.+))",
 )
 _tokFindall = _TOK_RE.findall
 _tokFinditer = _TOK_RE.finditer
 
-_escSub = re.compile(r'\\(["\\/bfnrt]|u\{([0-9a-fA-F]{1,6})\})').sub
-_uEscSub = re.compile(r"\\u\{([0-9a-fA-F]{1,6})\}").sub
+# 6-group single-line tokenizer for the adaptive line-template cache tier:
+# (k, pstr, pv, astr, arg, fb)
+_LINE_TOK_FINDALL = re.compile(
+    r" (?:"
+    + rf"({_ID_EQ})={_PROP_VAL_RE}"
+    + rf'|"([^"\\]+)"{_END}'
+    + rf"|(\{{|{_NUM_OR_RADIX}|\({_ID_EQ}\)(?:{_QSTR}|{_NUM_OR_RADIX})"
+    + rf"|{_QSTR}(?!=)|{_RAW}|{_SLASH}|\}}|\\[ \t]*\n[ \t]*(?= )|{_ID_EQ}{_END})"
+    + r")"
+    + rf"|[ \t]+(?:(?://[^{_NL_RE}]*)?$)|//[^{_NL_RE}]*$"
+    + r"|(\{|;|(?s:.+))",
+).findall
+_LINE_HEAD_MATCH = re.compile(
+    rf"(?:(/-)[ \t]+)?(?:\(({_ID_EQ})\))?({_ID_EQ})(?=[ \n{{;]|$)",
+).match
 
+_escSub = re.compile(r'\\(["\\/bfnrt]|u\{([0-9a-fA-F]{1,6})\})').sub
+
+_dateCls = datetime.date
 _dateFromIso = datetime.date.fromisoformat
 _timeFromIso = datetime.time.fromisoformat
 _dtFromIso = datetime.datetime.fromisoformat
 _ipv4Cls = ipaddress.IPv4Address
 _ipv6Cls = ipaddress.IPv6Address
+_inetPton = socket.inet_pton
+_AF_INET = socket.AF_INET
+_AF_INET6 = socket.AF_INET6
 _urlparse = urllib.parse.urlparse
+_parseResultCls = urllib.parse.ParseResult
 _uuidCls = uuid.UUID
 _reCompile = re.compile
 _a85decode = base64.a85decode
 _b64decode = base64.b64decode
 _decCls = decimal.Decimal
 
-# Exact regex matchers for fallback, tiny docs, and custom-converter path
+_simpleUrlFullmatch = re.compile(
+    r"([a-z][a-z0-9+.-]*)://([A-Za-z0-9._-]+(?::[0-9]+)?)(/[A-Za-z0-9._~:/!$&'()*+,=%-]*)?",
+).fullmatch
+
+# Validators for quote-free ASCII and line-cached fast paths
+_fastIdFull = re.compile(_ID_EQ).fullmatch
+_hexFull = re.compile(r"[+-]?0(?:x[0-9a-fA-F][0-9a-fA-F_]*|o[0-7][0-7_]*|b[01][01_]*)").fullmatch
+_decFull = re.compile(_DEC).fullmatch
+
+# Exact regex matchers for fallback and custom-converter path
 _matchNodeHead = re.compile(
     rf"(?:[{_WS_RE}{_NL_RE}]+|//[^{_NL_RE}]*)*(?:"
     + rf"({_BARE_CORE})"  # 1: bare node name
@@ -182,13 +228,6 @@ _matchBinDigits = re.compile(r"[01][01_]*").match
 _matchKeyword = re.compile(rf"(true|false|null)(?!{_ID_CH})").match
 
 
-def _uEscCb(m: re.Match[str]) -> str:
-    v = int(m.group(1), 16)
-    if v > 0x10FFFF:
-        raise ValueError
-    return chr(v)
-
-
 def _unescapeValidated(inner: str) -> str:
     """Unescape a string body already validated by `_QSTR`; raises ValueError on codepoint > 0x10FFFF."""
     if "\\\\" not in inner:
@@ -198,6 +237,29 @@ def _unescapeValidated(inner: str) -> str:
             inner = inner.replace("\\n", "\n")
         if "\\t" in inner:
             inner = inner.replace("\\t", "\t")
+        if "\\" not in inner:
+            return inner
+        if "\\u" in inner:
+            out: list[str] = []
+            append = out.append
+            find = inner.find
+            pos = 0
+            while True:
+                u = find("\\u{", pos)
+                if u == -1:
+                    append(inner[pos:])
+                    break
+                if u > pos:
+                    append(inner[pos:u])
+                rb = find("}", u + 3)
+                v = int(inner[u + 3 : rb], 16)
+                if v > 0x10FFFF:
+                    raise ValueError
+                append(chr(v))
+                pos = rb + 1
+            inner = "".join(out)
+            if "\\" not in inner:
+                return inner
         if "\\r" in inner:
             inner = inner.replace("\\r", "\r")
         if "\\/" in inner:
@@ -206,13 +268,12 @@ def _unescapeValidated(inner: str) -> str:
             inner = inner.replace("\\b", "\b")
         if "\\f" in inner:
             inner = inner.replace("\\f", "\f")
-        if "\\u" in inner:
-            return _uEscSub(_uEscCb, inner)
         return inner
     return _escSub(_unescCb, inner)
 
 
 def _unescCb(m: re.Match[str]) -> str:
+    r"""Regex substitution callback decoding one simple or `\u{...}` KDL 1.0 escape match."""
     h = m.group(2)
     if h is not None:
         v = int(h, 16)
@@ -223,6 +284,7 @@ def _unescCb(m: re.Match[str]) -> str:
 
 
 def _skipBlockComment(s: Stream, start: int) -> int:
+    """Skip a possibly nested `/* ... */` KDL 1.0 block comment starting at `start`."""
     chars = s.chars
     search = _searchBlockCommentToken
     starts: list[int] = [start]
@@ -240,6 +302,7 @@ def _skipBlockComment(s: Stream, start: int) -> int:
 
 
 def _skipWhitespace(s: Stream, start: int) -> int:
+    """Skip KDL 1.0 horizontal whitespace (including BOM) and nested `/* ... */` block comments."""
     chars = s.chars
     n = s.length
     i = start
@@ -258,6 +321,7 @@ def _skipWhitespace(s: Stream, start: int) -> int:
 
 
 def _skipNodespace(s: Stream, start: int) -> int:
+    r"""Skip KDL 1.0 intra-node whitespace, block comments, and `\` line continuations."""
     chars = s.chars
     n = s.length
     i = start
@@ -288,6 +352,7 @@ def _skipNodespace(s: Stream, start: int) -> int:
 
 
 def _skipTerminator(s: Stream, i: int) -> int:
+    """Consume a KDL 1.0 node terminator (newline, `;`, `//` comment, or EOF), or raise `ParseError`."""
     chars = s.chars
     n = s.length
     if i >= n:
@@ -366,6 +431,7 @@ def _parseEscapedString(s: Stream, start: int) -> tuple[str, int]:
 
 
 def _parseRawString(s: Stream, start: int, hashCount: int) -> tuple[str, int]:
+    """Parse a KDL 1.0 raw string (`r"..."` or `r#"..."#`) starting at `r`, validating closing hash count."""
     chars = s.chars
     n = s.length
     strStart = start + 2 + hashCount
@@ -384,6 +450,7 @@ def _parseRawString(s: Stream, start: int, hashCount: int) -> tuple[str, int]:
 
 
 def _parseIdent(s: Stream, start: int) -> tuple[str | None, int]:
+    """Parse a KDL 1.0 identifier (quoted, raw, or bare non-keyword) starting at `start`."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -407,6 +474,7 @@ def _parseIdent(s: Stream, start: int) -> tuple[str | None, int]:
 
 
 def _parseTag(s: Stream, start: int) -> tuple[str | None, int]:
+    """Parse a KDL 1.0 `(type)` annotation starting at `start` (no whitespace allowed inside parens)."""
     chars = s.chars
     n = s.length
     if start >= n or chars[start] != "(":
@@ -426,6 +494,7 @@ def _parseTag(s: Stream, start: int) -> tuple[str | None, int]:
 
 
 def _decimalFromStr(raw: str) -> Decimal:
+    """Convert a validated KDL 1.0 decimal literal into a `Decimal` preserving its exponent."""
     if "_" in raw:
         raw = raw.replace("_", "")
     ePos = raw.find("e")
@@ -444,9 +513,11 @@ def _decimalFromStr(raw: str) -> Decimal:
 
 
 def _floatFromDecStr(raw: str) -> float:
+    """Convert a validated decimal string to `float`, normalizing integer `-0e-k` to `+0.0`."""
     if "_" in raw:
         raw = raw.replace("_", "")
     fval = float(raw)
+    # Match Decimal(int("-0"), -k).value (+0.0) while preserving `-0.0` for explicit decimals and underflows.
     if fval == 0.0 and raw[0] == "-" and "." not in raw:
         ePos = raw.find("e")
         if ePos == -1:
@@ -457,6 +528,7 @@ def _floatFromDecStr(raw: str) -> float:
 
 
 def _numFromDecStr(raw: str) -> float | int:
+    """Convert a validated KDL 1.0 decimal literal into a native Python `int` or `float`."""
     if "_" in raw:
         raw = raw.replace("_", "")
     if "." not in raw:
@@ -479,7 +551,107 @@ def _numFromDecStr(raw: str) -> float | int:
     return _floatFromDecStr(raw)
 
 
+def _decodeNumOther(pv: str) -> float | int:
+    """Fast native decoder for non-simple numeric tokens (`0...`, signed, radix, and scientific notation)."""
+    vc = pv[0]
+    if vc == "0":
+        if len(pv) == 1:
+            return 0
+        c1 = pv[1]
+        if c1 == ".":
+            try:
+                return float(pv)
+            except ValueError:
+                return float(pv.replace("_", ""))
+        if c1 in ("x", "o", "b"):
+            try:
+                return int(pv, 0)
+            except ValueError:
+                return int(pv.replace("_", ""), 0)
+        return _numFromDecStr(pv)
+    if vc in ("+", "-"):
+        if len(pv) >= 3 and pv[2] in ("x", "o", "b"):
+            try:
+                return int(pv, 0)
+            except ValueError:
+                return int(pv.replace("_", ""), 0)
+        if "." in pv:
+            try:
+                return float(pv)
+            except ValueError:
+                return float(pv.replace("_", ""))
+        if "e" not in pv and "E" not in pv:
+            try:
+                return int(pv, 10)
+            except ValueError:
+                return _numFromDecStr(pv)
+        return _numFromDecStr(pv)
+    ePos = pv.find("e")
+    if ePos == -1:
+        ePos = pv.find("E")
+    if ePos != -1 and len(pv) < 100:
+        try:
+            ev = int(pv[ePos + 1 :], 10)
+            if 0 <= ev < 300:
+                return t.cast("int", int(pv[:ePos], 10) * (10**ev))
+        except ValueError:
+            pass
+    return _numFromDecStr(pv)
+
+
+def _decodeRawNum(pv: str) -> Value:
+    """Fast raw-mode decoder converting a validated numeric token into `Decimal`, `Hex`, `Octal`, or `Binary`."""
+    vc = pv[0]
+    if "1" <= vc <= "9":
+        if "." not in pv and "e" not in pv and "E" not in pv:
+            try:
+                return Decimal(int(pv, 10), 0)
+            except ValueError:
+                return _decimalFromStr(pv)
+        if "e" not in pv and "E" not in pv:
+            try:
+                return Decimal(float(pv), 0)
+            except ValueError:
+                return Decimal(float(pv.replace("_", "")), 0)
+        return _decimalFromStr(pv)
+    if vc == "0":
+        if len(pv) == 1:
+            return Decimal(0, 0)
+        rc = pv[1]
+        if rc in ("x", "o", "b"):
+            try:
+                iv = int(pv, 0)
+            except ValueError:
+                iv = int(pv.replace("_", ""), 0)
+            return Hex(iv) if rc == "x" else (Octal(iv) if rc == "o" else Binary(iv))
+        if rc == "." and "e" not in pv and "E" not in pv:
+            try:
+                return Decimal(float(pv), 0)
+            except ValueError:
+                return Decimal(float(pv.replace("_", "")), 0)
+        return _decimalFromStr(pv)
+    if len(pv) >= 3 and pv[2] in ("x", "o", "b"):
+        try:
+            iv = int(pv, 0)
+        except ValueError:
+            iv = int(pv.replace("_", ""), 0)
+        rc = pv[2]
+        return Hex(iv) if rc == "x" else (Octal(iv) if rc == "o" else Binary(iv))
+    if "." not in pv and "e" not in pv and "E" not in pv:
+        try:
+            return Decimal(int(pv, 10), 0)
+        except ValueError:
+            return _decimalFromStr(pv)
+    if "e" not in pv and "E" not in pv:
+        try:
+            return Decimal(float(pv), 0)
+        except ValueError:
+            return Decimal(float(pv.replace("_", "")), 0)
+    return _decimalFromStr(pv)
+
+
 def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.Any, int]:
+    """Parse a KDL 1.0 decimal or radix (`0x`/`0o`/`0b`) literal at `start` with full error reporting."""
     chars = s.chars
     n = s.length
     ch = chars[start]
@@ -503,7 +675,10 @@ def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.
             if discard:
                 return (None, m.end())
             raw = m.group()
-            intVal = int(raw.replace("_", "") if "_" in raw else raw, 16) * sign
+            try:
+                intVal = int(raw, 16) * sign
+            except ValueError:
+                intVal = int(raw.replace("_", ""), 16) * sign
             return (intVal if native else Hex(intVal), m.end())
         if prefix == "o":
             m = _matchOctDigits(chars, i + 2)
@@ -512,7 +687,10 @@ def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.
             if discard:
                 return (None, m.end())
             raw = m.group()
-            intVal = int(raw.replace("_", "") if "_" in raw else raw, 8) * sign
+            try:
+                intVal = int(raw, 8) * sign
+            except ValueError:
+                intVal = int(raw.replace("_", ""), 8) * sign
             return (intVal if native else Octal(intVal), m.end())
         if prefix == "b":
             m = _matchBinDigits(chars, i + 2)
@@ -521,7 +699,10 @@ def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.
             if discard:
                 return (None, m.end())
             raw = m.group()
-            intVal = int(raw.replace("_", "") if "_" in raw else raw, 2) * sign
+            try:
+                intVal = int(raw, 2) * sign
+            except ValueError:
+                intVal = int(raw.replace("_", ""), 2) * sign
             return (intVal if native else Binary(intVal), m.end())
 
     mDec = _matchDecimal(chars, start)
@@ -559,79 +740,160 @@ def _parseNumber(s: Stream, start: int, native: bool, discard: bool) -> tuple[t.
         return (Decimal(_floatFromDecStr(mDec.group()), 0), end)
 
 
+def _fastDate(text: str) -> t.Any:
+    """Fast-path `(date)` converter returning a `datetime.date`, or `_UNSET` on invalid input."""
+    try:
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            y = text[:4]
+            mo = text[5:7]
+            d = text[8:10]
+            if y.isascii() and y.isdigit() and mo.isascii() and mo.isdigit() and d.isascii() and d.isdigit():
+                return _dateCls(int(y), int(mo), int(d))
+        return _dateFromIso(text)
+    except ValueError:
+        return _UNSET
+
+
+def _fastIpv4(text: str) -> t.Any:
+    """Fast-path `(ipv4)` converter using C `socket.inet_pton`, returning `_UNSET` on invalid input."""
+    try:
+        return _ipv4Cls(_inetPton(_AF_INET, text))
+    except (OSError, ValueError):
+        return _UNSET
+
+
+def _fastUrl(text: str) -> t.Any:
+    """Fast-path `(url)`/`(irl)` converter bypassing `urlparse` for simple `scheme://host/path` URLs."""
+    m = _simpleUrlFullmatch(text)
+    if m is not None:
+        return _parseResultCls(m.group(1), m.group(2), m.group(3) or "", "", "", "")
+    try:
+        return _urlparse(text)
+    except ValueError:
+        return _UNSET
+
+
+def _fastDateTime(text: str) -> t.Any:
+    """Fast-path `(date-time)` converter returning a `datetime.datetime`, or `_UNSET` on failure."""
+    try:
+        return _dtFromIso(text)
+    except ValueError:
+        return _UNSET
+
+
+def _fastTime(text: str) -> t.Any:
+    """Fast-path `(time)` converter returning a `datetime.time`, or `_UNSET` on failure."""
+    try:
+        return _timeFromIso(text)
+    except ValueError:
+        return _UNSET
+
+
+def _fastIpv6(text: str) -> t.Any:
+    """Fast-path `(ipv6)` converter using `socket.inet_pton` (falling back to stdlib for `%scope` IDs)."""
+    try:
+        if "%" not in text:
+            return _ipv6Cls(_inetPton(_AF_INET6, text))
+        return _ipv6Cls(text)
+    except (OSError, ValueError, ipaddress.AddressValueError):
+        return _UNSET
+
+
+def _fastUuid(text: str) -> t.Any:
+    """Fast-path `(uuid)` converter returning a `uuid.UUID`, or `_UNSET` on failure."""
+    try:
+        return _uuidCls(text)
+    except ValueError:
+        return _UNSET
+
+
+def _fastRegex(text: str) -> t.Any:
+    """Fast-path `(regex)` converter returning a compiled `re.Pattern`, or `_UNSET` on failure."""
+    try:
+        return _reCompile(text)
+    except re.error:
+        return _UNSET
+
+
+def _fastB64(text: str) -> t.Any:
+    """Fast-path `(base64)` converter returning `bytes`, or `_UNSET` on invalid input."""
+    try:
+        return _b64decode(text.encode("utf-8"), validate=True)
+    except (binascii.Error, ValueError):
+        return _UNSET
+
+
+def _fastB85(text: str) -> t.Any:
+    """Fast-path `(base85)` converter returning `bytes`, or `_UNSET` on invalid input."""
+    try:
+        return _a85decode(text.encode("utf-8"), adobe=text.startswith("<~") and text.endswith("~>"))
+    except ValueError:
+        return _UNSET
+
+
+def _fastDecStr(text: str) -> t.Any:
+    """Fast-path `(decimal)` string converter returning `decimal.Decimal`, or `_UNSET` on failure."""
+    try:
+        return _decCls(text)
+    except decimal.InvalidOperation:
+        return _UNSET
+
+
+_TAG_STR_FAST: dict[str, t.Callable[[str], t.Any]] = {
+    "date": _fastDate,
+    "ipv4": _fastIpv4,
+    "url": _fastUrl,
+    "url-reference": _fastUrl,
+    "irl": _fastUrl,
+    "irl-reference": _fastUrl,
+    "date-time": _fastDateTime,
+    "time": _fastTime,
+    "ipv6": _fastIpv6,
+    "uuid": _fastUuid,
+    "regex": _fastRegex,
+    "base64": _fastB64,
+    "base85": _fastB85,
+    "decimal": _fastDecStr,
+}
+_tagStrGet = _TAG_STR_FAST.get
+
+
 def _convertTaggedStringFast(tag: str, text: str) -> t.Any:
-    match tag:
-        case "date":
-            try:
-                return _dateFromIso(text)
-            except ValueError:
-                return _UNSET
-        case "ipv4":
-            try:
-                return _ipv4Cls(text)
-            except ipaddress.AddressValueError:
-                return _UNSET
-        case "url" | "url-reference" | "irl" | "irl-reference":
-            try:
-                return _urlparse(text)
-            except ValueError:
-                return _UNSET
-        case "date-time":
-            try:
-                return _dtFromIso(text)
-            except ValueError:
-                return _UNSET
-        case "time":
-            try:
-                return _timeFromIso(text)
-            except ValueError:
-                return _UNSET
-        case "ipv6":
-            try:
-                return _ipv6Cls(text)
-            except ipaddress.AddressValueError:
-                return _UNSET
-        case "uuid":
-            try:
-                return _uuidCls(text)
-            except ValueError:
-                return _UNSET
-        case "regex":
-            try:
-                return _reCompile(text)
-            except re.error:
-                return _UNSET
-        case "base64":
-            try:
-                return _b64decode(text.encode("utf-8"), validate=True)
-            except (binascii.Error, ValueError):
-                return _UNSET
-        case "base85":
-            try:
-                return _a85decode(text.encode("utf-8"), adobe=text.startswith("<~") and text.endswith("~>"))
-            except ValueError:
-                return _UNSET
-        case "decimal":
-            try:
-                return _decCls(text)
-            except decimal.InvalidOperation:
-                return _UNSET
-        case _:
-            return String(text, tag)
+    """Convert a tagged string directly to its native type (or `String(text, tag)` if unknown; `_UNSET` on error)."""
+    fn = _tagStrGet(tag)
+    if fn is not None:
+        return fn(text)
+    return String(text, tag)
 
 
 def _convertTaggedDecFast(tag: str, raw: str) -> t.Any:
+    """Convert a tagged numeric literal directly to its native type (or tagged `Value`; `_UNSET` on error)."""
     bounds = _INT_TAG_BOUNDS.get(tag)
     if bounds is not None:
+        if raw.isdigit():
+            try:
+                iv = int(raw, 10)
+            except ValueError:
+                return _UNSET
+            return iv if bounds[0] <= iv < bounds[1] else _UNSET
+        if len(raw) >= 2 and (
+            raw[1] in ("x", "o", "b") or (raw[0] in ("+", "-") and len(raw) >= 3 and raw[2] in ("x", "o", "b"))
+        ):
+            try:
+                iv = int(raw, 0)
+            except ValueError:
+                try:
+                    iv = int(raw.replace("_", ""), 0)
+                except ValueError:
+                    return _UNSET
+            return iv if bounds[0] <= iv < bounds[1] else _UNSET
         cleaned = raw.replace("_", "") if "_" in raw else raw
         if "." not in cleaned and "e" not in cleaned and "E" not in cleaned:
             try:
                 iv = int(cleaned, 10)
             except ValueError:
                 return _UNSET
-            if bounds[0] <= iv < bounds[1]:
-                return iv
-            return _UNSET
+            return iv if bounds[0] <= iv < bounds[1] else _UNSET
         try:
             dv = _decCls(cleaned)
         except decimal.InvalidOperation:
@@ -640,18 +902,27 @@ def _convertTaggedDecFast(tag: str, raw: str) -> t.Any:
             return int(dv)
         return _UNSET
     if tag in ("f32", "f64"):
+        if len(raw) >= 2 and (
+            raw[1] in ("x", "o", "b") or (raw[0] in ("+", "-") and len(raw) >= 3 and raw[2] in ("x", "o", "b"))
+        ):
+            return _UNSET
         return _floatFromDecStr(raw)
     if tag in ("decimal64", "decimal128"):
+        if len(raw) >= 2 and (
+            raw[1] in ("x", "o", "b") or (raw[0] in ("+", "-") and len(raw) >= 3 and raw[2] in ("x", "o", "b"))
+        ):
+            return _UNSET
         try:
             return _decCls(raw.replace("_", "") if "_" in raw else raw)
         except decimal.InvalidOperation:
             return _UNSET
-    d = _decimalFromStr(raw)
-    d.tag = tag
-    return d
+    v = _decodeRawNum(raw)
+    v.tag = tag
+    return v
 
 
 def _finalizeValue(s: Stream, val: Value, tag: str | None, valStart: int, valEnd: int) -> t.Any:
+    """Attach `tag`, run user `valueConverters`, and unwrap or apply built-in native tag conversions."""
     val.tag = tag
     config = s.config
     valueConverters = config.valueConverters
@@ -677,6 +948,7 @@ def _finalizeValue(s: Stream, val: Value, tag: str | None, valStart: int, valEnd
 
 
 def _parseValueFast(s: Stream, start: int, discard: bool, nativeTagged: bool) -> tuple[t.Any, int]:
+    """Parse one KDL 1.0 value when `nativeUntaggedValues=True` and no custom value converters are active."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -723,6 +995,10 @@ def _parseValueFast(s: Stream, start: int, discard: bool, nativeTagged: bool) ->
             return (None, end)
         if untagged:
             return (strVal, end)
+        if nativeTagged and tag is not None:
+            conv = _convertTaggedStringFast(tag, strVal)
+            if conv is not _UNSET:
+                return (conv, end)
         sObj = String(strVal, tag)
         if nativeTagged and tag in _NATIVE_TAGS:
             return (converters.toNative(sObj, s, valStart, end), end)
@@ -768,6 +1044,7 @@ def _parseValueFast(s: Stream, start: int, discard: bool, nativeTagged: bool) ->
 
 
 def _parseValue(s: Stream, start: int, fastUntagged: bool, discard: bool) -> tuple[t.Any, int]:
+    """Parse one KDL 1.0 value with full `_finalizeValue` support (raw mode or custom converters)."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -844,6 +1121,7 @@ def _parseValue(s: Stream, start: int, fastUntagged: bool, discard: bool) -> tup
 
 
 def _parseDiscardedEntity(s: Stream, start: int) -> int:
+    """Validate and skip a slashdashed (`/-`) KDL 1.0 arg or property, returning its end offset or -1."""
     chars = s.chars
     n = s.length
     if start >= n:
@@ -891,6 +1169,8 @@ def _parseDiscardedEntity(s: Stream, start: int) -> int:
 
 
 def _pickChunkEnd(chars: str, pos: int, n: int, chunkSize: int) -> int:
+    """Choose a chunk boundary near `pos + chunkSize` on a newline or space (or `-1` if none exists)."""
+    # Splitting on `\n`/` ` keeps chunks token-aligned while bounding scans so errors fail fast in O(1).
     target = pos + chunkSize
     if target >= n:
         return n
@@ -900,8 +1180,6 @@ def _pickChunkEnd(chars: str, pos: int, n: int, chunkSize: int) -> int:
     spPos = chars.find(" ", target, target + 512)
     if spPos != -1:
         return spPos
-    # Giant token (> 512 bytes without `\n` or ` `, e.g. long string or comment):
-    # cut before it if possible, else return -1 to handle it directly in C via fallback.
     prevNl = chars.rfind("\n", pos + 1, target)
     if prevNl != -1:
         return prevNl
@@ -912,19 +1190,32 @@ def _pickChunkEnd(chars: str, pos: int, n: int, chunkSize: int) -> int:
 
 
 def _tokenOffset(chars: str, pos: int, endPos: int, tokIdx: int) -> int:
+    """Re-scan the current chunk lazily with `finditer` to find the exact byte offset of token `tokIdx`."""
     m = next(itertools.islice(_tokFinditer(chars, pos, endPos), tokIdx, tokIdx + 1))
     return m.start()
 
 
 def _unclosedBlockPos(chars: str, frame: _FastFrame) -> int:
-    bPos = frame[8]
-    bEnd = frame[9]
+    """Resolve the exact byte offset of the unclosed `{` stored in `frame` for `ParseError` reporting."""
+    bPos = frame[9]
+    bEnd = frame[10]
     if bEnd < 0:
         return bPos
-    m = next(itertools.islice(_tokFinditer(chars, bPos, bEnd), frame[10], frame[10] + 1))
-    # For `' {'` token, `{` is at start + 1; for bare `'{'`, at start.
-    st = m.start()
-    return st + 1 if chars[st] == " " else st
+    # For `' {'`, bare `'{'`, and fused `'\n...name {'`, the `{` is always the final char of the token match.
+    m = next(itertools.islice(_tokFinditer(chars, bPos, bEnd), frame[11], frame[11] + 1))
+    return m.end() - 1
+
+
+def _hasRepeatingLines(lines: list[str]) -> bool:
+    """Fast O(1) sample probe: True iff >= 20% of non-trivial lines in the sample repeat."""
+    seen: set[str] = set()
+    seenAdd = seen.add
+    nonTrivial = 0
+    for ln in lines[:48]:
+        if len(ln) > 4:
+            nonTrivial += 1
+            seenAdd(ln)
+    return nonTrivial >= 8 and len(seen) * 5 <= nonTrivial * 4
 
 
 def _handleChunkFallback(
@@ -936,22 +1227,22 @@ def _handleChunkFallback(
     state: int,
     name: str,
     tag: str | None,
-    args: list[t.Any] | None,
-    props: dict[str, t.Any] | None,
+    args: list[t.Any],
+    props: dict[str, t.Any],
     nodeDiscard: bool,
     curNodes: list[Node],
     curDiscard: bool,
     stack: list[_FastFrame],
 ) -> tuple[
-    int,  # new pos (or -1 to return Document)
-    int,  # new state
-    str,  # name
-    str | None,  # tag
-    list[t.Any] | None,  # args
-    dict[str, t.Any] | None,  # props
-    bool,  # nodeDiscard
-    list[Node],  # curNodes
-    bool,  # curDiscard
+    int,
+    int,
+    str,
+    str | None,
+    list[t.Any],
+    dict[str, t.Any],
+    bool,
+    list[Node],
+    bool,
 ]:
     """Execute one exact fallback step at byte offset `i` for `_parseChunkedNative`/`_parseChunkedRaw`."""
     chars = s.chars
@@ -972,14 +1263,27 @@ def _handleChunkFallback(
                     mh.start(1),
                     "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-            return (mh.end(), 1, cand, None, None, None, curDiscard, curNodes, curDiscard)
+            return (mh.end(), 1, cand, None, [], {}, curDiscard, curNodes, curDiscard)
         if li == 3:
             if not stack:
                 raise ParseError(s, mh.start(3), "Expected a node")
-            parentNodes, pName, pTag, pArgs, pProps, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = stack.pop()
+            (
+                parentNodes,
+                parentAppend,
+                pName,
+                pTag,
+                pArgs,
+                pProps,
+                pNodeDiscard,
+                pChildDiscard,
+                pParentDiscard,
+                _,
+                _,
+                _,
+            ) = stack.pop()
             if not pNodeDiscard:
-                parentNodes.append(Node(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
-            return (mh.end(), 2, "", None, None, None, False, parentNodes, pParentDiscard)
+                parentAppend(Node(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
+            return (mh.end(), 2, "", None, [], {}, False, parentNodes, pParentDiscard)
         if li is None:
             end = mh.end()
             if end >= n:
@@ -989,14 +1293,14 @@ def _handleChunkFallback(
                         _unclosedBlockPos(chars, stack[-1]),
                         "Hit EOF while searching for end of child list",
                     )
-                return (-1, 0, "", None, None, None, False, curNodes, curDiscard)
+                return (-1, 0, "", None, [], {}, False, curNodes, curDiscard)
             raise ParseError(
                 s,
                 end,
                 "Junk between end of child list and closing }" if stack else "Expected a node",
             )
         if li == 2:
-            return (mh.end(), 1, mh.group(2), None, None, None, curDiscard, curNodes, curDiscard)
+            return (mh.end(), 1, mh.group(2), None, [], {}, curDiscard, curNodes, curDiscard)
         if li == 5:
             tagStart = mh.start(5)
             newTag, tagEnd = _parseTag(s, tagStart)
@@ -1013,7 +1317,7 @@ def _handleChunkFallback(
                     tagStart,
                     "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-            return (nameEnd, 1, nameOrNone, newTag, None, None, curDiscard, curNodes, curDiscard)
+            return (nameEnd, 1, nameOrNone, newTag, [], {}, curDiscard, curNodes, curDiscard)
         if li == 4:
             sdStart = mh.start(4)
             j = _skipNodespace(s, mh.end())
@@ -1029,15 +1333,15 @@ def _handleChunkFallback(
                     sdStart,
                     "Junk between end of child list and closing }" if stack else "Expected a node",
                 )
-            return (nameEnd, 1, nameOrNone, newTag, None, None, True, curNodes, curDiscard)
+            return (nameEnd, 1, nameOrNone, newTag, [], {}, True, curNodes, curDiscard)
         if li == 6:
-            return (_skipBlockComment(s, mh.start(6)), 0, "", None, None, None, False, curNodes, curDiscard)
+            return (_skipBlockComment(s, mh.start(6)), 0, "", None, [], {}, False, curNodes, curDiscard)
         if li == 7:
             qName, qEnd = _parseEscapedString(s, mh.start(7))
-            return (qEnd, 1, qName, None, None, None, curDiscard, curNodes, curDiscard)
+            return (qEnd, 1, qName, None, [], {}, curDiscard, curNodes, curDiscard)
         rawStart = mh.start(8)
         rName, rEnd = _parseRawString(s, rawStart, mh.end() - rawStart - 2)
-        return (rEnd, 1, rName, None, None, None, curDiscard, curNodes, curDiscard)
+        return (rEnd, 1, rName, None, [], {}, curDiscard, curNodes, curDiscard)
 
     if state == 2:
         if i < n:
@@ -1045,7 +1349,7 @@ def _handleChunkFallback(
             if chEnd in wsSet or chEnd == "\\" or (chEnd == "/" and i + 1 < n and chars[i + 1] == "*"):
                 i = _skipNodespace(s, i)
             i = _skipTerminator(s, i)
-        return (i, 0, "", None, None, None, False, curNodes, curDiscard)
+        return (i, 0, "", None, [], {}, False, curNodes, curDiscard)
 
     # state == 1
     ch = chars[i]
@@ -1057,65 +1361,51 @@ def _handleChunkFallback(
             hadSpace = True
     if not hadSpace:
         if ch == "{":
-            finalArgs: list[t.Any] = [] if (nodeDiscard or args is None) else args
-            finalProps: dict[str, t.Any] = {} if (nodeDiscard or props is None) else props
-            stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
-            return (i + 1, 0, "", None, None, None, False, [], nodeDiscard)
+            stack.append(
+                (curNodes, curNodes.append, name, tag, args, props, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0),
+            )
+            return (i + 1, 0, "", None, [], {}, False, [], nodeDiscard)
         if ch == "/" and i + 1 < n and chars[i + 1] == "-":
             j = _skipNodespace(s, i + 2)
             if j < n and chars[j] == "{":
-                finalArgs = [] if (nodeDiscard or args is None) else args
-                finalProps = {} if (nodeDiscard or props is None) else props
-                stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, True, curDiscard, i, -1, 0))
-                return (j + 1, 0, "", None, None, None, False, [], True)
+                stack.append(
+                    (curNodes, curNodes.append, name, tag, args, props, nodeDiscard, True, curDiscard, i, -1, 0),
+                )
+                return (j + 1, 0, "", None, [], {}, False, [], True)
             raise ParseError(s, i, "Junk after node, before terminator.")
         i = _skipTerminator(s, i)
         if not nodeDiscard:
-            curNodes.append(Node(name, tag, [] if args is None else args, {} if props is None else props, []))
-        return (i, 0, "", None, None, None, False, curNodes, curDiscard)
+            curNodes.append(Node(name, tag, args, props, []))
+        return (i, 0, "", None, [], {}, False, curNodes, curDiscard)
 
     if i >= n:
         if not nodeDiscard:
-            curNodes.append(Node(name, tag, [] if args is None else args, {} if props is None else props, []))
-        return (n, 0, "", None, None, None, False, curNodes, curDiscard)
+            curNodes.append(Node(name, tag, args, props, []))
+        return (n, 0, "", None, [], {}, False, curNodes, curDiscard)
 
     ch2 = chars[i]
     if ch2 == "{":
-        finalArgs = [] if (nodeDiscard or args is None) else args
-        finalProps = {} if (nodeDiscard or props is None) else props
-        stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0))
-        return (i + 1, 0, "", None, None, None, False, [], nodeDiscard)
+        stack.append(
+            (curNodes, curNodes.append, name, tag, args, props, nodeDiscard, nodeDiscard, curDiscard, i, -1, 0),
+        )
+        return (i + 1, 0, "", None, [], {}, False, [], nodeDiscard)
     if ch2 in ("\n", ";") or ch2 in nlSet or (ch2 == "/" and i + 1 < n and chars[i + 1] == "/"):
         i = _skipTerminator(s, i)
         if not nodeDiscard:
-            curNodes.append(Node(name, tag, [] if args is None else args, {} if props is None else props, []))
-        return (i, 0, "", None, None, None, False, curNodes, curDiscard)
+            curNodes.append(Node(name, tag, args, props, []))
+        return (i, 0, "", None, [], {}, False, curNodes, curDiscard)
     if ch2 == "/" and i + 1 < n and chars[i + 1] == "-":
         sdStart = i
         j = _skipNodespace(s, i + 2)
         if j < n and chars[j] == "{":
-            finalArgs = [] if (nodeDiscard or args is None) else args
-            finalProps = {} if (nodeDiscard or props is None) else props
-            stack.append((curNodes, name, tag, finalArgs, finalProps, nodeDiscard, True, curDiscard, sdStart, -1, 0))
-            return (j + 1, 0, "", None, None, None, False, [], True)
+            stack.append(
+                (curNodes, curNodes.append, name, tag, args, props, nodeDiscard, True, curDiscard, sdStart, -1, 0),
+            )
+            return (j + 1, 0, "", None, [], {}, False, [], True)
         entEnd = _parseDiscardedEntity(s, j)
         if entEnd < 0:
             raise ParseError(s, sdStart, "Junk after node, before terminator.")
         return (entEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
-
-    def _addProp(pk: str, pv: t.Any) -> None:
-        nonlocal props
-        if props is None:
-            props = {pk: pv}
-        else:
-            props[pk] = pv
-
-    def _addArg(av: t.Any) -> None:
-        nonlocal args
-        if args is None:
-            args = [av]
-        else:
-            args.append(av)
 
     m = _matchEntry(chars, i)
     if m is not None:
@@ -1137,7 +1427,7 @@ def _handleChunkFallback(
                         if nativeUntagged
                         else (Bool(True) if kwStr == "true" else (Bool(False) if kwStr == "false" else Null()))
                     )
-                _addProp(key, pval)
+                props[key] = pval
             return (endPos, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if eli == 5:
             key = m.group(1)
@@ -1150,17 +1440,17 @@ def _handleChunkFallback(
             if valEnd < 0:
                 raise ParseError(s, valStart, "Expected value after prop=.")
             if not nodeDiscard:
-                _addProp(key, val)
+                props[key] = val
             return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if eli == 6:
             if not nodeDiscard:
                 sVal = m.group(6)
-                _addArg(sVal if nativeUntagged else String(sVal))
+                args.append(sVal if nativeUntagged else String(sVal))
             return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if eli == 7:
             if not nodeDiscard:
                 rawNum = m.group(7)
-                _addArg(_numFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum))
+                args.append(_numFromDecStr(rawNum) if nativeUntagged else _decimalFromStr(rawNum))
             return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         tok1 = m.group(1)
         kwVal = _KW_NATIVE.get(tok1, _UNSET)
@@ -1171,7 +1461,7 @@ def _handleChunkFallback(
                     if nativeUntagged
                     else (Bool(True) if tok1 == "true" else (Bool(False) if tok1 == "false" else Null()))
                 )
-                _addArg(val)
+                args.append(val)
             return (m.end(), 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if tok1.lower() in keywords:
             raise ParseError(s, i, "KDL keywords are lower-case.")
@@ -1188,10 +1478,10 @@ def _handleChunkFallback(
             if valEnd < 0:
                 raise ParseError(s, strEnd + 1, "Expected value after prop=.")
             if not nodeDiscard:
-                _addProp(strVal, val)
+                props[strVal] = val
             return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
         if not nodeDiscard:
-            _addArg(strVal if nativeUntagged else String(strVal))
+            args.append(strVal if nativeUntagged else String(strVal))
         return (strEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
     if ch2 == "r" and i + 1 < n and chars[i + 1] in ('"', "#"):
@@ -1209,10 +1499,10 @@ def _handleChunkFallback(
                 if valEnd < 0:
                     raise ParseError(s, strEnd + 1, "Expected value after prop=.")
                 if not nodeDiscard:
-                    _addProp(rawVal, val)
+                    props[rawVal] = val
                 return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
             if not nodeDiscard:
-                _addArg(rawVal if nativeUntagged else RawString(rawVal))
+                args.append(rawVal if nativeUntagged else RawString(rawVal))
             return (strEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
     val, valEnd = (
@@ -1221,62 +1511,1515 @@ def _handleChunkFallback(
     if valEnd < 0:
         raise ParseError(s, i, "Junk after node, before terminator.")
     if not nodeDiscard:
-        _addArg(val)
+        args.append(val)
     return (valEnd, 1, name, tag, args, props, nodeDiscard, curNodes, curDiscard)
 
 
-def _parseChunkedNative(s: Stream) -> Document:
+def _tryQuoteFreeChunkNative(
+    chars: str,
+    pos: int,
+    endPos: int,
+    *,
+    curNodes: list[Node],
+    stack: list[_FastFrame],
+    validIds: set[str],
+) -> tuple[int, list[Node]]:
+    """
+    Ultra-fast line-split parser for pure-ASCII chunks with no quotes/semicolons/comments/parens/escapes.
+    Returns `(newPos, curNodes)` — stops at exact line byte offset on any line needing fallback.
+    """
+    chunk = chars[pos:endPos]
+    lines = chunk.split("\n")
+    noUnder = "_" not in chunk
+    nodeCls = Node
+    intFn = int
+    floatFn = float
+    atomsGet = _ATOMS.get
+    keywords = _KEYWORDS
+    fastId = _fastIdFull
+    hexFull = _hexFull
+    decFull = _decFull
+    numDecFn = _numFromDecStr
+    unset = _UNSET
+    validAdd = validIds.add
+    curAppend = curNodes.append
+    stackPush = stack.append
+    stackPop = stack.pop
+
+    lineOffset = pos
+    for rawLine in lines:
+        lineLen = len(rawLine)
+        parts = rawLine.split()
+        if not parts:
+            lineOffset += lineLen + 1
+            continue
+        p0 = parts[0]
+        if p0 == "}":
+            if len(parts) != 1 or not stack:
+                return (lineOffset, curNodes)
+            parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, _, _, _, _ = stackPop()
+            if not pND:
+                parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+            curNodes = parentNodes
+            curAppend = parentAppend
+            lineOffset += lineLen + 1
+            continue
+        if p0[0] == "/" and p0.startswith("//"):
+            lineOffset += lineLen + 1
+            continue
+        if p0 not in validIds:
+            if fastId(p0) is None or p0 in keywords:
+                return (lineOffset, curNodes)
+            validAdd(p0)
+
+        nParts = len(parts)
+        if nParts == 1:
+            curAppend(nodeCls(p0, None, [], {}, []))
+            lineOffset += lineLen + 1
+            continue
+
+        hasBrace = parts[-1] == "{"
+        limit = nParts - 1 if hasBrace else nParts
+        args: list[t.Any] = []
+        argsAppend = args.append
+        props: dict[str, t.Any] = {}
+        ok = True
+        idx = 1
+        while idx < limit:
+            tok = parts[idx]
+            idx += 1
+            av = atomsGet(tok, unset)
+            if av is not unset:
+                argsAppend(av)
+                continue
+            c0 = tok[0]
+            if "1" <= c0 <= "9":
+                if noUnder:
+                    if "." not in tok and "e" not in tok and "E" not in tok:
+                        try:
+                            argsAppend(intFn(tok, 10))
+                            continue
+                        except ValueError:
+                            pass
+                    elif "." in tok:
+                        dot = tok.find(".")
+                        if dot + 1 < len(tok) and "0" <= tok[dot + 1] <= "9":
+                            try:
+                                argsAppend(floatFn(tok))
+                                continue
+                            except ValueError:
+                                pass
+                    else:
+                        ePos = tok.find("e")
+                        if ePos == -1:
+                            ePos = tok.find("E")
+                        if ePos != -1 and ePos + 1 < len(tok) and len(tok) < 100:
+                            cNext = tok[ePos + 1]
+                            if "0" <= cNext <= "9" or (
+                                cNext in ("+", "-") and ePos + 2 < len(tok) and "0" <= tok[ePos + 2] <= "9"
+                            ):
+                                try:
+                                    ev = intFn(tok[ePos + 1 :], 10)
+                                    mv = intFn(tok[:ePos], 10)
+                                    argsAppend(mv * (10**ev) if 0 <= ev < 300 else numDecFn(tok))
+                                    continue
+                                except ValueError:
+                                    pass
+                if decFull(tok) is not None:
+                    argsAppend(numDecFn(tok))
+                    continue
+                ok = False
+                break
+
+            if c0 in ("+", "-"):
+                if (
+                    noUnder
+                    and "." not in tok
+                    and "e" not in tok
+                    and "E" not in tok
+                    and len(tok) > 1
+                    and "0" <= tok[1] <= "9"
+                    and (len(tok) < 3 or tok[2] not in ("x", "o", "b"))
+                ):
+                    try:
+                        argsAppend(intFn(tok, 10))
+                        continue
+                    except ValueError:
+                        pass
+                if hexFull(tok) is not None:
+                    try:
+                        argsAppend(intFn(tok, 0))
+                    except ValueError:
+                        argsAppend(intFn(tok.replace("_", ""), 0))
+                    continue
+                if decFull(tok) is not None:
+                    argsAppend(numDecFn(tok))
+                    continue
+                ok = False
+                break
+
+            if c0 >= "A":
+                k, eq, pv = tok.partition("=")
+                if eq and pv:
+                    if k not in validIds:
+                        if fastId(k) is None or k in keywords:
+                            ok = False
+                            break
+                        validAdd(k)
+                    av = atomsGet(pv, unset)
+                    if av is not unset:
+                        props[k] = av
+                        continue
+                    vc = pv[0]
+                    if "1" <= vc <= "9" and noUnder:
+                        if "." not in pv and "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = intFn(pv, 10)
+                                continue
+                            except ValueError:
+                                pass
+                        elif "." in pv:
+                            dot = pv.find(".")
+                            if dot + 1 < len(pv) and "0" <= pv[dot + 1] <= "9":
+                                try:
+                                    props[k] = floatFn(pv)
+                                    continue
+                                except ValueError:
+                                    pass
+                    elif vc == "0" and noUnder and len(pv) > 2:
+                        pc1 = pv[1]
+                        if pc1 == "x":
+                            try:
+                                props[k] = intFn(pv, 16)
+                                continue
+                            except ValueError:
+                                pass
+                        elif pc1 == "o":
+                            try:
+                                props[k] = intFn(pv, 8)
+                                continue
+                            except ValueError:
+                                pass
+                        elif pc1 == "b":
+                            try:
+                                props[k] = intFn(pv, 2)
+                                continue
+                            except ValueError:
+                                pass
+                        elif pc1 == "." and "0" <= pv[2] <= "9":
+                            try:
+                                props[k] = floatFn(pv)
+                                continue
+                            except ValueError:
+                                pass
+                    if hexFull(pv) is not None:
+                        try:
+                            props[k] = intFn(pv, 0)
+                        except ValueError:
+                            props[k] = intFn(pv.replace("_", ""), 0)
+                        continue
+                    if decFull(pv) is not None:
+                        props[k] = numDecFn(pv)
+                        continue
+                ok = False
+                break
+
+            if c0 == "0":
+                c1 = tok[1]
+                if noUnder:
+                    if c1 == "x":
+                        try:
+                            argsAppend(intFn(tok, 16))
+                            continue
+                        except ValueError:
+                            pass
+                    elif c1 == "o":
+                        try:
+                            argsAppend(intFn(tok, 8))
+                            continue
+                        except ValueError:
+                            pass
+                    elif c1 == "b":
+                        try:
+                            argsAppend(intFn(tok, 2))
+                            continue
+                        except ValueError:
+                            pass
+                    elif c1 == "." and len(tok) > 2 and "0" <= tok[2] <= "9":
+                        try:
+                            argsAppend(floatFn(tok))
+                            continue
+                        except ValueError:
+                            pass
+                if hexFull(tok) is not None:
+                    try:
+                        argsAppend(intFn(tok, 0))
+                    except ValueError:
+                        argsAppend(intFn(tok.replace("_", ""), 0))
+                    continue
+                if decFull(tok) is not None:
+                    argsAppend(numDecFn(tok))
+                    continue
+                ok = False
+                break
+
+            if c0 == "/" and tok.startswith("//"):
+                hasBrace = False
+                break
+
+            ok = False
+            break
+
+        if not ok:
+            return (lineOffset, curNodes)
+
+        if hasBrace:
+            braceOff = lineOffset + rawLine.rfind("{")
+            stackPush((curNodes, curAppend, p0, None, args, props, False, False, False, braceOff, -1, 0))
+            curNodes = []
+            curAppend = curNodes.append
+        else:
+            curAppend(nodeCls(p0, None, args, props, []))
+        lineOffset += lineLen + 1
+
+    return (endPos, curNodes)
+
+
+def _tryLineCachedChunkNative(
+    lines: list[str],
+    pos: int,
+    chunkEnd: int,
+    *,
+    consumeTrailingNl: bool,
+    curNodes: list[Node],
+    stack: list[_FastFrame],
+    lineCache: dict[str, t.Any],
+    tagCache: dict[str, t.Any],
+    validIds: set[str],
+    nativeTagged: bool,
+) -> tuple[int, list[Node]]:
+    """
+    Adaptive line-template cached fast path for nativeUntaggedValues=True.
+    `lines` comes from `chars[pos:chunkEnd].split("\\n")` with no CR/FF/NEL/LS/PS or `/*`.
+    Returns `(newPos, curNodes)` — stops at exact `lineStart` on any line needing fallback,
+    without mutating `curNodes` or `stack` for the failing line.
+    """
+    nodeCls = Node
+    strCls = String
+    valueCls = Value
+    intFn = int
+    floatFn = float
+    atomsGet = _ATOMS.get
+    keywords = _KEYWORDS
+    unset = _UNSET
+    unescFn = _unescapeValidated
+    numDecFn = _numFromDecStr
+    numOtherFn = _decodeNumOther
+    convStrFn = _convertTaggedStringFast
+    convDecFn = _convertTaggedDecFast
+    decodeRawNumFn = _decodeRawNum
+    headMatch = _LINE_HEAD_MATCH
+    lineFindall = _LINE_TOK_FINDALL
+    fastId = _fastIdFull
+
+    lineGet = lineCache.get
+    tagGet = tagCache.get
+    validAdd = validIds.add
+
+    curAppend = curNodes.append
+    stackPush = stack.append
+    stackPop = stack.pop
+
+    nLines = len(lines)
+    li = 0
+    lineOffset = pos
+    while li < nLines:
+        rawLine = lines[li]
+        lineStart = lineOffset
+        lineLen = len(rawLine)
+        li += 1
+        lineOffset += lineLen + 1
+
+        # lineCache entry shapes:
+        #   0                              = empty or complete slashdashed line
+        #   1                              = closing `}` line
+        #   (0, name, tag, args, props)    = single leaf node
+        #   (1, name, tag, args, props, braceCol) = `{` block opener
+        #   (2, [(name, tag, args, props), ...])  = `;`-separated multi-node line
+        #   (3, expectedNextLine, leafTuple)      = 2-line `\` continuation
+        entry = lineGet(rawLine)
+        if entry is not None:
+            if entry == 0:
+                continue
+            if entry == 1:
+                if not stack:
+                    return (lineStart, curNodes)
+                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, _, _, _, _ = stackPop()
+                if not pND:
+                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                curNodes = parentNodes
+                curAppend = parentAppend
+                continue
+            et = entry[0]
+            if et == 0:
+                _, eName, eTag, eArgs, eProps = entry
+                curAppend(nodeCls(eName, eTag, eArgs.copy() if eArgs else [], eProps.copy() if eProps else {}, []))
+                continue
+            if et == 1:
+                _, eName, eTag, eArgs, eProps, braceCol = entry
+                stackPush(
+                    (
+                        curNodes,
+                        curAppend,
+                        eName,
+                        eTag,
+                        eArgs.copy() if eArgs else [],
+                        eProps.copy() if eProps else {},
+                        False,
+                        False,
+                        False,
+                        lineStart + braceCol,
+                        -1,
+                        0,
+                    ),
+                )
+                curNodes = []
+                curAppend = curNodes.append
+                continue
+            if et == 2:
+                for eName, eTag, eArgs, eProps in entry[1]:
+                    curAppend(nodeCls(eName, eTag, eArgs.copy() if eArgs else [], eProps.copy() if eProps else {}, []))
+                continue
+            if li < nLines and lines[li] == entry[1]:
+                lineOffset += len(lines[li]) + 1
+                li += 1
+                _, eName, eTag, eArgs, eProps = entry[2]
+                curAppend(nodeCls(eName, eTag, eArgs.copy() if eArgs else [], eProps.copy() if eProps else {}, []))
+                continue
+
+        stripped = rawLine.lstrip(" \t")
+        if not stripped:
+            if len(lineCache) < 512:
+                lineCache[rawLine] = 0
+            continue
+        s0 = stripped[0]
+        if s0 == "}":
+            if len(stripped) == 1:
+                if not stack:
+                    return (lineStart, curNodes)
+                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, _, _, _, _ = stackPop()
+                if not pND:
+                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                curNodes = parentNodes
+                curAppend = parentAppend
+                if len(lineCache) < 512:
+                    lineCache[rawLine] = 1
+                continue
+            return (lineStart, curNodes)
+        if s0 == "/" and len(stripped) > 1 and stripped[1] == "/":
+            continue
+
+        nextLineForCont: str | None = None
+        extraLineLen = 0
+        if stripped[-1] == "\\":
+            if li >= nLines:
+                return (lineStart, curNodes)
+            nextLineForCont = lines[li]
+            stripped = stripped + "\n" + nextLineForCont
+            extraLineLen = len(nextLineForCont) + 1
+        cacheable = True
+
+        sd: str | None = None
+        nTag: str | None = None
+        if "A" <= s0 <= "z" or s0 == "_":
+            sp = stripped.find(" ")
+            if sp == -1:
+                if stripped in validIds:
+                    curAppend(nodeCls(stripped, None, [], {}, []))
+                    if len(lineCache) < 512:
+                        lineCache[rawLine] = (0, stripped, None, None, None)
+                    continue
+                if fastId(stripped) is not None and stripped not in keywords:
+                    validAdd(stripped)
+                    curAppend(nodeCls(stripped, None, [], {}, []))
+                    if len(lineCache) < 512:
+                        lineCache[rawLine] = (0, stripped, None, None, None)
+                    continue
+                mh = headMatch(stripped, 0)
+                if mh is None:
+                    return (lineStart, curNodes)
+                sd, nTag, nName = mh.groups()
+                if nName in keywords or (nTag and nTag in keywords):
+                    return (lineStart, curNodes)
+                tokPos = mh.end()
+            else:
+                nName = stripped[:sp]
+                if nName in validIds:
+                    tokPos = sp
+                elif fastId(nName) is not None and nName not in keywords:
+                    validAdd(nName)
+                    tokPos = sp
+                else:
+                    mh = headMatch(stripped, 0)
+                    if mh is None:
+                        return (lineStart, curNodes)
+                    sd, nTag, nName = mh.groups()
+                    if nName in keywords or (nTag and nTag in keywords):
+                        return (lineStart, curNodes)
+                    tokPos = mh.end()
+        else:
+            mh = headMatch(stripped, 0)
+            if mh is None:
+                return (lineStart, curNodes)
+            sd, nTag, nName = mh.groups()
+            if nName in keywords or (nTag and nTag in keywords):
+                return (lineStart, curNodes)
+            tokPos = mh.end()
+
+        toks = lineFindall(stripped, tokPos)
+        if toks and toks[-1][5] and toks[-1][5] not in (";", "{"):
+            if nextLineForCont is None and '"' in toks[-1][5] and li < nLines:
+                nextLineMl = lines[li]
+                toks = lineFindall(stripped + "\n" + nextLineMl, tokPos)
+                if toks and toks[-1][5] and toks[-1][5] not in (";", "{"):
+                    return (lineStart, curNodes)
+                extraLineLen = len(nextLineMl) + 1
+                cacheable = False
+            else:
+                return (lineStart, curNodes)
+
+        args: list[t.Any] = []
+        argsAppend = args.append
+        props: dict[str, t.Any] = {}
+        nodeDiscard = sd is not None
+        nextEntDiscard = False
+        discDepth = 0
+        opened = False
+        hasMutable = False
+        lineNodes: list[Node] | None = None
+        emitted: list[tuple[str, str | None, list[t.Any] | None, dict[str, t.Any] | None]] | None = None
+        state = 1
+        curName = nName
+        curTag = nTag
+        ok = True
+
+        for k, pstr, pv, astr, arg, fb in toks:
+            if k:
+                if opened or state != 1 or k in keywords:
+                    ok = False
+                    break
+                if nodeDiscard or nextEntDiscard:
+                    nextEntDiscard = False
+                    if pv and pv[0] == '"':
+                        try:
+                            unescFn(pv[1:-1])
+                        except ValueError:
+                            ok = False
+                            break
+                    continue
+                if not pv:
+                    props[k] = pstr
+                    continue
+                av = atomsGet(pv, unset)
+                if av is not unset:
+                    props[k] = av
+                    continue
+                vc = pv[0]
+                if "1" <= vc <= "9":
+                    if "." not in pv and "e" not in pv and "E" not in pv:
+                        try:
+                            props[k] = intFn(pv, 10)
+                        except ValueError:
+                            props[k] = numDecFn(pv)
+                    elif "." in pv:
+                        try:
+                            props[k] = floatFn(pv)
+                        except ValueError:
+                            props[k] = floatFn(pv.replace("_", ""))
+                    else:
+                        props[k] = numOtherFn(pv)
+                elif vc == '"':
+                    try:
+                        props[k] = unescFn(pv[1:-1])
+                    except ValueError:
+                        ok = False
+                        break
+                else:
+                    props[k] = numOtherFn(pv)
+                continue
+
+            if astr:
+                if opened or state != 1:
+                    ok = False
+                    break
+                entDisc = nodeDiscard or nextEntDiscard
+                nextEntDiscard = False
+                if not entDisc:
+                    argsAppend(astr)
+                continue
+
+            if arg:
+                if opened:
+                    ok = False
+                    break
+                ac0 = arg[0]
+                if state != 1:
+                    if state == 0:
+                        if ac0 == "}":
+                            if discDepth <= 0:
+                                ok = False
+                                break
+                            discDepth -= 1
+                            state = 2
+                            continue
+                        if (
+                            ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                            and not ("0" <= ac0 <= "9")
+                            and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                            and arg not in keywords
+                        ):
+                            curName = arg
+                            curTag = None
+                            args = []
+                            argsAppend = args.append
+                            props = {}
+                            state = 1
+                            continue
+                    ok = False
+                    break
+                if ac0 == "{":
+                    if nodeDiscard:
+                        nextEntDiscard = False
+                        discDepth += 1
+                        state = 0
+                        continue
+                    if nextEntDiscard:
+                        ok = False
+                        break
+                    opened = True
+                    state = 0
+                    continue
+                if ac0 == "/":
+                    if arg[1] == "-":
+                        if nextEntDiscard:
+                            ok = False
+                            break
+                        nextEntDiscard = True
+                        continue
+                    ok = False
+                    break
+                if ac0 == "\\":
+                    continue
+                if ac0 == "}":
+                    ok = False
+                    break
+                entDisc = nodeDiscard or nextEntDiscard
+                nextEntDiscard = False
+                if "1" <= ac0 <= "9":
+                    if not entDisc:
+                        if "." not in arg and "e" not in arg and "E" not in arg:
+                            try:
+                                argsAppend(intFn(arg, 10))
+                            except ValueError:
+                                argsAppend(numDecFn(arg))
+                        elif "." in arg:
+                            try:
+                                argsAppend(floatFn(arg))
+                            except ValueError:
+                                argsAppend(floatFn(arg.replace("_", "")))
+                        else:
+                            argsAppend(numOtherFn(arg))
+                    continue
+                if ac0 == '"':
+                    inner = arg[1:-1]
+                    if "\\" in inner:
+                        try:
+                            inner = unescFn(inner)
+                        except ValueError:
+                            ok = False
+                            break
+                    if not entDisc:
+                        argsAppend(inner)
+                    continue
+                if ac0 == "(":
+                    rp = arg.find(")", 1)
+                    tName = arg[1:rp]
+                    if tName in keywords:
+                        ok = False
+                        break
+                    vStr = arg[rp + 1 :]
+                    if vStr[0] == '"':
+                        inner = vStr[1:-1]
+                        if "\\" in inner:
+                            try:
+                                inner = unescFn(inner)
+                            except ValueError:
+                                ok = False
+                                break
+                        if not entDisc:
+                            if nativeTagged:
+                                cv = tagGet(arg, unset)
+                                if cv is not unset:
+                                    argsAppend(cv)
+                                    continue
+                                conv = convStrFn(tName, inner)
+                                if conv is unset:
+                                    ok = False
+                                    break
+                                if isinstance(conv, valueCls):
+                                    hasMutable = True
+                                elif len(tagCache) < 1024:
+                                    tagCache[arg] = conv
+                                argsAppend(conv)
+                            else:
+                                hasMutable = True
+                                argsAppend(strCls(inner, tName))
+                    elif not entDisc:
+                        if nativeTagged:
+                            cv = tagGet(arg, unset)
+                            if cv is not unset:
+                                argsAppend(cv)
+                                continue
+                            conv = convDecFn(tName, vStr)
+                            if conv is unset:
+                                ok = False
+                                break
+                            if isinstance(conv, valueCls):
+                                hasMutable = True
+                            elif len(tagCache) < 1024:
+                                tagCache[arg] = conv
+                            argsAppend(conv)
+                        else:
+                            hasMutable = True
+                            dObj = decodeRawNumFn(vStr)
+                            dObj.tag = tName
+                            argsAppend(dObj)
+                    continue
+                if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                    if not entDisc:
+                        q = arg.find('"', 1)
+                        argsAppend(arg[q + 1 : len(arg) - q])
+                    continue
+                av = atomsGet(arg, unset)
+                if av is not unset:
+                    if not entDisc:
+                        argsAppend(av)
+                    continue
+                if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and "0" <= arg[1] <= "9"):
+                    if not entDisc:
+                        argsAppend(numOtherFn(arg))
+                    continue
+                ok = False
+                break
+
+            if fb:
+                if opened:
+                    ok = False
+                    break
+                if fb == ";":
+                    if nextEntDiscard or state == 0:
+                        ok = False
+                        break
+                    if nodeDiscard:
+                        if discDepth == 0:
+                            ok = False
+                            break
+                        state = 0
+                        continue
+                    if state == 1:
+                        built = nodeCls(curName, curTag, args, props, [])
+                        rec = (curName, curTag, args.copy() if args else None, props.copy() if props else None)
+                        if lineNodes is None:
+                            lineNodes = [built]
+                            emitted = [rec]
+                        else:
+                            lineNodes.append(built)
+                            assert emitted is not None
+                            emitted.append(rec)
+                    state = 0
+                    continue
+                if fb == "{" and state == 1:
+                    if nodeDiscard:
+                        nextEntDiscard = False
+                        discDepth += 1
+                        state = 0
+                        continue
+                    if nextEntDiscard:
+                        ok = False
+                        break
+                    opened = True
+                    state = 0
+                    continue
+                ok = False
+                break
+
+        if not ok or nextEntDiscard or discDepth != 0:
+            return (lineStart, curNodes)
+
+        if extraLineLen:
+            li += 1
+            lineOffset += extraLineLen
+
+        if lineNodes is not None:
+            curNodes.extend(lineNodes)
+
+        if opened:
+            cPos = rawLine.find("//")
+            braceCol = rawLine.rfind("{", 0, cPos if cPos != -1 else lineLen)
+            stackPush(
+                (
+                    curNodes,
+                    curAppend,
+                    curName,
+                    curTag,
+                    args,
+                    props,
+                    False,
+                    False,
+                    False,
+                    lineStart + braceCol,
+                    -1,
+                    0,
+                ),
+            )
+            curNodes = []
+            curAppend = curNodes.append
+            if cacheable and not hasMutable and nextLineForCont is None and lineNodes is None and len(lineCache) < 512:
+                lineCache[rawLine] = (
+                    1,
+                    curName,
+                    curTag,
+                    args.copy() if args else None,
+                    props.copy() if props else None,
+                    braceCol,
+                )
+        elif state == 1:
+            if not nodeDiscard:
+                curAppend(nodeCls(curName, curTag, args, props, []))
+                if cacheable and not hasMutable and len(lineCache) < 512:
+                    if nextLineForCont is not None and lineNodes is None:
+                        lineCache[rawLine] = (
+                            3,
+                            nextLineForCont,
+                            (0, curName, curTag, args.copy() if args else None, props.copy() if props else None),
+                        )
+                    elif nextLineForCont is None:
+                        if emitted is None:
+                            lineCache[rawLine] = (
+                                0,
+                                curName,
+                                curTag,
+                                args.copy() if args else None,
+                                props.copy() if props else None,
+                            )
+                        else:
+                            emitted.append(
+                                (curName, curTag, args.copy() if args else None, props.copy() if props else None),
+                            )
+                            lineCache[rawLine] = (2, emitted)
+            elif cacheable and nextLineForCont is None and lineNodes is None and len(lineCache) < 512:
+                lineCache[rawLine] = 0
+        elif cacheable and not hasMutable and nextLineForCont is None and len(lineCache) < 512:
+            lineCache[rawLine] = 0 if emitted is None else (2, emitted)
+
+    return (chunkEnd + 1 if consumeTrailingNl else chunkEnd, curNodes)
+
+
+def _tryLineCachedChunkRaw(
+    lines: list[str],
+    pos: int,
+    chunkEnd: int,
+    *,
+    consumeTrailingNl: bool,
+    curNodes: list[Node],
+    stack: list[_FastFrame],
+    lineCache: dict[str, t.Any],
+    validIds: set[str],
+) -> tuple[int, list[Node]]:
+    """
+    Adaptive line-template cached fast path for raw mode (`nativeUntaggedValues=False, nativeTaggedValues=False`).
+    Stores immutable constructor recipes so each cache hit instantiates fresh `Value` objects with zero sharing.
+    """
+    nodeCls = Node
+    strCls = String
+    rawStrCls = RawString
+    boolCls = Bool
+    nullCls = Null
+    decCls = Decimal
+    intFn = int
+    floatFn = float
+    keywords = _KEYWORDS
+    unescFn = _unescapeValidated
+    decodeRawNumFn = _decodeRawNum
+    headMatch = _LINE_HEAD_MATCH
+    lineFindall = _LINE_TOK_FINDALL
+    fastId = _fastIdFull
+
+    lineGet = lineCache.get
+    validAdd = validIds.add
+
+    curAppend = curNodes.append
+    stackPush = stack.append
+    stackPop = stack.pop
+
+    nLines = len(lines)
+    li = 0
+    lineOffset = pos
+    while li < nLines:
+        rawLine = lines[li]
+        lineStart = lineOffset
+        lineLen = len(rawLine)
+        li += 1
+        lineOffset += lineLen + 1
+
+        # Raw lineCache entry shapes (all recipes instantiate fresh `Value` objects on replay):
+        #   0                                         = empty or complete slashdashed line
+        #   1                                         = closing `}` line
+        #   (0, name, tag, argRecs, propRecs)         = fast 1-arg leaf (`(cls, val)` / `(pk, cls, val)`)
+        #   (1, name, tag, argRecs, propRecs, braceCol) = fast 1-arg `{` block opener
+        #   (2, [(name, tag, argRecs, propRecs), ...])  = fast 1-arg `;`-separated multi-node line
+        #   (3, expectedNextLine, leafRecipe)         = fast 1-arg 2-line `\` continuation
+        #   (4, name, tag, argRecs, propRecs, braceCol) = general recipe (tagged or non-zero-exp Decimal; braceCol < 0 for leaf)
+        entry = lineGet(rawLine)
+        if entry is not None:
+            if entry == 0:
+                continue
+            if entry == 1:
+                if not stack:
+                    return (lineStart, curNodes)
+                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, _, _, _, _ = stackPop()
+                if not pND:
+                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                curNodes = parentNodes
+                curAppend = parentAppend
+                continue
+            et = entry[0]
+            if et == 0:
+                _, eName, eTag, eArgs, eProps = entry
+                rArgs = [cls(a) for cls, a in eArgs] if eArgs else []
+                rProps = {pk: cls(a) for pk, cls, a in eProps} if eProps else {}
+                curAppend(nodeCls(eName, eTag, rArgs, rProps, []))
+                continue
+            if et == 1:
+                _, eName, eTag, eArgs, eProps, braceCol = entry
+                rArgs = [cls(a) for cls, a in eArgs] if eArgs else []
+                rProps = {pk: cls(a) for pk, cls, a in eProps} if eProps else {}
+                stackPush(
+                    (
+                        curNodes,
+                        curAppend,
+                        eName,
+                        eTag,
+                        rArgs,
+                        rProps,
+                        False,
+                        False,
+                        False,
+                        lineStart + braceCol,
+                        -1,
+                        0,
+                    ),
+                )
+                curNodes = []
+                curAppend = curNodes.append
+                continue
+            if et == 2:
+                for eName, eTag, eArgs, eProps in entry[1]:
+                    rArgs = [cls(a) for cls, a in eArgs] if eArgs else []
+                    rProps = {pk: cls(a) for pk, cls, a in eProps} if eProps else {}
+                    curAppend(nodeCls(eName, eTag, rArgs, rProps, []))
+                continue
+            if et == 3:
+                if li < nLines and lines[li] == entry[1]:
+                    lineOffset += len(lines[li]) + 1
+                    li += 1
+                    _, eName, eTag, eArgs, eProps = entry[2]
+                    rArgs = [cls(a) for cls, a in eArgs] if eArgs else []
+                    rProps = {pk: cls(a) for pk, cls, a in eProps} if eProps else {}
+                    curAppend(nodeCls(eName, eTag, rArgs, rProps, []))
+                    continue
+            else:
+                # General recipe (contains non-zero-exponent Decimal or tagged values)
+                _, eName, eTag, eArgs, eProps, braceCol = entry
+                rArgs = (
+                    [
+                        (
+                            it[0](it[1])
+                            if len(it) == 2
+                            else (it[0](it[1], it[2]) if len(it) == 3 else decCls(it[1], it[2], it[3]))
+                        )
+                        for it in eArgs
+                    ]
+                    if eArgs
+                    else []
+                )
+                rProps = (
+                    {it[0]: (it[1](it[2]) if len(it) == 3 else it[1](it[2], it[3])) for it in eProps} if eProps else {}
+                )
+                if braceCol < 0:
+                    curAppend(nodeCls(eName, eTag, rArgs, rProps, []))
+                else:
+                    stackPush(
+                        (
+                            curNodes,
+                            curAppend,
+                            eName,
+                            eTag,
+                            rArgs,
+                            rProps,
+                            False,
+                            False,
+                            False,
+                            lineStart + braceCol,
+                            -1,
+                            0,
+                        ),
+                    )
+                    curNodes = []
+                    curAppend = curNodes.append
+                continue
+
+        stripped = rawLine.lstrip(" \t")
+        if not stripped:
+            if len(lineCache) < 512:
+                lineCache[rawLine] = 0
+            continue
+        s0 = stripped[0]
+        if s0 == "}":
+            if len(stripped) == 1:
+                if not stack:
+                    return (lineStart, curNodes)
+                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, _, _, _, _ = stackPop()
+                if not pND:
+                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                curNodes = parentNodes
+                curAppend = parentAppend
+                if len(lineCache) < 512:
+                    lineCache[rawLine] = 1
+                continue
+            return (lineStart, curNodes)
+        if s0 == "/" and len(stripped) > 1 and stripped[1] == "/":
+            continue
+
+        nextLineForCont: str | None = None
+        extraLineLen = 0
+        if stripped[-1] == "\\":
+            if li >= nLines:
+                return (lineStart, curNodes)
+            nextLineForCont = lines[li]
+            stripped = stripped + "\n" + nextLineForCont
+            extraLineLen = len(nextLineForCont) + 1
+        cacheable = True
+
+        sd: str | None = None
+        nTag: str | None = None
+        if "A" <= s0 <= "z" or s0 == "_":
+            sp = stripped.find(" ")
+            if sp == -1:
+                if stripped in validIds:
+                    curAppend(nodeCls(stripped, None, [], {}, []))
+                    if len(lineCache) < 512:
+                        lineCache[rawLine] = (0, stripped, None, None, None)
+                    continue
+                if fastId(stripped) is not None and stripped not in keywords:
+                    validAdd(stripped)
+                    curAppend(nodeCls(stripped, None, [], {}, []))
+                    if len(lineCache) < 512:
+                        lineCache[rawLine] = (0, stripped, None, None, None)
+                    continue
+                mh = headMatch(stripped, 0)
+                if mh is None:
+                    return (lineStart, curNodes)
+                sd, nTag, nName = mh.groups()
+                if nName in keywords or (nTag and nTag in keywords):
+                    return (lineStart, curNodes)
+                tokPos = mh.end()
+            else:
+                nName = stripped[:sp]
+                if nName in validIds:
+                    tokPos = sp
+                elif fastId(nName) is not None and nName not in keywords:
+                    validAdd(nName)
+                    tokPos = sp
+                else:
+                    mh = headMatch(stripped, 0)
+                    if mh is None:
+                        return (lineStart, curNodes)
+                    sd, nTag, nName = mh.groups()
+                    if nName in keywords or (nTag and nTag in keywords):
+                        return (lineStart, curNodes)
+                    tokPos = mh.end()
+        else:
+            mh = headMatch(stripped, 0)
+            if mh is None:
+                return (lineStart, curNodes)
+            sd, nTag, nName = mh.groups()
+            if nName in keywords or (nTag and nTag in keywords):
+                return (lineStart, curNodes)
+            tokPos = mh.end()
+
+        toks = lineFindall(stripped, tokPos)
+        if toks and toks[-1][5] and toks[-1][5] not in (";", "{"):
+            if nextLineForCont is None and '"' in toks[-1][5] and li < nLines:
+                nextLineMl = lines[li]
+                toks = lineFindall(stripped + "\n" + nextLineMl, tokPos)
+                if toks and toks[-1][5] and toks[-1][5] not in (";", "{"):
+                    return (lineStart, curNodes)
+                extraLineLen = len(nextLineMl) + 1
+                cacheable = False
+            else:
+                return (lineStart, curNodes)
+
+        args: list[t.Any] = []
+        argsAppend = args.append
+        argRecs: list[tuple[t.Any, ...]] = []
+        props: dict[str, t.Any] = {}
+        propRecs: dict[str, tuple[t.Any, ...]] = {}
+        fastRec = True
+        nodeDiscard = sd is not None
+        nextEntDiscard = False
+        discDepth = 0
+        opened = False
+        lineNodes: list[Node] | None = None
+        emitted: list[tuple[t.Any, ...]] | None = None
+        state = 1
+        curName = nName
+        curTag = nTag
+        ok = True
+
+        for k, pstr, pv, astr, arg, fb in toks:
+            if k:
+                if opened or state != 1 or k in keywords:
+                    ok = False
+                    break
+                if nodeDiscard or nextEntDiscard:
+                    nextEntDiscard = False
+                    if pv and pv[0] == '"':
+                        try:
+                            unescFn(pv[1:-1])
+                        except ValueError:
+                            ok = False
+                            break
+                    continue
+                if not pv:
+                    props[k] = strCls(pstr)
+                    propRecs[k] = (k, strCls, pstr)
+                    continue
+                vc = pv[0]
+                if "1" <= vc <= "9":
+                    if "." not in pv and "e" not in pv and "E" not in pv:
+                        try:
+                            iv = intFn(pv, 10)
+                            props[k] = decCls(iv, 0)
+                            propRecs[k] = (k, decCls, iv)
+                            continue
+                        except ValueError:
+                            pass
+                    elif "e" not in pv and "E" not in pv:
+                        try:
+                            fv = floatFn(pv)
+                        except ValueError:
+                            fv = floatFn(pv.replace("_", ""))
+                        props[k] = decCls(fv, 0)
+                        propRecs[k] = (k, decCls, fv)
+                        continue
+                    vObj = decodeRawNumFn(pv)
+                    props[k] = vObj
+                    if isinstance(vObj, decCls):
+                        if vObj.exponent == 0:
+                            propRecs[k] = (k, decCls, vObj.mantissa)
+                        else:
+                            fastRec = False
+                            propRecs[k] = (k, decCls, vObj.mantissa, vObj.exponent)
+                    else:
+                        propRecs[k] = (k, type(vObj), vObj.value)
+                    continue
+                if vc in ("t", "f", "n"):
+                    if pv == "true":
+                        props[k] = boolCls(True)
+                        propRecs[k] = (k, boolCls, True)
+                    elif pv == "false":
+                        props[k] = boolCls(False)
+                        propRecs[k] = (k, boolCls, False)
+                    else:
+                        props[k] = nullCls()
+                        propRecs[k] = (k, nullCls, None)
+                    continue
+                if vc == '"':
+                    try:
+                        u = unescFn(pv[1:-1])
+                    except ValueError:
+                        ok = False
+                        break
+                    props[k] = strCls(u)
+                    propRecs[k] = (k, strCls, u)
+                    continue
+                vObj = decodeRawNumFn(pv)
+                props[k] = vObj
+                if isinstance(vObj, decCls):
+                    if vObj.exponent == 0:
+                        propRecs[k] = (k, decCls, vObj.mantissa)
+                    else:
+                        fastRec = False
+                        propRecs[k] = (k, decCls, vObj.mantissa, vObj.exponent)
+                else:
+                    propRecs[k] = (k, type(vObj), vObj.value)
+                continue
+
+            if astr:
+                if opened or state != 1:
+                    ok = False
+                    break
+                entDisc = nodeDiscard or nextEntDiscard
+                nextEntDiscard = False
+                if not entDisc:
+                    argsAppend(strCls(astr))
+                    argRecs.append((strCls, astr))
+                continue
+
+            if arg:
+                if opened:
+                    ok = False
+                    break
+                ac0 = arg[0]
+                if state != 1:
+                    if state == 0:
+                        if ac0 == "}":
+                            if discDepth <= 0:
+                                ok = False
+                                break
+                            discDepth -= 1
+                            state = 2
+                            continue
+                        if (
+                            ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                            and not ("0" <= ac0 <= "9")
+                            and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                            and arg not in keywords
+                        ):
+                            curName = arg
+                            curTag = None
+                            args = []
+                            argsAppend = args.append
+                            argRecs = []
+                            props = {}
+                            propRecs = {}
+                            state = 1
+                            continue
+                    ok = False
+                    break
+                if ac0 == "{":
+                    if nodeDiscard:
+                        nextEntDiscard = False
+                        discDepth += 1
+                        state = 0
+                        continue
+                    if nextEntDiscard:
+                        ok = False
+                        break
+                    opened = True
+                    state = 0
+                    continue
+                if ac0 == "/":
+                    if arg[1] == "-":
+                        if nextEntDiscard:
+                            ok = False
+                            break
+                        nextEntDiscard = True
+                        continue
+                    ok = False
+                    break
+                if ac0 == "\\":
+                    continue
+                if ac0 == "}":
+                    ok = False
+                    break
+                entDisc = nodeDiscard or nextEntDiscard
+                nextEntDiscard = False
+                if "1" <= ac0 <= "9":
+                    if not entDisc:
+                        if "." not in arg and "e" not in arg and "E" not in arg:
+                            try:
+                                iv = intFn(arg, 10)
+                                argsAppend(decCls(iv, 0))
+                                argRecs.append((decCls, iv))
+                                continue
+                            except ValueError:
+                                pass
+                        elif "e" not in arg and "E" not in arg:
+                            try:
+                                fv = floatFn(arg)
+                            except ValueError:
+                                fv = floatFn(arg.replace("_", ""))
+                            argsAppend(decCls(fv, 0))
+                            argRecs.append((decCls, fv))
+                            continue
+                        vObj = decodeRawNumFn(arg)
+                        argsAppend(vObj)
+                        if isinstance(vObj, decCls):
+                            if vObj.exponent == 0:
+                                argRecs.append((decCls, vObj.mantissa))
+                            else:
+                                fastRec = False
+                                argRecs.append((decCls, vObj.mantissa, vObj.exponent))
+                        else:
+                            argRecs.append((type(vObj), vObj.value))
+                    continue
+                if ac0 == '"':
+                    inner = arg[1:-1]
+                    if "\\" in inner:
+                        try:
+                            inner = unescFn(inner)
+                        except ValueError:
+                            ok = False
+                            break
+                    if not entDisc:
+                        argsAppend(strCls(inner))
+                        argRecs.append((strCls, inner))
+                    continue
+                if ac0 == "(":
+                    rp = arg.find(")", 1)
+                    tName = arg[1:rp]
+                    if tName in keywords:
+                        ok = False
+                        break
+                    vStr = arg[rp + 1 :]
+                    if vStr[0] == '"':
+                        inner = vStr[1:-1]
+                        if "\\" in inner:
+                            try:
+                                inner = unescFn(inner)
+                            except ValueError:
+                                ok = False
+                                break
+                        if not entDisc:
+                            fastRec = False
+                            argsAppend(strCls(inner, tName))
+                            argRecs.append((strCls, inner, tName))
+                    elif not entDisc:
+                        fastRec = False
+                        vObj = decodeRawNumFn(vStr)
+                        vObj.tag = tName
+                        argsAppend(vObj)
+                        if isinstance(vObj, decCls):
+                            argRecs.append((decCls, vObj.mantissa, vObj.exponent, tName))
+                        else:
+                            argRecs.append((type(vObj), vObj.value, tName))
+                    continue
+                if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                    if not entDisc:
+                        q = arg.find('"', 1)
+                        rs = arg[q + 1 : len(arg) - q]
+                        argsAppend(rawStrCls(rs))
+                        argRecs.append((rawStrCls, rs))
+                    continue
+                if arg in keywords:
+                    if not entDisc:
+                        if arg == "true":
+                            argsAppend(boolCls(True))
+                            argRecs.append((boolCls, True))
+                        elif arg == "false":
+                            argsAppend(boolCls(False))
+                            argRecs.append((boolCls, False))
+                        else:
+                            argsAppend(nullCls())
+                            argRecs.append((nullCls, None))
+                    continue
+                if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and "0" <= arg[1] <= "9"):
+                    if not entDisc:
+                        vObj = decodeRawNumFn(arg)
+                        argsAppend(vObj)
+                        if isinstance(vObj, decCls):
+                            if vObj.exponent == 0:
+                                argRecs.append((decCls, vObj.mantissa))
+                            else:
+                                fastRec = False
+                                argRecs.append((decCls, vObj.mantissa, vObj.exponent))
+                        else:
+                            argRecs.append((type(vObj), vObj.value))
+                    continue
+                ok = False
+                break
+
+            if fb:
+                if opened:
+                    ok = False
+                    break
+                if fb == ";":
+                    if nextEntDiscard or state == 0:
+                        ok = False
+                        break
+                    if nodeDiscard:
+                        if discDepth == 0:
+                            ok = False
+                            break
+                        state = 0
+                        continue
+                    if state == 1:
+                        built = nodeCls(curName, curTag, args, props, [])
+                        if fastRec:
+                            rec = (
+                                curName,
+                                curTag,
+                                tuple(argRecs) if argRecs else None,
+                                tuple(propRecs.values()) if propRecs else None,
+                            )
+                        else:
+                            cacheable = False
+                            rec = (curName, curTag, None, None)
+                        if lineNodes is None:
+                            lineNodes = [built]
+                            emitted = [rec]
+                        else:
+                            lineNodes.append(built)
+                            assert emitted is not None
+                            emitted.append(rec)
+                    state = 0
+                    continue
+                if fb == "{" and state == 1:
+                    if nodeDiscard:
+                        nextEntDiscard = False
+                        discDepth += 1
+                        state = 0
+                        continue
+                    if nextEntDiscard:
+                        ok = False
+                        break
+                    opened = True
+                    state = 0
+                    continue
+                ok = False
+                break
+
+        if not ok or nextEntDiscard or discDepth != 0:
+            return (lineStart, curNodes)
+
+        if extraLineLen:
+            li += 1
+            lineOffset += extraLineLen
+
+        if lineNodes is not None:
+            curNodes.extend(lineNodes)
+
+        if opened:
+            cPos = rawLine.find("//")
+            braceCol = rawLine.rfind("{", 0, cPos if cPos != -1 else lineLen)
+            stackPush(
+                (
+                    curNodes,
+                    curAppend,
+                    curName,
+                    curTag,
+                    args,
+                    props,
+                    False,
+                    False,
+                    False,
+                    lineStart + braceCol,
+                    -1,
+                    0,
+                ),
+            )
+            curNodes = []
+            curAppend = curNodes.append
+            if cacheable and nextLineForCont is None and lineNodes is None and len(lineCache) < 512:
+                lineCache[rawLine] = (
+                    1 if fastRec else 4,
+                    curName,
+                    curTag,
+                    tuple(argRecs) if argRecs else None,
+                    tuple(propRecs.values()) if propRecs else None,
+                    braceCol,
+                )
+        elif state == 1:
+            if not nodeDiscard:
+                curAppend(nodeCls(curName, curTag, args, props, []))
+                if cacheable and len(lineCache) < 512:
+                    recA = tuple(argRecs) if argRecs else None
+                    recP = tuple(propRecs.values()) if propRecs else None
+                    if fastRec:
+                        if nextLineForCont is not None and lineNodes is None:
+                            lineCache[rawLine] = (3, nextLineForCont, (0, curName, curTag, recA, recP))
+                        elif nextLineForCont is None:
+                            if emitted is None:
+                                lineCache[rawLine] = (0, curName, curTag, recA, recP)
+                            else:
+                                emitted.append((curName, curTag, recA, recP))
+                                lineCache[rawLine] = (2, emitted)
+                    elif nextLineForCont is None and emitted is None:
+                        lineCache[rawLine] = (4, curName, curTag, recA, recP, -1)
+            elif cacheable and nextLineForCont is None and lineNodes is None and len(lineCache) < 512:
+                lineCache[rawLine] = 0
+        elif cacheable and nextLineForCont is None and len(lineCache) < 512:
+            lineCache[rawLine] = 0 if emitted is None else (2, emitted)
+
+    return (chunkEnd + 1 if consumeTrailingNl else chunkEnd, curNodes)
+
+
+def _parseChunkedNative(chars: str, config: t.ParseConfig) -> Document:
     """Specialized chunked C-regex parser for nativeUntaggedValues=True with no custom converters."""
-    chars = s.chars
-    n = s.length
-    nativeTagged = s.config.nativeTaggedValues
+    n = len(chars)
+    nativeTagged = config.nativeTaggedValues
     findall = _tokFindall
     lengthHint = _lengthHint
-    kwMap = _KW_NATIVE
-    kwGet = kwMap.get
+    atomsGet = _ATOMS.get
     keywords = _KEYWORDS
-    digits = _DIGITS
     unset = _UNSET
     nodeCls = Node
     strCls = String
+    valueCls = Value
     floatFn = float
     intFn = int
     unescFn = _unescapeValidated
+    numDecFn = _numFromDecStr
+    numOtherFn = _decodeNumOther
+    convStrFn = _convertTaggedStringFast
+    convDecFn = _convertTaggedDecFast
+    decodeRawNumFn = _decodeRawNum
 
+    s: Stream | None = None
     curNodes: list[Node] = []
+    curAppend = curNodes.append
     curDiscard = False
     stack: list[_FastFrame] = []
     stackPush = stack.append
     stackPop = stack.pop
+    lineCache: dict[str, t.Any] = {}
+    tagCache: dict[str, t.Any] = {}
+    tagGet = tagCache.get
+    validIds: set[str] = set()
 
     state = 0
     name = ""
     tag: str | None = None
-    args: list[t.Any] | None = None
-    props: dict[str, t.Any] | None = None
+    args: list[t.Any] = []
+    argsAppend = args.append
+    props: dict[str, t.Any] = {}
     nodeDiscard = False
     nextEntDiscard = False
     sdTokIdx = 0
 
     pos = 0
-    if n > 0:
-        mh0 = _matchNodeHead(chars, 0)
-        assert mh0 is not None
-        li0 = mh0.lastindex
-        if li0 == 1:
-            cand0 = mh0.group(1)
-            if cand0 not in keywords:
-                name = cand0
-                pos = mh0.end()
-                state = 1
-        elif li0 is None and mh0.end() >= n:
-            return Document(curNodes)
+    noQuoteDoc = (
+        n >= 256
+        and chars.isascii()
+        and '"' not in chars
+        and ";" not in chars
+        and "/*" not in chars
+        and "/-" not in chars
+        and "\\" not in chars
+        and "(" not in chars
+        and "\r" not in chars
+        and "\x0c" not in chars
+        and "\x0b" not in chars
+    )
 
-    chunkSize = 512
+    chunkSize = 4096 if n >= 2048 else 512
     while pos < n:
         endPos = _pickChunkEnd(chars, pos, n, chunkSize)
         if endPos < 0:
-            # Giant single token (> 512 bytes with no space/newline): handle 1 exact step directly.
+            if s is None:
+                s = Stream(chars, config)
             (
                 newPos,
                 state,
@@ -1304,401 +3047,868 @@ def _parseChunkedNative(s: Stream) -> Document:
             )
             if newPos < 0:
                 return Document(curNodes)
+            curAppend = curNodes.append
+            argsAppend = args.append
             pos = newPos
             continue
 
+        # Tier 1: Quote-free pure-ASCII line-split path (skips regex completely for numeric/property chunks).
+        if noQuoteDoc and state == 0 and not curDiscard and endPos - pos >= 256:
+            qfEnd = endPos + 1 if endPos < n and chars[endPos] == "\n" else endPos
+            qfPos, curNodes = _tryQuoteFreeChunkNative(
+                chars,
+                pos,
+                qfEnd,
+                curNodes=curNodes,
+                stack=stack,
+                validIds=validIds,
+            )
+            curAppend = curNodes.append
+            if qfPos >= qfEnd:
+                pos = qfPos
+                chunkSize = min(chunkSize * 4, 32768)
+                continue
+            noQuoteDoc = False
+            if s is None:
+                s = Stream(chars, config)
+            (
+                newPos,
+                state,
+                name,
+                tag,
+                args,
+                props,
+                nodeDiscard,
+                curNodes,
+                curDiscard,
+            ) = _handleChunkFallback(
+                s,
+                qfPos,
+                nativeUntagged=True,
+                nativeTagged=nativeTagged,
+                state=0,
+                name="",
+                tag=None,
+                args=[],
+                props={},
+                nodeDiscard=False,
+                curNodes=curNodes,
+                curDiscard=False,
+                stack=stack,
+            )
+            if newPos < 0:
+                return Document(curNodes)
+            curAppend = curNodes.append
+            argsAppend = args.append
+            pos = newPos
+            continue
+
+        # Tier 2: Adaptive line-template cache for chunks with repeating lines.
+        if state == 0 and not curDiscard and not nodeDiscard and not nextEntDiscard and endPos - pos >= 512:
+            lcEnd = endPos
+            consumeNl = lcEnd < n and chars[lcEnd] == "\n"
+            if not consumeNl and lcEnd < n:
+                lastNl = chars.rfind("\n", pos, lcEnd)
+                if lastNl > pos:
+                    lcEnd = lastNl
+                    consumeNl = True
+            if lcEnd - pos >= 512:
+                chunkSlice = chars[pos:lcEnd]
+                if (
+                    "\r" not in chunkSlice
+                    and "/*" not in chunkSlice
+                    and "\x0c" not in chunkSlice
+                    and (
+                        chunkSlice.isascii()
+                        or ("\x85" not in chunkSlice and "\u2028" not in chunkSlice and "\u2029" not in chunkSlice)
+                    )
+                ):
+                    chunkLines = chunkSlice.split("\n")
+                    if lineCache or _hasRepeatingLines(chunkLines):
+                        lcPos, curNodes = _tryLineCachedChunkNative(
+                            chunkLines,
+                            pos,
+                            lcEnd,
+                            consumeTrailingNl=consumeNl,
+                            curNodes=curNodes,
+                            stack=stack,
+                            lineCache=lineCache,
+                            tagCache=tagCache,
+                            validIds=validIds,
+                            nativeTagged=nativeTagged,
+                        )
+                        curAppend = curNodes.append
+                        targetPos = lcEnd + 1 if consumeNl else lcEnd
+                        if lcPos >= targetPos:
+                            pos = lcPos
+                            chunkSize = min(chunkSize * 4, 65536)
+                            continue
+                        if s is None:
+                            s = Stream(chars, config)
+                        (
+                            newPos,
+                            state,
+                            name,
+                            tag,
+                            args,
+                            props,
+                            nodeDiscard,
+                            curNodes,
+                            curDiscard,
+                        ) = _handleChunkFallback(
+                            s,
+                            lcPos,
+                            nativeUntagged=True,
+                            nativeTagged=nativeTagged,
+                            state=0,
+                            name="",
+                            tag=None,
+                            args=[],
+                            props={},
+                            nodeDiscard=False,
+                            curNodes=curNodes,
+                            curDiscard=False,
+                            stack=stack,
+                        )
+                        if newPos < 0:
+                            return Document(curNodes)
+                        curAppend = curNodes.append
+                        argsAppend = args.append
+                        pos = newPos
+                        chunkSize = max(512, chunkSize // 2)
+                        continue
+
+        # Tier 3: Prime byte 0 bare node head so 7-group tokenizer starts at state == 1 with zero fallback.
+        if pos == 0 and state == 0:
+            mh0 = _matchNodeHead(chars, 0)
+            assert mh0 is not None
+            li0 = mh0.lastindex
+            if li0 == 1:
+                cand0 = mh0.group(1)
+                if cand0 not in keywords:
+                    name = cand0
+                    pos = mh0.end()
+                    state = 1
+                    if pos >= endPos:
+                        continue
+            elif li0 is None and mh0.end() >= n:
+                return Document(curNodes)
+
+        # Parser state: 0 = expecting node head or `}`, 1 = inside node (entries / `{` / terminator),
+        # 2 = immediately after `}` (expecting node terminator).
+        # `nToks - 1 - lengthHint(tokIter)` recovers the current token index on rare fallback without `enumerate()`.
         toks = findall(chars, pos, endPos)
         nToks = len(toks)
         tokIter = iter(toks)
         failIdx = -1
         failOffset = -1
 
-        for k, pv, arg, nh, fb in tokIter:
-            if k:
-                if state != 1 or k in keywords:
-                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                    nextEntDiscard = False
-                    break
-                if nodeDiscard or nextEntDiscard:
-                    nextEntDiscard = False
-                    if pv[0] == '"' and "\\" in pv:
-                        try:
-                            unescFn(pv[1:-1])
-                        except ValueError:
-                            failIdx = nToks - 1 - lengthHint(tokIter)
-                            break
-                    continue
-                vc = pv[0]
-                if "1" <= vc <= "9":
-                    if "." not in pv and "e" not in pv and "E" not in pv:
-                        try:
-                            pval: t.Any = intFn(pv, 10)
-                        except ValueError:
-                            pval = _numFromDecStr(pv)
-                    elif "." in pv:
-                        try:
-                            pval = floatFn(pv)
-                        except ValueError:
-                            pval = floatFn(pv.replace("_", ""))
-                    else:
-                        pval = _numFromDecStr(pv)
-                elif vc == '"':
-                    inner = pv[1:-1]
-                    if "\\" in inner:
-                        try:
-                            inner = unescFn(inner)
-                        except ValueError:
-                            failIdx = nToks - 1 - lengthHint(tokIter)
-                            break
-                    pval = inner
-                elif vc in ("t", "f", "n"):
-                    pval = kwMap[pv]
-                elif len(pv) >= 2 and (
-                    pv[1] in ("x", "o", "b") or (vc in ("+", "-") and len(pv) >= 3 and pv[2] in ("x", "o", "b"))
-                ):
-                    try:
-                        pval = intFn(pv, 0)
-                    except ValueError:
-                        pval = intFn(pv.replace("_", ""), 0)
-                else:
-                    pval = _numFromDecStr(pv)
-                if props is None:
-                    props = {k: pval}
-                else:
-                    props[k] = pval
-                continue
-
-            if nh:
-                if nextEntDiscard:
-                    failIdx = sdTokIdx
-                    nextEntDiscard = False
-                    break
-                if nh == "}":
-                    if not stack:
+        if not curDiscard and not nodeDiscard and not nextEntDiscard and chars.find("/-", pos, endPos) == -1:
+            # HOT LOOP A: Zero-slashdash chunk
+            for k, pstr, pv, astr, arg, nh, fb in tokIter:
+                if k:
+                    if state != 1 or k in keywords:
                         failIdx = nToks - 1 - lengthHint(tokIter)
                         break
-                    if state == 1 and not nodeDiscard:
-                        curNodes.append(
-                            nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
-                        )
-                    parentNodes, pName, pTag, pArgs, pProps, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
-                        stackPop()
-                    )
-                    if not pNodeDiscard:
-                        parentNodes.append(nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
-                    curNodes = parentNodes
-                    curDiscard = pParentDiscard
-                    state = 2
-                    continue
-                hc0 = nh[0]
-                if hc0 not in ("/", "("):
-                    if nh in keywords:
-                        failIdx = nToks - 1 - lengthHint(tokIter)
-                        break
-                    nTag: str | None = None
-                    nName = nh
-                    nDisc = curDiscard
-                elif hc0 == "/":
-                    nName = nh[3:]
-                    if nName in keywords:
-                        failIdx = nToks - 1 - lengthHint(tokIter)
-                        break
-                    nTag = None
-                    nDisc = True
-                else:
-                    rp = nh.find(")", 1)
-                    nTag = nh[1:rp]
-                    nName = nh[rp + 1 :]
-                    if nTag in keywords or nName in keywords:
-                        failIdx = nToks - 1 - lengthHint(tokIter)
-                        break
-                    nDisc = curDiscard
-                if state == 1 and not nodeDiscard:
-                    curNodes.append(
-                        nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
-                    )
-                name = nName
-                tag = nTag
-                args = None
-                props = None
-                nodeDiscard = nDisc
-                state = 1
-                continue
-
-            if arg:
-                ac0 = arg[0]
-                if state != 1:
-                    if state == 0:
-                        if ac0 == "}":
-                            if not stack:
-                                failIdx = nToks - 1 - lengthHint(tokIter)
-                                break
-                            (
-                                parentNodes,
-                                pName,
-                                pTag,
-                                pArgs,
-                                pProps,
-                                pNodeDiscard,
-                                pChildDiscard,
-                                pParentDiscard,
-                                _,
-                                _,
-                                _,
-                            ) = stackPop()
-                            if not pNodeDiscard:
-                                parentNodes.append(
-                                    nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes),
-                                )
-                            curNodes = parentNodes
-                            curDiscard = pParentDiscard
-                            state = 2
-                            continue
-                        if (
-                            ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
-                            and ac0 not in digits
-                            and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
-                            and arg not in keywords
-                        ):
-                            name = arg
-                            tag = None
-                            args = None
-                            props = None
-                            nodeDiscard = curDiscard
-                            state = 1
-                            continue
-                    failIdx = nToks - 1 - lengthHint(tokIter)
-                    break
-
-                if ac0 == "{":
-                    finalArgs: list[t.Any] = [] if (nodeDiscard or args is None) else args
-                    finalProps: dict[str, t.Any] = {} if (nodeDiscard or props is None) else props
-                    childDisc = nodeDiscard or nextEntDiscard
-                    nextEntDiscard = False
-                    stackPush(
-                        (
-                            curNodes,
-                            name,
-                            tag,
-                            finalArgs,
-                            finalProps,
-                            nodeDiscard,
-                            childDisc,
-                            curDiscard,
-                            pos,
-                            endPos,
-                            nToks - 1 - lengthHint(tokIter),
-                        ),
-                    )
-                    curNodes = []
-                    curDiscard = childDisc
-                    state = 0
-                    continue
-                if ac0 == "/":
-                    if arg[1] == "-":
-                        if nextEntDiscard:
-                            failIdx = sdTokIdx
-                            nextEntDiscard = False
-                            break
-                        nextEntDiscard = True
-                        sdTokIdx = nToks - 1 - lengthHint(tokIter)
+                    if not pv:
+                        props[k] = pstr
                         continue
-                    if "/*" in arg[2:-2]:
-                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                        nextEntDiscard = False
-                        break
-                    continue
-                if ac0 == "\\":
-                    continue
-                if ac0 == "}":
-                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                    nextEntDiscard = False
-                    break
-
-                entDiscard = nodeDiscard or nextEntDiscard
-                if ac0 == '"':
-                    nextEntDiscard = False
-                    inner = arg[1:-1]
-                    if "\\" in inner:
+                    av = atomsGet(pv, unset)
+                    if av is not unset:
+                        props[k] = av
+                        continue
+                    vc = pv[0]
+                    if "1" <= vc <= "9":
+                        if "." not in pv and "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = intFn(pv, 10)
+                            except ValueError:
+                                props[k] = numDecFn(pv)
+                        elif "." in pv:
+                            try:
+                                props[k] = floatFn(pv)
+                            except ValueError:
+                                props[k] = floatFn(pv.replace("_", ""))
+                        else:
+                            props[k] = numOtherFn(pv)
+                    elif vc == '"':
                         try:
-                            inner = unescFn(inner)
+                            props[k] = unescFn(pv[1:-1])
                         except ValueError:
                             failIdx = nToks - 1 - lengthHint(tokIter)
                             break
-                    if not entDiscard:
-                        if args is None:
-                            args = [inner]
-                        else:
-                            args.append(inner)
+                    else:
+                        props[k] = numOtherFn(pv)
                     continue
-                if ac0 == "(":
-                    rp = arg.find(")", 1)
-                    tName = arg[1:rp]
-                    if tName in keywords:
-                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                        nextEntDiscard = False
+
+                if nh:
+                    if nh == "}":
+                        if not stack:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                            stackPop()
+                        )
+                        if not pND:
+                            parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                        curNodes = parentNodes
+                        curAppend = parentAppend
+                        state = 2
+                        continue
+                    lc = nh[-1]
+                    if lc == '"':
+                        sp = nh.find(" ")
+                        nName = nh[:sp]
+                        if nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        name = nName
+                        tag = None
+                        args = [nh[sp + 2 : -1]]
+                        argsAppend = args.append
+                        props = {}
+                        state = 1
+                        continue
+                    if lc == "{":
+                        bName = nh[:-2]
+                        if bName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                bName,
+                                None,
+                                [],
+                                {},
+                                False,
+                                False,
+                                False,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        state = 0
+                        continue
+                    if nh[0] != "(":
+                        if nh in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nTag: str | None = None
+                        nName = nh
+                    else:
+                        rp = nh.find(")", 1)
+                        nTag = nh[1:rp]
+                        nName = nh[rp + 1 :]
+                        if nTag in keywords or nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    if state == 1:
+                        curAppend(nodeCls(name, tag, args, props, []))
+                    name = nName
+                    tag = nTag
+                    args = []
+                    argsAppend = args.append
+                    props = {}
+                    state = 1
+                    continue
+
+                if astr:
+                    if state != 1:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
                         break
-                    vStr = arg[rp + 1 :]
-                    if vStr[0] == '"':
-                        inner = vStr[1:-1]
+                    argsAppend(astr)
+                    continue
+
+                if arg:
+                    ac0 = arg[0]
+                    if state != 1:
+                        if state == 0:
+                            if ac0 == "}":
+                                if not stack:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                                    stackPop()
+                                )
+                                if not pND:
+                                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                                curNodes = parentNodes
+                                curAppend = parentAppend
+                                state = 2
+                                continue
+                            if (
+                                ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                                and not ("0" <= ac0 <= "9")
+                                and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                                and arg not in keywords
+                            ):
+                                name = arg
+                                tag = None
+                                args = []
+                                argsAppend = args.append
+                                props = {}
+                                state = 1
+                                continue
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+
+                    if ac0 == "{":
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                False,
+                                False,
+                                False,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        state = 0
+                        continue
+                    if "1" <= ac0 <= "9":
+                        if "." not in arg and "e" not in arg and "E" not in arg:
+                            try:
+                                argsAppend(intFn(arg, 10))
+                            except ValueError:
+                                argsAppend(numDecFn(arg))
+                        elif "." in arg:
+                            try:
+                                argsAppend(floatFn(arg))
+                            except ValueError:
+                                argsAppend(floatFn(arg.replace("_", "")))
+                        else:
+                            argsAppend(numOtherFn(arg))
+                        continue
+                    if ac0 == '"':
+                        inner = arg[1:-1]
                         if "\\" in inner:
                             try:
                                 inner = unescFn(inner)
                             except ValueError:
-                                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                                nextEntDiscard = False
+                                failIdx = nToks - 1 - lengthHint(tokIter)
                                 break
-                        nextEntDiscard = False
-                        if not entDiscard:
+                        argsAppend(inner)
+                        continue
+                    if ac0 == "(":
+                        if nativeTagged:
+                            cv = tagGet(arg, unset)
+                            if cv is not unset:
+                                argsAppend(cv)
+                                continue
+                        rp = arg.find(")", 1)
+                        tName = arg[1:rp]
+                        if tName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        vStr = arg[rp + 1 :]
+                        if vStr[0] == '"':
+                            inner = vStr[1:-1]
+                            if "\\" in inner:
+                                try:
+                                    inner = unescFn(inner)
+                                except ValueError:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
                             if nativeTagged:
-                                conv = _convertTaggedStringFast(tName, inner)
+                                conv = convStrFn(tName, inner)
                                 if conv is unset:
                                     failIdx = nToks - 1 - lengthHint(tokIter)
                                     break
-                                val: t.Any = conv
+                                if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                    tagCache[arg] = conv
+                                argsAppend(conv)
                             else:
-                                val = strCls(inner, tName)
-                            if args is None:
-                                args = [val]
-                            else:
-                                args.append(val)
-                        continue
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        if nativeTagged:
-                            conv = _convertTaggedDecFast(tName, vStr)
+                                argsAppend(strCls(inner, tName))
+                        elif nativeTagged:
+                            conv = convDecFn(tName, vStr)
                             if conv is unset:
                                 failIdx = nToks - 1 - lengthHint(tokIter)
                                 break
-                            val = conv
+                            if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                tagCache[arg] = conv
+                            argsAppend(conv)
                         else:
-                            dObj = _decimalFromStr(vStr)
+                            dObj = decodeRawNumFn(vStr)
                             dObj.tag = tName
-                            val = dObj
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
-                    nextEntDiscard = False
-                    if not entDiscard:
+                            argsAppend(dObj)
+                        continue
+                    if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                        # For `r###"body"###`, `q` is the opening `"` index (`q - 1` hashes on each side),
+                        # so the closing `"` sits at `len(arg) - q`.
                         q = arg.find('"', 1)
-                        h = q - 1
-                        rText = arg[q + 1 : len(arg) - 1 - h]
-                        if args is None:
-                            args = [rText]
-                        else:
-                            args.append(rText)
-                    continue
-                if "1" <= ac0 <= "9":
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        if "." not in arg and "e" not in arg and "E" not in arg:
-                            try:
-                                val = intFn(arg, 10)
-                            except ValueError:
-                                val = _numFromDecStr(arg)
-                        elif "." in arg:
-                            try:
-                                val = floatFn(arg)
-                            except ValueError:
-                                val = floatFn(arg.replace("_", ""))
-                        else:
-                            val = _numFromDecStr(arg)
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and arg[1] in digits):
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        if len(arg) >= 2 and (
-                            arg[1] in ("x", "o", "b")
-                            or (ac0 in ("+", "-") and len(arg) >= 3 and arg[2] in ("x", "o", "b"))
-                        ):
-                            try:
-                                val = intFn(arg, 0)
-                            except ValueError:
-                                val = intFn(arg.replace("_", ""), 0)
-                        else:
-                            val = _numFromDecStr(arg)
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                kwVal = kwGet(arg, unset)
-                if kwVal is not unset:
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        if args is None:
-                            args = [kwVal]
-                        else:
-                            args.append(kwVal)
-                    continue
-                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                nextEntDiscard = False
-                break
+                        argsAppend(arg[q + 1 : len(arg) - q])
+                        continue
+                    if ac0 == "/":
+                        if "/*" in arg[2:-2]:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        continue
+                    if ac0 == "\\":
+                        continue
+                    if ac0 == "}":
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+                    av = atomsGet(arg, unset)
+                    if av is not unset:
+                        argsAppend(av)
+                        continue
+                    if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and "0" <= arg[1] <= "9"):
+                        argsAppend(numOtherFn(arg))
+                        continue
+                    failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
 
-            if fb:
-                if fb == ";":
+                if fb:
+                    if fb == ";":
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                            state = 0
+                            continue
+                        if state == 2:
+                            state = 0
+                            continue
+                    elif fb == "{" and state == 1:
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                False,
+                                False,
+                                False,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        state = 0
+                        continue
+                    if lengthHint(tokIter) == 0:
+                        failOffset = endPos - len(fb)
+                    else:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
+
+                if state == 1:
+                    curAppend(nodeCls(name, tag, args, props, []))
+                state = 0
+        else:
+            # HOT LOOP B: Slashdash-capable chunk
+            for k, pstr, pv, astr, arg, nh, fb in tokIter:
+                if k:
+                    if state != 1 or k in keywords:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    if nodeDiscard or nextEntDiscard:
+                        nextEntDiscard = False
+                        if pv and pv[0] == '"':
+                            try:
+                                unescFn(pv[1:-1])
+                            except ValueError:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                        continue
+                    if not pv:
+                        props[k] = pstr
+                        continue
+                    av = atomsGet(pv, unset)
+                    if av is not unset:
+                        props[k] = av
+                        continue
+                    vc = pv[0]
+                    if "1" <= vc <= "9":
+                        if "." not in pv and "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = intFn(pv, 10)
+                            except ValueError:
+                                props[k] = numDecFn(pv)
+                        elif "." in pv:
+                            try:
+                                props[k] = floatFn(pv)
+                            except ValueError:
+                                props[k] = floatFn(pv.replace("_", ""))
+                        else:
+                            props[k] = numOtherFn(pv)
+                    elif vc == '"':
+                        try:
+                            props[k] = unescFn(pv[1:-1])
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    else:
+                        props[k] = numOtherFn(pv)
+                    continue
+
+                if nh:
                     if nextEntDiscard:
                         failIdx = sdTokIdx
                         nextEntDiscard = False
                         break
-                    if state == 1:
-                        if not nodeDiscard:
-                            curNodes.append(
-                                nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
-                            )
+                    if nh == "}":
+                        if not stack:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1 and not nodeDiscard:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                            stackPop()
+                        )
+                        if not pND:
+                            parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                        curNodes = parentNodes
+                        curAppend = parentAppend
+                        state = 2
+                        continue
+                    lc = nh[-1]
+                    if lc == '"':
+                        sp = nh.find(" ")
+                        nName = nh[:sp]
+                        if nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1 and not nodeDiscard:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        name = nName
+                        tag = None
+                        args = [] if curDiscard else [nh[sp + 2 : -1]]
+                        argsAppend = args.append
+                        props = {}
+                        nodeDiscard = curDiscard
+                        state = 1
+                        continue
+                    if lc == "{":
+                        bName = nh[:-2]
+                        if bName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1 and not nodeDiscard:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                bName,
+                                None,
+                                [],
+                                {},
+                                curDiscard,
+                                curDiscard,
+                                curDiscard,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
                         state = 0
                         continue
-                    if state == 2:
-                        state = 0
-                        continue
-                elif fb == "{" and state == 1:
-                    finalArgs = [] if (nodeDiscard or args is None) else args
-                    finalProps = {} if (nodeDiscard or props is None) else props
-                    childDisc = nodeDiscard or nextEntDiscard
-                    nextEntDiscard = False
-                    stackPush(
-                        (
-                            curNodes,
-                            name,
-                            tag,
-                            finalArgs,
-                            finalProps,
-                            nodeDiscard,
-                            childDisc,
-                            curDiscard,
-                            pos,
-                            endPos,
-                            nToks - 1 - lengthHint(tokIter),
-                        ),
-                    )
-                    curNodes = []
-                    curDiscard = childDisc
-                    state = 0
+                    hc0 = nh[0]
+                    if hc0 not in ("/", "("):
+                        if nh in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nTag = None
+                        nName = nh
+                        nDisc = curDiscard
+                    elif hc0 == "/":
+                        nName = nh[3:]
+                        if nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nTag = None
+                        nDisc = True
+                    else:
+                        rp = nh.find(")", 1)
+                        nTag = nh[1:rp]
+                        nName = nh[rp + 1 :]
+                        if nTag in keywords or nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nDisc = curDiscard
+                    if state == 1 and not nodeDiscard:
+                        curAppend(nodeCls(name, tag, args, props, []))
+                    name = nName
+                    tag = nTag
+                    args = []
+                    argsAppend = args.append
+                    props = {}
+                    nodeDiscard = nDisc
+                    state = 1
                     continue
+
+                if astr:
+                    if state != 1:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    entDiscard = nodeDiscard or nextEntDiscard
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        argsAppend(astr)
+                    continue
+
+                if arg:
+                    ac0 = arg[0]
+                    if state != 1:
+                        if state == 0:
+                            if ac0 == "}":
+                                if not stack:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                                    stackPop()
+                                )
+                                if not pND:
+                                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                                curNodes = parentNodes
+                                curAppend = parentAppend
+                                state = 2
+                                continue
+                            if (
+                                ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                                and not ("0" <= ac0 <= "9")
+                                and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                                and arg not in keywords
+                            ):
+                                name = arg
+                                tag = None
+                                args = []
+                                argsAppend = args.append
+                                props = {}
+                                nodeDiscard = curDiscard
+                                state = 1
+                                continue
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+
+                    if ac0 == "{":
+                        childDisc = nodeDiscard or nextEntDiscard
+                        nextEntDiscard = False
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                nodeDiscard,
+                                childDisc,
+                                curDiscard,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        curDiscard = childDisc
+                        state = 0
+                        continue
+                    if ac0 == "/":
+                        if arg[1] == "-":
+                            if nextEntDiscard:
+                                failIdx = sdTokIdx
+                                nextEntDiscard = False
+                                break
+                            nextEntDiscard = True
+                            sdTokIdx = nToks - 1 - lengthHint(tokIter)
+                            continue
+                        if "/*" in arg[2:-2]:
+                            failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                            nextEntDiscard = False
+                            break
+                        continue
+                    if ac0 == "\\":
+                        continue
+                    if ac0 == "}":
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+
+                    entDiscard = nodeDiscard or nextEntDiscard
+                    if ac0 == '"':
+                        nextEntDiscard = False
+                        inner = arg[1:-1]
+                        if "\\" in inner:
+                            try:
+                                inner = unescFn(inner)
+                            except ValueError:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                        if not entDiscard:
+                            argsAppend(inner)
+                        continue
+                    if ac0 == "(":
+                        rp = arg.find(")", 1)
+                        tName = arg[1:rp]
+                        if tName in keywords:
+                            failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                            nextEntDiscard = False
+                            break
+                        vStr = arg[rp + 1 :]
+                        if vStr[0] == '"':
+                            inner = vStr[1:-1]
+                            if "\\" in inner:
+                                try:
+                                    inner = unescFn(inner)
+                                except ValueError:
+                                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                                    nextEntDiscard = False
+                                    break
+                            nextEntDiscard = False
+                            if not entDiscard:
+                                if nativeTagged:
+                                    cv = tagGet(arg, unset)
+                                    if cv is not unset:
+                                        argsAppend(cv)
+                                        continue
+                                    conv = convStrFn(tName, inner)
+                                    if conv is unset:
+                                        failIdx = nToks - 1 - lengthHint(tokIter)
+                                        break
+                                    if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                        tagCache[arg] = conv
+                                    argsAppend(conv)
+                                else:
+                                    argsAppend(strCls(inner, tName))
+                            continue
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            if nativeTagged:
+                                cv = tagGet(arg, unset)
+                                if cv is not unset:
+                                    argsAppend(cv)
+                                    continue
+                                conv = convDecFn(tName, vStr)
+                                if conv is unset:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                    tagCache[arg] = conv
+                                argsAppend(conv)
+                            else:
+                                dObj = decodeRawNumFn(vStr)
+                                dObj.tag = tName
+                                argsAppend(dObj)
+                        continue
+                    if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            q = arg.find('"', 1)
+                            argsAppend(arg[q + 1 : len(arg) - q])
+                        continue
+                    if "1" <= ac0 <= "9":
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            if "." not in arg and "e" not in arg and "E" not in arg:
+                                try:
+                                    argsAppend(intFn(arg, 10))
+                                except ValueError:
+                                    argsAppend(numDecFn(arg))
+                            elif "." in arg:
+                                try:
+                                    argsAppend(floatFn(arg))
+                                except ValueError:
+                                    argsAppend(floatFn(arg.replace("_", "")))
+                            else:
+                                argsAppend(numOtherFn(arg))
+                        continue
+                    av = atomsGet(arg, unset)
+                    if av is not unset:
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            argsAppend(av)
+                        continue
+                    if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and "0" <= arg[1] <= "9"):
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            argsAppend(numOtherFn(arg))
+                        continue
+                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                    nextEntDiscard = False
+                    break
+
+                if fb:
+                    if fb == ";":
+                        if nextEntDiscard:
+                            failIdx = sdTokIdx
+                            nextEntDiscard = False
+                            break
+                        if state == 1:
+                            if not nodeDiscard:
+                                curAppend(nodeCls(name, tag, args, props, []))
+                            state = 0
+                            continue
+                        if state == 2:
+                            state = 0
+                            continue
+                    elif fb == "{" and state == 1:
+                        childDisc = nodeDiscard or nextEntDiscard
+                        nextEntDiscard = False
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                nodeDiscard,
+                                childDisc,
+                                curDiscard,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        curDiscard = childDisc
+                        state = 0
+                        continue
+                    if nextEntDiscard:
+                        failIdx = sdTokIdx
+                        nextEntDiscard = False
+                    elif lengthHint(tokIter) == 0:
+                        failOffset = endPos - len(fb)
+                    else:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
+
                 if nextEntDiscard:
                     failIdx = sdTokIdx
                     nextEntDiscard = False
-                elif lengthHint(tokIter) == 0:
-                    failOffset = endPos - len(fb)
-                else:
-                    failIdx = nToks - 1 - lengthHint(tokIter)
-                break
-
-            # Empty newline (all 5 groups == "")
-            if nextEntDiscard:
-                failIdx = sdTokIdx
-                nextEntDiscard = False
-                break
-            if state == 1 and not nodeDiscard:
-                curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
-            state = 0
+                    break
+                if state == 1 and not nodeDiscard:
+                    curAppend(nodeCls(name, tag, args, props, []))
+                state = 0
 
         if failIdx < 0 and failOffset < 0:
             if nextEntDiscard:
@@ -1711,6 +3921,8 @@ def _parseChunkedNative(s: Stream) -> Document:
 
         i = failOffset if failOffset >= 0 else _tokenOffset(chars, pos, endPos, failIdx)
         chunkSize = max(256, chunkSize // 4)
+        if s is None:
+            s = Stream(chars, config)
         (
             newPos,
             state,
@@ -1738,69 +3950,70 @@ def _parseChunkedNative(s: Stream) -> Document:
         )
         if newPos < 0:
             return Document(curNodes)
+        curAppend = curNodes.append
+        argsAppend = args.append
         pos = newPos
 
     if state == 1 and not nodeDiscard:
-        curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
+        curAppend(nodeCls(name, tag, args, props, []))
     if stack:
+        if s is None:
+            s = Stream(chars, config)
         raise ParseError(s, _unclosedBlockPos(chars, stack[-1]), "Hit EOF while searching for end of child list")
     return Document(curNodes)
 
 
-def _parseChunkedRaw(s: Stream) -> Document:
+def _parseChunkedRaw(chars: str, config: t.ParseConfig) -> Document:
     """Specialized chunked C-regex parser for nativeUntaggedValues=False with no custom converters."""
-    chars = s.chars
-    n = s.length
-    nativeTagged = s.config.nativeTaggedValues
+    n = len(chars)
+    nativeTagged = config.nativeTaggedValues
     findall = _tokFindall
     lengthHint = _lengthHint
     keywords = _KEYWORDS
-    digits = _DIGITS
     unset = _UNSET
     nodeCls = Node
     strCls = String
     rawStrCls = RawString
     boolCls = Bool
     nullCls = Null
-    hexCls = Hex
-    octCls = Octal
-    binCls = Binary
+    decCls = Decimal
+    valueCls = Value
     intFn = int
+    floatFn = float
     unescFn = _unescapeValidated
+    decodeRawNumFn = _decodeRawNum
+    convStrFn = _convertTaggedStringFast
+    convDecFn = _convertTaggedDecFast
 
+    s: Stream | None = None
     curNodes: list[Node] = []
+    curAppend = curNodes.append
     curDiscard = False
     stack: list[_FastFrame] = []
     stackPush = stack.append
     stackPop = stack.pop
+    lineCache: dict[str, t.Any] = {}
+    tagCache: dict[str, t.Any] = {}
+    tagGet = tagCache.get
+    validIds: set[str] = set()
 
     state = 0
     name = ""
     tag: str | None = None
-    args: list[t.Any] | None = None
-    props: dict[str, t.Any] | None = None
+    args: list[t.Any] = []
+    argsAppend = args.append
+    props: dict[str, t.Any] = {}
     nodeDiscard = False
     nextEntDiscard = False
     sdTokIdx = 0
 
     pos = 0
-    if n > 0:
-        mh0 = _matchNodeHead(chars, 0)
-        assert mh0 is not None
-        li0 = mh0.lastindex
-        if li0 == 1:
-            cand0 = mh0.group(1)
-            if cand0 not in keywords:
-                name = cand0
-                pos = mh0.end()
-                state = 1
-        elif li0 is None and mh0.end() >= n:
-            return Document(curNodes)
-
-    chunkSize = 512
+    chunkSize = 4096 if n >= 2048 else 512
     while pos < n:
         endPos = _pickChunkEnd(chars, pos, n, chunkSize)
         if endPos < 0:
+            if s is None:
+                s = Stream(chars, config)
             (
                 newPos,
                 state,
@@ -1828,377 +4041,816 @@ def _parseChunkedRaw(s: Stream) -> Document:
             )
             if newPos < 0:
                 return Document(curNodes)
+            curAppend = curNodes.append
+            argsAppend = args.append
             pos = newPos
             continue
 
+        # Tier 2 (RAW): Adaptive line-template recipe cache for repeating lines (when nativeTagged=False).
+        if (
+            not nativeTagged
+            and state == 0
+            and not curDiscard
+            and not nodeDiscard
+            and not nextEntDiscard
+            and endPos - pos >= 512
+        ):
+            lcEnd = endPos
+            consumeNl = lcEnd < n and chars[lcEnd] == "\n"
+            if not consumeNl and lcEnd < n:
+                lastNl = chars.rfind("\n", pos, lcEnd)
+                if lastNl > pos:
+                    lcEnd = lastNl
+                    consumeNl = True
+            if lcEnd - pos >= 512:
+                chunkSlice = chars[pos:lcEnd]
+                if (
+                    "\r" not in chunkSlice
+                    and "/*" not in chunkSlice
+                    and "\x0c" not in chunkSlice
+                    and (
+                        chunkSlice.isascii()
+                        or ("\x85" not in chunkSlice and "\u2028" not in chunkSlice and "\u2029" not in chunkSlice)
+                    )
+                ):
+                    chunkLines = chunkSlice.split("\n")
+                    if lineCache or _hasRepeatingLines(chunkLines):
+                        lcPos, curNodes = _tryLineCachedChunkRaw(
+                            chunkLines,
+                            pos,
+                            lcEnd,
+                            consumeTrailingNl=consumeNl,
+                            curNodes=curNodes,
+                            stack=stack,
+                            lineCache=lineCache,
+                            validIds=validIds,
+                        )
+                        curAppend = curNodes.append
+                        targetPos = lcEnd + 1 if consumeNl else lcEnd
+                        if lcPos >= targetPos:
+                            pos = lcPos
+                            chunkSize = min(chunkSize * 4, 65536)
+                            continue
+                        if s is None:
+                            s = Stream(chars, config)
+                        (
+                            newPos,
+                            state,
+                            name,
+                            tag,
+                            args,
+                            props,
+                            nodeDiscard,
+                            curNodes,
+                            curDiscard,
+                        ) = _handleChunkFallback(
+                            s,
+                            lcPos,
+                            nativeUntagged=False,
+                            nativeTagged=False,
+                            state=0,
+                            name="",
+                            tag=None,
+                            args=[],
+                            props={},
+                            nodeDiscard=False,
+                            curNodes=curNodes,
+                            curDiscard=False,
+                            stack=stack,
+                        )
+                        if newPos < 0:
+                            return Document(curNodes)
+                        curAppend = curNodes.append
+                        argsAppend = args.append
+                        pos = newPos
+                        chunkSize = max(512, chunkSize // 2)
+                        continue
+
+        if pos == 0 and state == 0:
+            mh0 = _matchNodeHead(chars, 0)
+            assert mh0 is not None
+            li0 = mh0.lastindex
+            if li0 == 1:
+                cand0 = mh0.group(1)
+                if cand0 not in keywords:
+                    name = cand0
+                    pos = mh0.end()
+                    state = 1
+                    if pos >= endPos:
+                        continue
+            elif li0 is None and mh0.end() >= n:
+                return Document(curNodes)
+
+        # Parser state: 0 = expecting node head or `}`, 1 = inside node (entries / `{` / terminator),
+        # 2 = immediately after `}` (expecting node terminator).
+        # `nToks - 1 - lengthHint(tokIter)` recovers the current token index on rare fallback without `enumerate()`.
         toks = findall(chars, pos, endPos)
         nToks = len(toks)
         tokIter = iter(toks)
         failIdx = -1
         failOffset = -1
 
-        for k, pv, arg, nh, fb in tokIter:
-            if k:
-                if state != 1 or k in keywords:
-                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                    nextEntDiscard = False
-                    break
-                if nodeDiscard or nextEntDiscard:
-                    nextEntDiscard = False
-                    if pv[0] == '"' and "\\" in pv:
-                        try:
-                            unescFn(pv[1:-1])
-                        except ValueError:
-                            failIdx = nToks - 1 - lengthHint(tokIter)
-                            break
-                    continue
-                vc = pv[0]
-                if "1" <= vc <= "9":
-                    pval: t.Any = _decimalFromStr(pv)
-                elif vc == '"':
-                    inner = pv[1:-1]
-                    if "\\" in inner:
-                        try:
-                            inner = unescFn(inner)
-                        except ValueError:
-                            failIdx = nToks - 1 - lengthHint(tokIter)
-                            break
-                    pval = strCls(inner)
-                elif vc in ("t", "f", "n"):
-                    pval = boolCls(True) if pv == "true" else (boolCls(False) if pv == "false" else nullCls())
-                elif len(pv) >= 2 and (
-                    pv[1] in ("x", "o", "b") or (vc in ("+", "-") and len(pv) >= 3 and pv[2] in ("x", "o", "b"))
-                ):
-                    iv = intFn(pv.replace("_", "") if "_" in pv else pv, 0)
-                    rc = pv[2] if vc in ("+", "-") else pv[1]
-                    pval = hexCls(iv) if rc == "x" else (octCls(iv) if rc == "o" else binCls(iv))
-                else:
-                    pval = _decimalFromStr(pv)
-                if props is None:
-                    props = {k: pval}
-                else:
-                    props[k] = pval
-                continue
-
-            if nh:
-                if nextEntDiscard:
-                    failIdx = sdTokIdx
-                    nextEntDiscard = False
-                    break
-                if nh == "}":
-                    if not stack:
+        if not curDiscard and not nodeDiscard and not nextEntDiscard and chars.find("/-", pos, endPos) == -1:
+            # HOT LOOP A (RAW): Zero-slashdash chunk
+            for k, pstr, pv, astr, arg, nh, fb in tokIter:
+                if k:
+                    if state != 1 or k in keywords:
                         failIdx = nToks - 1 - lengthHint(tokIter)
                         break
-                    if state == 1 and not nodeDiscard:
-                        curNodes.append(
-                            nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
-                        )
-                    parentNodes, pName, pTag, pArgs, pProps, pNodeDiscard, pChildDiscard, pParentDiscard, _, _, _ = (
-                        stackPop()
-                    )
-                    if not pNodeDiscard:
-                        parentNodes.append(nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes))
-                    curNodes = parentNodes
-                    curDiscard = pParentDiscard
-                    state = 2
-                    continue
-                hc0 = nh[0]
-                if hc0 not in ("/", "("):
-                    if nh in keywords:
-                        failIdx = nToks - 1 - lengthHint(tokIter)
-                        break
-                    nTag: str | None = None
-                    nName = nh
-                    nDisc = curDiscard
-                elif hc0 == "/":
-                    nName = nh[3:]
-                    if nName in keywords:
-                        failIdx = nToks - 1 - lengthHint(tokIter)
-                        break
-                    nTag = None
-                    nDisc = True
-                else:
-                    rp = nh.find(")", 1)
-                    nTag = nh[1:rp]
-                    nName = nh[rp + 1 :]
-                    if nTag in keywords or nName in keywords:
-                        failIdx = nToks - 1 - lengthHint(tokIter)
-                        break
-                    nDisc = curDiscard
-                if state == 1 and not nodeDiscard:
-                    curNodes.append(
-                        nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
-                    )
-                name = nName
-                tag = nTag
-                args = None
-                props = None
-                nodeDiscard = nDisc
-                state = 1
-                continue
-
-            if arg:
-                ac0 = arg[0]
-                if state != 1:
-                    if state == 0:
-                        if ac0 == "}":
-                            if not stack:
-                                failIdx = nToks - 1 - lengthHint(tokIter)
-                                break
-                            (
-                                parentNodes,
-                                pName,
-                                pTag,
-                                pArgs,
-                                pProps,
-                                pNodeDiscard,
-                                pChildDiscard,
-                                pParentDiscard,
-                                _,
-                                _,
-                                _,
-                            ) = stackPop()
-                            if not pNodeDiscard:
-                                parentNodes.append(
-                                    nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes),
-                                )
-                            curNodes = parentNodes
-                            curDiscard = pParentDiscard
-                            state = 2
-                            continue
-                        if (
-                            ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
-                            and ac0 not in digits
-                            and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
-                            and arg not in keywords
-                        ):
-                            name = arg
-                            tag = None
-                            args = None
-                            props = None
-                            nodeDiscard = curDiscard
-                            state = 1
-                            continue
-                    failIdx = nToks - 1 - lengthHint(tokIter)
-                    break
-
-                if ac0 == "{":
-                    finalArgs: list[t.Any] = [] if (nodeDiscard or args is None) else args
-                    finalProps: dict[str, t.Any] = {} if (nodeDiscard or props is None) else props
-                    childDisc = nodeDiscard or nextEntDiscard
-                    nextEntDiscard = False
-                    stackPush(
-                        (
-                            curNodes,
-                            name,
-                            tag,
-                            finalArgs,
-                            finalProps,
-                            nodeDiscard,
-                            childDisc,
-                            curDiscard,
-                            pos,
-                            endPos,
-                            nToks - 1 - lengthHint(tokIter),
-                        ),
-                    )
-                    curNodes = []
-                    curDiscard = childDisc
-                    state = 0
-                    continue
-                if ac0 == "/":
-                    if arg[1] == "-":
-                        if nextEntDiscard:
-                            failIdx = sdTokIdx
-                            nextEntDiscard = False
-                            break
-                        nextEntDiscard = True
-                        sdTokIdx = nToks - 1 - lengthHint(tokIter)
+                    if not pv:
+                        props[k] = strCls(pstr)
                         continue
-                    if "/*" in arg[2:-2]:
-                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                        nextEntDiscard = False
-                        break
-                    continue
-                if ac0 == "\\":
-                    continue
-                if ac0 == "}":
-                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                    nextEntDiscard = False
-                    break
-
-                entDiscard = nodeDiscard or nextEntDiscard
-                if ac0 == '"':
-                    nextEntDiscard = False
-                    inner = arg[1:-1]
-                    if "\\" in inner:
+                    vc = pv[0]
+                    if "1" <= vc <= "9":
+                        if "." not in pv and "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = decCls(intFn(pv, 10), 0)
+                            except ValueError:
+                                props[k] = decodeRawNumFn(pv)
+                        elif "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = decCls(floatFn(pv), 0)
+                            except ValueError:
+                                props[k] = decCls(floatFn(pv.replace("_", "")), 0)
+                        else:
+                            props[k] = decodeRawNumFn(pv)
+                    elif vc in ("t", "f", "n"):
+                        props[k] = boolCls(True) if pv == "true" else (boolCls(False) if pv == "false" else nullCls())
+                    elif vc == '"':
                         try:
-                            inner = unescFn(inner)
+                            props[k] = strCls(unescFn(pv[1:-1]))
                         except ValueError:
                             failIdx = nToks - 1 - lengthHint(tokIter)
                             break
-                    if not entDiscard:
-                        sv = strCls(inner)
-                        if args is None:
-                            args = [sv]
-                        else:
-                            args.append(sv)
+                    else:
+                        props[k] = decodeRawNumFn(pv)
                     continue
-                if ac0 == "(":
-                    rp = arg.find(")", 1)
-                    tName = arg[1:rp]
-                    if tName in keywords:
-                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                        nextEntDiscard = False
+
+                if nh:
+                    if nh == "}":
+                        if not stack:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                            stackPop()
+                        )
+                        if not pND:
+                            parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                        curNodes = parentNodes
+                        curAppend = parentAppend
+                        state = 2
+                        continue
+                    lc = nh[-1]
+                    if lc == '"':
+                        sp = nh.find(" ")
+                        nName = nh[:sp]
+                        if nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        name = nName
+                        tag = None
+                        args = [strCls(nh[sp + 2 : -1])]
+                        argsAppend = args.append
+                        props = {}
+                        state = 1
+                        continue
+                    if lc == "{":
+                        bName = nh[:-2]
+                        if bName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                bName,
+                                None,
+                                [],
+                                {},
+                                False,
+                                False,
+                                False,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        state = 0
+                        continue
+                    if nh[0] != "(":
+                        if nh in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nTag: str | None = None
+                        nName = nh
+                    else:
+                        rp = nh.find(")", 1)
+                        nTag = nh[1:rp]
+                        nName = nh[rp + 1 :]
+                        if nTag in keywords or nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    if state == 1:
+                        curAppend(nodeCls(name, tag, args, props, []))
+                    name = nName
+                    tag = nTag
+                    args = []
+                    argsAppend = args.append
+                    props = {}
+                    state = 1
+                    continue
+
+                if astr:
+                    if state != 1:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
                         break
-                    vStr = arg[rp + 1 :]
-                    if vStr[0] == '"':
-                        inner = vStr[1:-1]
+                    argsAppend(strCls(astr))
+                    continue
+
+                if arg:
+                    ac0 = arg[0]
+                    if state != 1:
+                        if state == 0:
+                            if ac0 == "}":
+                                if not stack:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                                    stackPop()
+                                )
+                                if not pND:
+                                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                                curNodes = parentNodes
+                                curAppend = parentAppend
+                                state = 2
+                                continue
+                            if (
+                                ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                                and not ("0" <= ac0 <= "9")
+                                and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                                and arg not in keywords
+                            ):
+                                name = arg
+                                tag = None
+                                args = []
+                                argsAppend = args.append
+                                props = {}
+                                state = 1
+                                continue
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+
+                    if ac0 == "{":
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                False,
+                                False,
+                                False,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        state = 0
+                        continue
+                    if "1" <= ac0 <= "9":
+                        if "." not in arg and "e" not in arg and "E" not in arg:
+                            try:
+                                argsAppend(decCls(intFn(arg, 10), 0))
+                            except ValueError:
+                                argsAppend(decodeRawNumFn(arg))
+                        elif "e" not in arg and "E" not in arg:
+                            try:
+                                argsAppend(decCls(floatFn(arg), 0))
+                            except ValueError:
+                                argsAppend(decCls(floatFn(arg.replace("_", "")), 0))
+                        else:
+                            argsAppend(decodeRawNumFn(arg))
+                        continue
+                    if ac0 == '"':
+                        inner = arg[1:-1]
                         if "\\" in inner:
                             try:
                                 inner = unescFn(inner)
                             except ValueError:
-                                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                                nextEntDiscard = False
+                                failIdx = nToks - 1 - lengthHint(tokIter)
                                 break
-                        nextEntDiscard = False
-                        if not entDiscard:
+                        argsAppend(strCls(inner))
+                        continue
+                    if ac0 == "(":
+                        if nativeTagged:
+                            cv = tagGet(arg, unset)
+                            if cv is not unset:
+                                argsAppend(cv)
+                                continue
+                        rp = arg.find(")", 1)
+                        tName = arg[1:rp]
+                        if tName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        vStr = arg[rp + 1 :]
+                        if vStr[0] == '"':
+                            inner = vStr[1:-1]
+                            if "\\" in inner:
+                                try:
+                                    inner = unescFn(inner)
+                                except ValueError:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
                             if nativeTagged:
-                                conv = _convertTaggedStringFast(tName, inner)
+                                conv = convStrFn(tName, inner)
                                 if conv is unset:
                                     failIdx = nToks - 1 - lengthHint(tokIter)
                                     break
-                                val: t.Any = conv
+                                if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                    tagCache[arg] = conv
+                                argsAppend(conv)
                             else:
-                                val = strCls(inner, tName)
-                            if args is None:
-                                args = [val]
-                            else:
-                                args.append(val)
-                        continue
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        if nativeTagged:
-                            conv = _convertTaggedDecFast(tName, vStr)
+                                argsAppend(strCls(inner, tName))
+                        elif nativeTagged:
+                            conv = convDecFn(tName, vStr)
                             if conv is unset:
                                 failIdx = nToks - 1 - lengthHint(tokIter)
                                 break
-                            val = conv
+                            if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                tagCache[arg] = conv
+                            argsAppend(conv)
                         else:
-                            dObj = _decimalFromStr(vStr)
+                            dObj = decodeRawNumFn(vStr)
                             dObj.tag = tName
-                            val = dObj
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
-                    nextEntDiscard = False
-                    if not entDiscard:
+                            argsAppend(dObj)
+                        continue
+                    if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                        # For `r###"body"###`, `q` is the opening `"` index (`q - 1` hashes on each side),
+                        # so the closing `"` sits at `len(arg) - q`.
                         q = arg.find('"', 1)
-                        h = q - 1
-                        rv = rawStrCls(arg[q + 1 : len(arg) - 1 - h])
-                        if args is None:
-                            args = [rv]
-                        else:
-                            args.append(rv)
-                    continue
-                if "1" <= ac0 <= "9":
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        val = _decimalFromStr(arg)
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and arg[1] in digits):
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        if len(arg) >= 2 and (
-                            arg[1] in ("x", "o", "b")
-                            or (ac0 in ("+", "-") and len(arg) >= 3 and arg[2] in ("x", "o", "b"))
-                        ):
-                            iv = intFn(arg.replace("_", "") if "_" in arg else arg, 0)
-                            rc = arg[2] if ac0 in ("+", "-") else arg[1]
-                            val = hexCls(iv) if rc == "x" else (octCls(iv) if rc == "o" else binCls(iv))
-                        else:
-                            val = _decimalFromStr(arg)
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                if arg in keywords:
-                    nextEntDiscard = False
-                    if not entDiscard:
-                        val = boolCls(True) if arg == "true" else (boolCls(False) if arg == "false" else nullCls())
-                        if args is None:
-                            args = [val]
-                        else:
-                            args.append(val)
-                    continue
-                failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
-                nextEntDiscard = False
-                break
+                        argsAppend(rawStrCls(arg[q + 1 : len(arg) - q]))
+                        continue
+                    if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and "0" <= arg[1] <= "9"):
+                        argsAppend(decodeRawNumFn(arg))
+                        continue
+                    if arg in keywords:
+                        argsAppend(
+                            boolCls(True) if arg == "true" else (boolCls(False) if arg == "false" else nullCls()),
+                        )
+                        continue
+                    if ac0 == "/":
+                        if "/*" in arg[2:-2]:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        continue
+                    if ac0 == "\\":
+                        continue
+                    failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
 
-            if fb:
-                if fb == ";":
+                if fb:
+                    if fb == ";":
+                        if state == 1:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                            state = 0
+                            continue
+                        if state == 2:
+                            state = 0
+                            continue
+                    elif fb == "{" and state == 1:
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                False,
+                                False,
+                                False,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        state = 0
+                        continue
+                    if lengthHint(tokIter) == 0:
+                        failOffset = endPos - len(fb)
+                    else:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
+
+                if state == 1:
+                    curAppend(nodeCls(name, tag, args, props, []))
+                state = 0
+        else:
+            # HOT LOOP B (RAW): Slashdash-capable chunk
+            for k, pstr, pv, astr, arg, nh, fb in tokIter:
+                if k:
+                    if state != 1 or k in keywords:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    if nodeDiscard or nextEntDiscard:
+                        nextEntDiscard = False
+                        if pv and pv[0] == '"':
+                            try:
+                                unescFn(pv[1:-1])
+                            except ValueError:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                        continue
+                    if not pv:
+                        props[k] = strCls(pstr)
+                        continue
+                    vc = pv[0]
+                    if "1" <= vc <= "9":
+                        if "." not in pv and "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = decCls(intFn(pv, 10), 0)
+                            except ValueError:
+                                props[k] = decodeRawNumFn(pv)
+                        elif "e" not in pv and "E" not in pv:
+                            try:
+                                props[k] = decCls(floatFn(pv), 0)
+                            except ValueError:
+                                props[k] = decCls(floatFn(pv.replace("_", "")), 0)
+                        else:
+                            props[k] = decodeRawNumFn(pv)
+                    elif vc in ("t", "f", "n"):
+                        props[k] = boolCls(True) if pv == "true" else (boolCls(False) if pv == "false" else nullCls())
+                    elif vc == '"':
+                        try:
+                            props[k] = strCls(unescFn(pv[1:-1]))
+                        except ValueError:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                    else:
+                        props[k] = decodeRawNumFn(pv)
+                    continue
+
+                if nh:
                     if nextEntDiscard:
                         failIdx = sdTokIdx
                         nextEntDiscard = False
                         break
-                    if state == 1:
-                        if not nodeDiscard:
-                            curNodes.append(
-                                nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []),
-                            )
+                    if nh == "}":
+                        if not stack:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1 and not nodeDiscard:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                            stackPop()
+                        )
+                        if not pND:
+                            parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                        curNodes = parentNodes
+                        curAppend = parentAppend
+                        state = 2
+                        continue
+                    lc = nh[-1]
+                    if lc == '"':
+                        sp = nh.find(" ")
+                        nName = nh[:sp]
+                        if nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1 and not nodeDiscard:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        name = nName
+                        tag = None
+                        args = [] if curDiscard else [strCls(nh[sp + 2 : -1])]
+                        argsAppend = args.append
+                        props = {}
+                        nodeDiscard = curDiscard
+                        state = 1
+                        continue
+                    if lc == "{":
+                        bName = nh[:-2]
+                        if bName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        if state == 1 and not nodeDiscard:
+                            curAppend(nodeCls(name, tag, args, props, []))
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                bName,
+                                None,
+                                [],
+                                {},
+                                curDiscard,
+                                curDiscard,
+                                curDiscard,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
                         state = 0
                         continue
-                    if state == 2:
-                        state = 0
-                        continue
-                elif fb == "{" and state == 1:
-                    finalArgs = [] if (nodeDiscard or args is None) else args
-                    finalProps = {} if (nodeDiscard or props is None) else props
-                    childDisc = nodeDiscard or nextEntDiscard
-                    nextEntDiscard = False
-                    stackPush(
-                        (
-                            curNodes,
-                            name,
-                            tag,
-                            finalArgs,
-                            finalProps,
-                            nodeDiscard,
-                            childDisc,
-                            curDiscard,
-                            pos,
-                            endPos,
-                            nToks - 1 - lengthHint(tokIter),
-                        ),
-                    )
-                    curNodes = []
-                    curDiscard = childDisc
-                    state = 0
+                    hc0 = nh[0]
+                    if hc0 not in ("/", "("):
+                        if nh in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nTag = None
+                        nName = nh
+                        nDisc = curDiscard
+                    elif hc0 == "/":
+                        nName = nh[3:]
+                        if nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nTag = None
+                        nDisc = True
+                    else:
+                        rp = nh.find(")", 1)
+                        nTag = nh[1:rp]
+                        nName = nh[rp + 1 :]
+                        if nTag in keywords or nName in keywords:
+                            failIdx = nToks - 1 - lengthHint(tokIter)
+                            break
+                        nDisc = curDiscard
+                    if state == 1 and not nodeDiscard:
+                        curAppend(nodeCls(name, tag, args, props, []))
+                    name = nName
+                    tag = nTag
+                    args = []
+                    argsAppend = args.append
+                    props = {}
+                    nodeDiscard = nDisc
+                    state = 1
                     continue
+
+                if astr:
+                    if state != 1:
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+                    entDiscard = nodeDiscard or nextEntDiscard
+                    nextEntDiscard = False
+                    if not entDiscard:
+                        argsAppend(strCls(astr))
+                    continue
+
+                if arg:
+                    ac0 = arg[0]
+                    if state != 1:
+                        if state == 0:
+                            if ac0 == "}":
+                                if not stack:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                parentNodes, parentAppend, pName, pTag, pArgs, pProps, pND, pCD, curDiscard, _, _, _ = (
+                                    stackPop()
+                                )
+                                if not pND:
+                                    parentAppend(nodeCls(pName, pTag, pArgs, pProps, [] if pCD else curNodes))
+                                curNodes = parentNodes
+                                curAppend = parentAppend
+                                state = 2
+                                continue
+                            if (
+                                ac0 not in ('"', "(", "{", "/", "\\", "+", "-")
+                                and not ("0" <= ac0 <= "9")
+                                and not (ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"))
+                                and arg not in keywords
+                            ):
+                                name = arg
+                                tag = None
+                                args = []
+                                argsAppend = args.append
+                                props = {}
+                                nodeDiscard = curDiscard
+                                state = 1
+                                continue
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                        break
+
+                    if ac0 == "{":
+                        childDisc = nodeDiscard or nextEntDiscard
+                        nextEntDiscard = False
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                nodeDiscard,
+                                childDisc,
+                                curDiscard,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        curDiscard = childDisc
+                        state = 0
+                        continue
+                    if ac0 == "/":
+                        if arg[1] == "-":
+                            if nextEntDiscard:
+                                failIdx = sdTokIdx
+                                nextEntDiscard = False
+                                break
+                            nextEntDiscard = True
+                            sdTokIdx = nToks - 1 - lengthHint(tokIter)
+                            continue
+                        if "/*" in arg[2:-2]:
+                            failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                            nextEntDiscard = False
+                            break
+                        continue
+                    if ac0 == "\\":
+                        continue
+                    if ac0 == "}":
+                        failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                        nextEntDiscard = False
+                        break
+
+                    entDiscard = nodeDiscard or nextEntDiscard
+                    if ac0 == '"':
+                        nextEntDiscard = False
+                        inner = arg[1:-1]
+                        if "\\" in inner:
+                            try:
+                                inner = unescFn(inner)
+                            except ValueError:
+                                failIdx = nToks - 1 - lengthHint(tokIter)
+                                break
+                        if not entDiscard:
+                            argsAppend(strCls(inner))
+                        continue
+                    if ac0 == "(":
+                        rp = arg.find(")", 1)
+                        tName = arg[1:rp]
+                        if tName in keywords:
+                            failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                            nextEntDiscard = False
+                            break
+                        vStr = arg[rp + 1 :]
+                        if vStr[0] == '"':
+                            inner = vStr[1:-1]
+                            if "\\" in inner:
+                                try:
+                                    inner = unescFn(inner)
+                                except ValueError:
+                                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                                    nextEntDiscard = False
+                                    break
+                            nextEntDiscard = False
+                            if not entDiscard:
+                                if nativeTagged:
+                                    cv = tagGet(arg, unset)
+                                    if cv is not unset:
+                                        argsAppend(cv)
+                                        continue
+                                    conv = convStrFn(tName, inner)
+                                    if conv is unset:
+                                        failIdx = nToks - 1 - lengthHint(tokIter)
+                                        break
+                                    if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                        tagCache[arg] = conv
+                                    argsAppend(conv)
+                                else:
+                                    argsAppend(strCls(inner, tName))
+                            continue
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            if nativeTagged:
+                                cv = tagGet(arg, unset)
+                                if cv is not unset:
+                                    argsAppend(cv)
+                                    continue
+                                conv = convDecFn(tName, vStr)
+                                if conv is unset:
+                                    failIdx = nToks - 1 - lengthHint(tokIter)
+                                    break
+                                if not isinstance(conv, valueCls) and len(tagCache) < 1024:
+                                    tagCache[arg] = conv
+                                argsAppend(conv)
+                            else:
+                                dObj = decodeRawNumFn(vStr)
+                                dObj.tag = tName
+                                argsAppend(dObj)
+                        continue
+                    if ac0 == "r" and len(arg) > 1 and arg[1] in ('"', "#"):
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            q = arg.find('"', 1)
+                            argsAppend(rawStrCls(arg[q + 1 : len(arg) - q]))
+                        continue
+                    if "1" <= ac0 <= "9":
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            if "." not in arg and "e" not in arg and "E" not in arg:
+                                try:
+                                    argsAppend(decCls(intFn(arg, 10), 0))
+                                except ValueError:
+                                    argsAppend(decodeRawNumFn(arg))
+                            elif "e" not in arg and "E" not in arg:
+                                try:
+                                    argsAppend(decCls(floatFn(arg), 0))
+                                except ValueError:
+                                    argsAppend(decCls(floatFn(arg.replace("_", "")), 0))
+                            else:
+                                argsAppend(decodeRawNumFn(arg))
+                        continue
+                    if ac0 == "0" or (ac0 in ("+", "-") and len(arg) > 1 and "0" <= arg[1] <= "9"):
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            argsAppend(decodeRawNumFn(arg))
+                        continue
+                    if arg in keywords:
+                        nextEntDiscard = False
+                        if not entDiscard:
+                            argsAppend(
+                                boolCls(True) if arg == "true" else (boolCls(False) if arg == "false" else nullCls()),
+                            )
+                        continue
+                    failIdx = sdTokIdx if nextEntDiscard else (nToks - 1 - lengthHint(tokIter))
+                    nextEntDiscard = False
+                    break
+
+                if fb:
+                    if fb == ";":
+                        if nextEntDiscard:
+                            failIdx = sdTokIdx
+                            nextEntDiscard = False
+                            break
+                        if state == 1:
+                            if not nodeDiscard:
+                                curAppend(nodeCls(name, tag, args, props, []))
+                            state = 0
+                            continue
+                        if state == 2:
+                            state = 0
+                            continue
+                    elif fb == "{" and state == 1:
+                        childDisc = nodeDiscard or nextEntDiscard
+                        nextEntDiscard = False
+                        stackPush(
+                            (
+                                curNodes,
+                                curAppend,
+                                name,
+                                tag,
+                                args,
+                                props,
+                                nodeDiscard,
+                                childDisc,
+                                curDiscard,
+                                pos,
+                                endPos,
+                                nToks - 1 - lengthHint(tokIter),
+                            ),
+                        )
+                        curNodes = []
+                        curAppend = curNodes.append
+                        curDiscard = childDisc
+                        state = 0
+                        continue
+                    if nextEntDiscard:
+                        failIdx = sdTokIdx
+                        nextEntDiscard = False
+                    elif lengthHint(tokIter) == 0:
+                        failOffset = endPos - len(fb)
+                    else:
+                        failIdx = nToks - 1 - lengthHint(tokIter)
+                    break
+
                 if nextEntDiscard:
                     failIdx = sdTokIdx
                     nextEntDiscard = False
-                elif lengthHint(tokIter) == 0:
-                    failOffset = endPos - len(fb)
-                else:
-                    failIdx = nToks - 1 - lengthHint(tokIter)
-                break
-
-            if nextEntDiscard:
-                failIdx = sdTokIdx
-                nextEntDiscard = False
-                break
-            if state == 1 and not nodeDiscard:
-                curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
-            state = 0
+                    break
+                if state == 1 and not nodeDiscard:
+                    curAppend(nodeCls(name, tag, args, props, []))
+                state = 0
 
         if failIdx < 0 and failOffset < 0:
             if nextEntDiscard:
@@ -2211,6 +4863,8 @@ def _parseChunkedRaw(s: Stream) -> Document:
 
         i = failOffset if failOffset >= 0 else _tokenOffset(chars, pos, endPos, failIdx)
         chunkSize = max(256, chunkSize // 4)
+        if s is None:
+            s = Stream(chars, config)
         (
             newPos,
             state,
@@ -2238,16 +4892,21 @@ def _parseChunkedRaw(s: Stream) -> Document:
         )
         if newPos < 0:
             return Document(curNodes)
+        curAppend = curNodes.append
+        argsAppend = args.append
         pos = newPos
 
     if state == 1 and not nodeDiscard:
-        curNodes.append(nodeCls(name, tag, [] if args is None else args, {} if props is None else props, []))
+        curAppend(nodeCls(name, tag, args, props, []))
     if stack:
+        if s is None:
+            s = Stream(chars, config)
         raise ParseError(s, _unclosedBlockPos(chars, stack[-1]), "Hit EOF while searching for end of child list")
     return Document(curNodes)
 
 
 def _applyNodeConverters(s: Stream, node: Node, nodeStart: int, nameEnd: int) -> Node:
+    """Apply the first matching user `nodeConverter` (that does not return `NotImplemented`) to `node`."""
     pf: ParseFragment | None = None
     for convKey, converter in s.config.nodeConverters.items():
         if node.matchesKey(convKey):
@@ -2261,17 +4920,17 @@ def _applyNodeConverters(s: Stream, node: Node, nodeStart: int, nameEnd: int) ->
     return node
 
 
-def _parseDirect(s: Stream) -> Document:
-    """Monolithic iterative parser for tiny inputs (<= 128 chars) and configs with custom converters."""
-    chars = s.chars
-    n = s.length
-    config = s.config
-    fastUntagged = s.fastUntagged
+def _parseDirect(chars: str, config: t.ParseConfig) -> Document:
+    """Monolithic iterative parser for tiny inputs and configs with custom converters (lazy Stream allocation)."""
+    n = len(chars)
     hasNodeConverters = bool(config.nodeConverters)
     hasValConverters = bool(config.valueConverters)
+    fastUntagged = config.nativeUntaggedValues and not hasValConverters
     matchHead = _matchNodeHead
     matchEntry = _matchEntry
     kwMap = _KW_NATIVE
+    atomsGet = _ATOMS.get
+    unset = _UNSET
     keywords = _KEYWORDS
     wsSet = _WS_SET
     nlSet = _NL_SET
@@ -2280,7 +4939,10 @@ def _parseDirect(s: Stream) -> Document:
     strCls = String
     boolCls = Bool
     nullCls = Null
+    decCls = Decimal
+    intFn = int
 
+    s: Stream | None = None
     curNodes: list[Node] = []
     curDiscard = False
     stack: list[_GenFrame] = []
@@ -2296,6 +4958,8 @@ def _parseDirect(s: Stream) -> Document:
             nodeStart = mh.start(1)
             name = mh.group(1)
             if name in keywords:
+                if s is None:
+                    s = Stream(chars, config)
                 raise ParseError(
                     s,
                     nodeStart,
@@ -2305,6 +4969,8 @@ def _parseDirect(s: Stream) -> Document:
             nameEnd = i
         elif li == 3:
             if not stack:
+                if s is None:
+                    s = Stream(chars, config)
                 raise ParseError(s, mh.start(3), "Expected a node")
             i = mh.end()
             (
@@ -2325,12 +4991,16 @@ def _parseDirect(s: Stream) -> Document:
                 if chEnd in ("\n", ";"):
                     i += 1
                 else:
+                    if s is None:
+                        s = Stream(chars, config)
                     if chEnd in wsSet or chEnd == "\\" or (chEnd == "/" and i + 1 < n and chars[i + 1] == "*"):
                         i = _skipNodespace(s, i)
                     i = _skipTerminator(s, i)
             if not pNodeDiscard:
                 built = nodeCls(pName, pTag, pArgs, pProps, [] if pChildDiscard else curNodes)
                 if hasNodeConverters:
+                    if s is None:
+                        s = Stream(chars, config)
                     built = _applyNodeConverters(s, built, pStart, pNameEnd)
                 parentNodes.append(built)
             curNodes = parentNodes
@@ -2340,8 +5010,12 @@ def _parseDirect(s: Stream) -> Document:
             i = mh.end()
             if i >= n:
                 if stack:
+                    if s is None:
+                        s = Stream(chars, config)
                     raise ParseError(s, stack[-1][10], "Hit EOF while searching for end of child list")
                 return Document(curNodes)
+            if s is None:
+                s = Stream(chars, config)
             raise ParseError(
                 s,
                 i,
@@ -2354,6 +5028,8 @@ def _parseDirect(s: Stream) -> Document:
             nameEnd = i
         elif li == 5:
             nodeStart = mh.start(5)
+            if s is None:
+                s = Stream(chars, config)
             tag, tagEnd = _parseTag(s, nodeStart)
             if tagEnd < 0:
                 raise ParseError(
@@ -2372,6 +5048,8 @@ def _parseDirect(s: Stream) -> Document:
             i = nameEnd
         elif li == 4:
             nodeStart = mh.start(4)
+            if s is None:
+                s = Stream(chars, config)
             j = _skipNodespace(s, mh.end())
             if j < n and chars[j] == "(":
                 tag, tagEnd = _parseTag(s, j)
@@ -2388,14 +5066,20 @@ def _parseDirect(s: Stream) -> Document:
             nodeDiscard = True
             i = nameEnd
         elif li == 6:
+            if s is None:
+                s = Stream(chars, config)
             i = _skipBlockComment(s, mh.start(6))
             continue
         elif li == 7:
             nodeStart = mh.start(7)
+            if s is None:
+                s = Stream(chars, config)
             name, i = _parseEscapedString(s, nodeStart)
             nameEnd = i
         else:
             nodeStart = mh.start(8)
+            if s is None:
+                s = Stream(chars, config)
             name, i = _parseRawString(s, nodeStart, mh.end() - nodeStart - 2)
             nameEnd = i
 
@@ -2403,6 +5087,8 @@ def _parseDirect(s: Stream) -> Document:
             if not nodeDiscard:
                 built = nodeCls(name, tag, [], {}, [])
                 if hasNodeConverters:
+                    if s is None:
+                        s = Stream(chars, config)
                     built = _applyNodeConverters(s, built, nodeStart, nameEnd)
                 curNodes.append(built)
             continue
@@ -2412,6 +5098,8 @@ def _parseDirect(s: Stream) -> Document:
             if not nodeDiscard:
                 built = nodeCls(name, tag, [], {}, [])
                 if hasNodeConverters:
+                    if s is None:
+                        s = Stream(chars, config)
                     built = _applyNodeConverters(s, built, nodeStart, nameEnd)
                 curNodes.append(built)
             continue
@@ -2445,6 +5133,8 @@ def _parseDirect(s: Stream) -> Document:
                 enteredChildren = True
                 break
             elif ch in wsSet or ch == "\\" or (ch == "/" and i + 1 < n and chars[i + 1] == "*"):
+                if s is None:
+                    s = Stream(chars, config)
                 nextI = _skipNodespace(s, i)
                 if nextI == i:
                     i = _skipTerminator(s, i)
@@ -2453,6 +5143,8 @@ def _parseDirect(s: Stream) -> Document:
                 if i >= n:
                     break
             elif ch == "/" and i + 1 < n and chars[i + 1] == "-":
+                if s is None:
+                    s = Stream(chars, config)
                 j = _skipNodespace(s, i + 2)
                 if j < n and chars[j] == "{":
                     stack.append(
@@ -2465,6 +5157,8 @@ def _parseDirect(s: Stream) -> Document:
                     break
                 raise ParseError(s, i, "Junk after node, before terminator.")
             else:
+                if s is None:
+                    s = Stream(chars, config)
                 i = _skipTerminator(s, i)
                 break
 
@@ -2484,6 +5178,8 @@ def _parseDirect(s: Stream) -> Document:
                     ch2 = "\n"
                     break
                 if ch2 == "(":
+                    if s is None:
+                        s = Stream(chars, config)
                     val, valEnd = _parseValue(s, i, fastUntagged, nodeDiscard)
                     if valEnd < 0:
                         raise ParseError(s, i, "Junk after node, before terminator.")
@@ -2492,6 +5188,8 @@ def _parseDirect(s: Stream) -> Document:
                         args.append(val)
                     break
                 if ch2 in wsSet or ch2 == "\\" or (ch2 == "/" and i + 1 < n and chars[i + 1] == "*"):
+                    if s is None:
+                        s = Stream(chars, config)
                     nextI = _skipNodespace(s, i)
                     if nextI > i:
                         i = nextI
@@ -2505,6 +5203,8 @@ def _parseDirect(s: Stream) -> Document:
                     chNext = chars[i + 1]
                     if chNext == "-":
                         sdStart = i
+                        if s is None:
+                            s = Stream(chars, config)
                         j = _skipNodespace(s, i + 2)
                         if j < n and chars[j] == "{":
                             stack.append(
@@ -2545,31 +5245,45 @@ def _parseDirect(s: Stream) -> Document:
                     if eli == 3:
                         i = m.end()
                         if not nodeDiscard:
-                            key, numStr = t.cast("tuple[str, str]", m.group(1, 3))
+                            key = m.group(1)
+                            numStr = m.group(3)
                             if fastUntagged:
-                                val = _numFromDecStr(numStr)
+                                av = atomsGet(numStr, unset)
+                                val = av if av is not unset else _numFromDecStr(numStr)
                             else:
-                                val = _decimalFromStr(numStr)
+                                if "." not in numStr and "e" not in numStr and "E" not in numStr:
+                                    try:
+                                        val = decCls(intFn(numStr, 10), 0)
+                                    except ValueError:
+                                        val = _decimalFromStr(numStr)
+                                else:
+                                    val = _decimalFromStr(numStr)
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, m.start(3), i)
                             props[key] = val
                         break
                     if eli == 2:
                         i = m.end()
                         if not nodeDiscard:
-                            key, sVal = t.cast("tuple[str, str]", m.group(1, 2))
+                            key = m.group(1)
+                            sVal = m.group(2)
                             if fastUntagged:
                                 val = sVal
                             else:
                                 val = strCls(sVal)
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, m.start(2) - 1, i)
                             props[key] = val
                         break
                     if eli == 4:
                         i = m.end()
                         if not nodeDiscard:
-                            key, kw = t.cast("tuple[str, str]", m.group(1, 4))
+                            key = m.group(1)
+                            kw = m.group(4)
                             if fastUntagged:
                                 val = kwMap[kw]
                             else:
@@ -2577,6 +5291,8 @@ def _parseDirect(s: Stream) -> Document:
                                     boolCls(True) if kw == "true" else (boolCls(False) if kw == "false" else nullCls())
                                 )
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, m.start(4), i)
                             props[key] = val
                         break
@@ -2589,23 +5305,37 @@ def _parseDirect(s: Stream) -> Document:
                             else:
                                 val = strCls(sVal)
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, m.start(6) - 1, i)
                             args.append(val)
                         break
                     if eli == 7:
                         i = m.end()
                         if not nodeDiscard:
+                            numStr = m.group(7)
                             if fastUntagged:
-                                val = _numFromDecStr(m.group(7))
+                                av = atomsGet(numStr, unset)
+                                val = av if av is not unset else _numFromDecStr(numStr)
                             else:
-                                val = _decimalFromStr(m.group(7))
+                                if "." not in numStr and "e" not in numStr and "E" not in numStr:
+                                    try:
+                                        val = decCls(intFn(numStr, 10), 0)
+                                    except ValueError:
+                                        val = _decimalFromStr(numStr)
+                                else:
+                                    val = _decimalFromStr(numStr)
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, m.start(7), i)
                             args.append(val)
                         break
                     if eli == 5:
                         key = m.group(1)
                         valStart = m.end()
+                        if s is None:
+                            s = Stream(chars, config)
                         val, valEnd = _parseValue(s, valStart, fastUntagged, nodeDiscard)
                         if valEnd < 0:
                             raise ParseError(s, valStart, "Expected value after prop=.")
@@ -2626,16 +5356,22 @@ def _parseDirect(s: Stream) -> Document:
                                     else (boolCls(False) if tok == "false" else nullCls())
                                 )
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, i, endPos)
                             args.append(val)
                         i = endPos
                         break
+                    if s is None:
+                        s = Stream(chars, config)
                     if tok.lower() in keywords:
                         raise ParseError(s, i, "KDL keywords are lower-case.")
                     raise ParseError(s, i, "Junk after node, before terminator.")
 
                 if ch2 == '"':
                     strStart = i
+                    if s is None:
+                        s = Stream(chars, config)
                     strVal, strEnd = _parseEscapedString(s, strStart)
                     if strEnd < n and chars[strEnd] == "=":
                         val, valEnd = _parseValue(s, strEnd + 1, fastUntagged, nodeDiscard)
@@ -2661,6 +5397,8 @@ def _parseDirect(s: Stream) -> Document:
                         j += 1
                     if j < n and chars[j] == '"':
                         rawStart = i
+                        if s is None:
+                            s = Stream(chars, config)
                         rawVal, strEnd = _parseRawString(s, rawStart, j - i - 1)
                         if strEnd < n and chars[strEnd] == "=":
                             val, valEnd = _parseValue(s, strEnd + 1, fastUntagged, nodeDiscard)
@@ -2682,6 +5420,8 @@ def _parseDirect(s: Stream) -> Document:
                         break
                 if ch2 in digits or (ch2 in ("+", "-") and i + 1 < n and chars[i + 1] in digits):
                     numStart = i
+                    if s is None:
+                        s = Stream(chars, config)
                     val, valEnd = _parseNumber(s, numStart, fastUntagged, nodeDiscard)
                     i = valEnd
                     if not nodeDiscard:
@@ -2706,10 +5446,14 @@ def _parseDirect(s: Stream) -> Document:
                                     boolCls(True) if kw == "true" else (boolCls(False) if kw == "false" else nullCls())
                                 )
                                 if hasValConverters:
+                                    if s is None:
+                                        s = Stream(chars, config)
                                     val = _finalizeValue(s, val, None, i, endPos)
                             args.append(val)
                         i = endPos
                         break
+                if s is None:
+                    s = Stream(chars, config)
                 if ch2 == "'":
                     raise ParseError(s, i, "KDL strings use double-quotes.")
                 raise ParseError(s, i, "Junk after node, before terminator.")
@@ -2720,15 +5464,20 @@ def _parseDirect(s: Stream) -> Document:
         if not enteredChildren and not nodeDiscard:
             built = nodeCls(name, tag, args, props, [])
             if hasNodeConverters:
+                if s is None:
+                    s = Stream(chars, config)
                 built = _applyNodeConverters(s, built, nodeStart, nameEnd)
             curNodes.append(built)
 
 
 def parse(input: str, config: t.ParseConfig | None = None) -> Document:
+    """Parse a KDL 1.0 document, routing to the fastest tier compatible with `config` and input size."""
     config = config or parsing.defaults
-    s = Stream(input, config)
-    if s.length > 128 and not config.valueConverters and not config.nodeConverters:
+    if not input:
+        return Document()
+    if not config.valueConverters and not config.nodeConverters:
         if config.nativeUntaggedValues:
-            return _parseChunkedNative(s)
-        return _parseChunkedRaw(s)
-    return _parseDirect(s)
+            return _parseChunkedNative(input, config)
+        if len(input) > 128:
+            return _parseChunkedRaw(input, config)
+    return _parseDirect(input, config)
