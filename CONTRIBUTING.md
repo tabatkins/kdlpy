@@ -21,6 +21,7 @@ Python Version & Dependencies
 
 * Target **Python 3.12+** (use modern features such as `from __future__ import annotations`, PEP 695 `type` aliases and generic functions, `@t.override`, `match`/`case`, and `collections.abc`).
 * Keep the runtime library dependency-free (Python standard library only).
+* Development has several dependencies, tracked in `requirements-dev.txt`, needed for linting/etc. These can be installed with `pip install -r requirements-dev.txt`, ideally in a virtual environment (such as with `pyenv` or `uv`).
 
 Naming
 ------
