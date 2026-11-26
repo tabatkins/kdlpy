@@ -100,6 +100,8 @@ Document(
     ],
     printConfig=None
 )
+>>> doc[0]["child_node"]("bar")
+True
 ```
 
 You can also create a `kdl.Parser()` object and call its `.parse()` method; `Parser` objects can set up parsing and printing options that'll apply by default. See [Customizing Parsing](#customizing-parsing) and [Customizing Printing](#customizing-printing) below.
